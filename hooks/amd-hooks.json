@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-              "command": "C:\\Users\\chenj\\AppData\\Local\\Microsoft\\WinGet\\Packages\\OpenJS.NodeJS.LTS_Microsoft.Winget.Source_8wekyb3d8bbwe\\node-v24.15.0-win-x64\\node.exe C:\\Users\\chenj\\dev\\codex-honcho-sync\\scripts\\codex_honcho_turn_gate.mjs",
+              "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$node=$env:CODEX_HONCHO_NODE; if (-not $node) { $node=[Environment]::GetEnvironmentVariable('CODEX_HONCHO_NODE','User') }; $root=$env:CODEX_HONCHO_SYNC_ROOT; if (-not $root) { $root=[Environment]::GetEnvironmentVariable('CODEX_HONCHO_SYNC_ROOT','User') }; & $node (Join-Path $root 'scripts\\codex_honcho_turn_gate.mjs')\"",
             "timeout": 120,
             "statusMessage": "Syncing Codex turn to Honcho"
           }

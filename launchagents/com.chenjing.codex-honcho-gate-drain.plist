@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chenjing.codex-honcho-gate-drain</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-lc</string>
+        <string>exec "$CODEX_HONCHO_NODE" "$CODEX_HONCHO_SYNC_ROOT/scripts/codex_honcho_turn_gate.mjs" --drain-if-due</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/chenjing/.hermes/logs/codex-honcho-turn-gate-drain.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chenjing/.hermes/logs/codex-honcho-turn-gate-drain.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/chenjing</string>
+        <key>CODEX_HONCHO_NODE</key>
+        <string>/opt/homebrew/bin/node</string>
+        <key>CODEX_HONCHO_SYNC_ROOT</key>
+        <string>/Users/chenjing/dev/codex-honcho-sync</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/chenjing</string>
+</dict>
+</plist>

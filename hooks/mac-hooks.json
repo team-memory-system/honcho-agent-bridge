@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-              "command": "/opt/homebrew/bin/node /Users/chenjing/dev/codex-honcho-sync/scripts/codex_honcho_turn_gate.mjs",
+              "command": "/bin/sh -lc 'CODEX_HONCHO_NODE=\"${CODEX_HONCHO_NODE:-$(launchctl getenv CODEX_HONCHO_NODE)}\"; CODEX_HONCHO_SYNC_ROOT=\"${CODEX_HONCHO_SYNC_ROOT:-$(launchctl getenv CODEX_HONCHO_SYNC_ROOT)}\"; exec \"$CODEX_HONCHO_NODE\" \"$CODEX_HONCHO_SYNC_ROOT/scripts/codex_honcho_turn_gate.mjs\"'",
             "timeout": 120,
             "statusMessage": "Syncing Codex turn to Honcho"
           }
