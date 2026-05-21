@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+              "command": "/opt/homebrew/bin/node /Users/chenjing/dev/codex-honcho-sync/scripts/codex_honcho_turn_gate.mjs",
+            "timeout": 120,
+            "statusMessage": "Syncing Codex turn to Honcho"
+          }
+        ]
+      }
+    ]
+  }
+}
