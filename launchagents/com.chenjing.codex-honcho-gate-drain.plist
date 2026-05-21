@@ -8,7 +8,7 @@
     <array>
         <string>/bin/sh</string>
         <string>-lc</string>
-        <string>exec "$CODEX_HONCHO_NODE" "$CODEX_HONCHO_SYNC_ROOT/scripts/codex_honcho_turn_gate.mjs" --drain-if-due</string>
+        <string>set -a; . "$HOME/.config/codex-honcho-sync/.env"; set +a; exec "$CODEX_HONCHO_NODE" "$CODEX_HONCHO_SYNC_ROOT/scripts/codex_honcho_turn_gate.mjs" --drain-if-due</string>
     </array>
     <key>StartInterval</key>
     <integer>300</integer>
@@ -24,10 +24,6 @@
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>/Users/chenjing</string>
-        <key>CODEX_HONCHO_NODE</key>
-        <string>/opt/homebrew/bin/node</string>
-        <key>CODEX_HONCHO_SYNC_ROOT</key>
-        <string>/Users/chenjing/dev/codex-honcho-sync</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>/Users/chenjing</string>

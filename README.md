@@ -12,23 +12,20 @@ Shared Codex hook scripts for syncing Codex conversations into Honcho.
 
 ## Runtime Paths
 
-Set these environment variables on each machine:
-
-- `CODEX_HONCHO_SYNC_ROOT`: path to this repository.
-- `CODEX_HONCHO_NODE`: path to the Node executable.
+Create a local `.env` file on each machine. This file is intentionally not stored in the repo.
 
 macOS:
 
-- `CODEX_HONCHO_SYNC_ROOT=/Users/chenjing/dev/codex-honcho-sync`
-- `CODEX_HONCHO_NODE=/opt/homebrew/bin/node`
+- env file: `~/.config/codex-honcho-sync/.env`
+- example: `config/macos.env.example`
 - `~/.codex/hooks.json`
 
 AMD Windows:
 
-- `CODEX_HONCHO_SYNC_ROOT=C:\Users\chenj\dev\codex-honcho-sync`
-- `CODEX_HONCHO_NODE=C:\Users\chenj\AppData\Local\Microsoft\WinGet\Packages\OpenJS.NodeJS.LTS_Microsoft.Winget.Source_8wekyb3d8bbwe\node-v24.15.0-win-x64\node.exe`
+- env file: `C:\Users\chenj\.config\codex-honcho-sync\.env`
+- example: `config/windows.env.example`
 - `C:\Users\chenj\.codex\hooks.json`
 
 The scripts are run on demand by Codex hooks or scheduled drain jobs. They are not long-running Node services.
 
-The hook templates read `CODEX_HONCHO_SYNC_ROOT` and `CODEX_HONCHO_NODE` at runtime instead of embedding script paths directly.
+The hook templates read `CODEX_HONCHO_SYNC_ROOT` and `CODEX_HONCHO_NODE` from the fixed `.env` path at runtime instead of embedding script paths directly.
