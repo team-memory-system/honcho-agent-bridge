@@ -27,5 +27,6 @@ AMD Windows:
 - `C:\Users\chenj\.codex\hooks.json`
 
 The scripts are run on demand by Codex hooks or scheduled drain jobs. They are not long-running Node services.
+Scheduled `--drain-if-due` runs only when the gate detects an external network; manual `--drain` still runs on any network.
 
 The hook templates read `CODEX_HONCHO_SYNC_ROOT` and `CODEX_HONCHO_NODE` from the fixed `.env` path at runtime instead of embedding script paths directly.

@@ -306,6 +306,14 @@ async function main() {
   }
 
   const mode = detectMode(args.mode);
+  if (args.drainIfDue && mode !== "external") {
+    return {
+      ok: true,
+      mode,
+      skipped: "drain-if-due only runs on external network",
+    };
+  }
+
   const threshold = mode === "internal" ? INTERNAL_BATCH_SIZE : EXTERNAL_BATCH_SIZE;
   const pending = await readPendingEntries();
   const effectivePending = dryRunEntry ? [...pending, dryRunEntry] : pending;
