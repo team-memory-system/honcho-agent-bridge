@@ -318,6 +318,90 @@ test("host start waits for proxy, Ollama, and model residency instead of accepti
   assert.ok(psCalls >= 3);
 });
 
+async function windowsStopFixture(t) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-host-stop-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const homeDir = path.join(root, "user");
+  const appHome = path.join(root, "app");
+  const serverDir = path.join(appHome, "server");
+  const env = { HOME: homeDir, AGENT_MEMORY_HOME: appHome };
+  const paths = resolveHostPaths({ installedServerDir: serverDir, platform: "win32", env, homeDir });
+  await fsp.mkdir(paths.runtimeDir, { recursive: true });
+  await fsp.writeFile(paths.configFile, JSON.stringify({
+    format: 1,
+    profile: "personal",
+    proxy: { enabled: false, baseUrl: "http://127.0.0.1:11435" },
+    ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434", executable: "ollama", model: "unused" },
+    state: { configFile: paths.configFile, disabledFile: paths.disabledFile, pidFile: paths.pidFile, logDir: paths.logDir },
+    supervisorFile: paths.supervisorFile,
+    startup: { kind: "windows-task", path: path.join(paths.runtimeDir, "task.xml"), label: "AgentMemoryHost" },
+  }));
+  await fsp.writeFile(paths.pidFile, JSON.stringify({
+    pid: 4242,
+    startedAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+    configFile: paths.configFile,
+    supervisorFile: paths.supervisorFile,
+  }));
+  return { homeDir, appHome, serverDir, env, paths };
+}
+
+test("Windows host stop does not report success when taskkill fails", async (t) => {
+  const fixture = await windowsStopFixture(t);
+  const calls = [];
+  const result = await hostStop({
+    profile: "personal",
+    installedServerDir: fixture.serverDir,
+    platform: "win32",
+    env: fixture.env,
+    homeDir: fixture.homeDir,
+    gracefulStopTimeoutMs: 0,
+    forcedStopTimeoutMs: 0,
+    isProcessAlive: () => true,
+    run: async (command, args) => {
+      calls.push({ command, args });
+      if (command === "taskkill") return { ok: false };
+      return { ok: true };
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.stopped, false);
+  assert.equal(result.signaled, false);
+  assert.ok(calls.some((item) => item.command === "taskkill" && item.args.includes("/F")));
+});
+
+test("Windows host stop tracks the original process after its PID file disappears", async (t) => {
+  const fixture = await windowsStopFixture(t);
+  let alive = true;
+  const calls = [];
+  const result = await hostStop({
+    profile: "personal",
+    installedServerDir: fixture.serverDir,
+    platform: "win32",
+    env: fixture.env,
+    homeDir: fixture.homeDir,
+    gracefulStopTimeoutMs: 0,
+    forcedStopTimeoutMs: 0,
+    isProcessAlive: () => alive,
+    run: async (command, args) => {
+      calls.push({ command, args });
+      if (command === "schtasks.exe") {
+        await fsp.rm(fixture.paths.pidFile, { force: true });
+        return { ok: true };
+      }
+      if (command === "taskkill") {
+        alive = false;
+        return { ok: true };
+      }
+      return { ok: true };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.stopped, true);
+  assert.equal(result.signaled, true);
+  assert.ok(calls.some((item) => item.command === "taskkill" && item.args.includes("4242")));
+});
+
 test("Windows start keeps the logon task and directly launches when no interactive token is available", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-windows-task-fallback-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));

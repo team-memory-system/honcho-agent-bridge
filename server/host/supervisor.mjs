@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -261,10 +262,24 @@ async function shutdown(config, reason) {
   log("supervisor-stopping", { reason });
   if (proxyRestartTimer) clearTimeout(proxyRestartTimer);
   for (const timer of timers) clearInterval(timer);
-  proxyChild?.kill();
-  ollamaChild?.kill();
+  const stopChild = async (child) => {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    child.kill();
+    await Promise.race([
+      once(child, "exit").catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 750)),
+    ]);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([
+        once(child, "exit").catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 250)),
+      ]);
+    }
+  };
+  await Promise.all([stopChild(proxyChild), stopChild(ollamaChild)]);
   await removeOwnPid(config);
-  setTimeout(() => process.exit(0), 1_000).unref();
+  process.exit(0);
 }
 
 async function main() {

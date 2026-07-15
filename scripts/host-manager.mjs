@@ -820,36 +820,54 @@ async function deactivateStartup(config, run, env) {
 export async function hostStop(options = {}) {
   const paths = resolveHostPaths(options);
   const config = await readRuntimeConfig(paths);
+  const initialPid = config ? await pidState(config.state.pidFile) : { record: null, running: false, heartbeatAgeMs: null };
   await fsp.mkdir(paths.runtimeDir, { recursive: true });
   await writeAtomic(paths.disabledFile, `${JSON.stringify({ disabledAt: new Date().toISOString() })}\n`, 0o600);
   if (!config) return { ok: true, stopped: false, disabled: true, reason: "host runtime is not installed" };
   const run = options.run || defaultRun;
   const env = options.env || process.env;
-  let pid = await pidState(config.state.pidFile);
-  const deadline = Date.now() + 3_000;
-  while (pid.running && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    pid = await pidState(config.state.pidFile);
+  const isProcessAlive = options.isProcessAlive || processAlive;
+  const wait = options.wait || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  const originalPid = Number(initialPid.record?.pid || 0);
+  const identityMatches = initialPid.record?.configFile === config.state.configFile
+    && initialPid.record?.supervisorFile === config.supervisorFile;
+  const originalRunning = originalPid > 0 && isProcessAlive(originalPid);
+  const gracefulDeadline = Date.now() + (options.gracefulStopTimeoutMs ?? 3_000);
+  while (originalRunning && isProcessAlive(originalPid) && Date.now() < gracefulDeadline) {
+    await wait(options.stopPollMs ?? 150);
   }
   await deactivateStartup(config, run, env);
-  pid = await pidState(config.state.pidFile);
   let signaled = false;
-  const identityMatches = pid.record?.configFile === config.state.configFile && pid.record?.supervisorFile === config.supervisorFile;
-  if (pid.running && identityMatches && pid.heartbeatAgeMs < 60_000) {
+  let signalFailed = false;
+  if (originalRunning && isProcessAlive(originalPid) && identityMatches && initialPid.heartbeatAgeMs < 60_000) {
     try {
-      if ((options.platform || process.platform) === "win32") await runWith(run, "taskkill", ["/PID", String(pid.record.pid), "/T"], { env, timeout: 10_000 });
-      else (options.killProcess || process.kill)(pid.record.pid, "SIGTERM");
-      signaled = true;
-    } catch {}
+      if ((options.platform || process.platform) === "win32") {
+        const killed = await runWith(run, "taskkill", ["/PID", String(originalPid), "/T", "/F"], { env, timeout: 10_000 });
+        signaled = killed.ok;
+        signalFailed = !killed.ok;
+      } else {
+        (options.killProcess || process.kill)(originalPid, "SIGTERM");
+        signaled = true;
+      }
+    } catch { signalFailed = true; }
+  }
+  if (signaled) {
+    const forcedDeadline = Date.now() + (options.forcedStopTimeoutMs ?? 5_000);
+    while (isProcessAlive(originalPid) && Date.now() < forcedDeadline) {
+      await wait(options.stopPollMs ?? 150);
+    }
   }
   if (config.ollama.enabled) await runWith(run, config.ollama.executable, ["stop", config.ollama.model], { env, timeout: 30_000 });
+  const stopped = !originalRunning || !isProcessAlive(originalPid);
   return {
-    ok: true,
-    stopped: !pid.running || signaled,
+    ok: stopped,
+    stopped,
     disabled: true,
     signaled,
     preservedAdapter: true,
     preservedConfig: true,
-    warning: pid.running && !identityMatches ? "A stale PID was not signaled because its ownership could not be verified" : null,
+    warning: originalRunning && !identityMatches
+      ? "A stale PID was not signaled because its ownership could not be verified"
+      : (!stopped && signalFailed ? "The host supervisor could not be terminated" : (!stopped ? "The host supervisor is still running" : null)),
   };
 }
