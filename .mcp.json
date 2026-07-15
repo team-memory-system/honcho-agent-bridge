@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agent-memory-honcho": {
+      "command": "node",
+      "args": ["./scripts/mcp-server.mjs", "--provider", "codex"],
+      "cwd": "."
+    }
+  }
+}

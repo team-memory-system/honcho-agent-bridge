@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "codexProxy": {
+    "enabled": true,
+    "baseUrl": "http://127.0.0.1:11435",
+    "defaultModel": "gpt-5.6-sol"
+  },
+  "ollama": {
+    "enabled": true,
+    "baseUrl": "http://127.0.0.1:11434",
+    "model": "qwen3-embedding-honcho-8192",
+    "baseModel": "qwen3-embedding:8b",
+    "contextLength": 8192,
+    "dimensions": 1536,
+    "keepAlive": -1,
+    "warmIntervalMs": 300000,
+    "manageService": true
+  }
+}

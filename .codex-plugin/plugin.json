@@ -1,0 +1,26 @@
+{
+  "name": "agent-memory",
+  "version": "0.2.0",
+  "description": "Install and operate a self-hosted personal memory for Codex and Claude Code.",
+  "author": {
+    "name": "chenjing"
+  },
+  "license": "UNLICENSED",
+  "keywords": ["memory", "honcho", "codex", "claude-code", "self-hosted"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Agent Memory",
+    "shortDescription": "Self-hosted memory for coding agents",
+    "longDescription": "Set up and operate one local personal memory shared by Codex and Claude Code, including an optional bundled Honcho Docker server.",
+    "developerName": "chenjing",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Set up my personal agent memory.",
+      "Diagnose my local agent memory installation.",
+      "Recall relevant context from Honcho memory."
+    ],
+    "screenshots": []
+  }
+}

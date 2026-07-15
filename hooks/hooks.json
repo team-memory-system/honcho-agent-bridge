@@ -1,0 +1,17 @@
+{
+  "description": "Send completed Claude Code turns through the shared personal-memory runtime after setup.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/cli.mjs\" hook claude",
+            "timeout": 120,
+            "statusMessage": "Syncing conversation to personal memory"
+          }
+        ]
+      }
+    ]
+  }
+}

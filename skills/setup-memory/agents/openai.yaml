@@ -1,0 +1,4 @@
+interface:
+  display_name: "Set up agent memory"
+  short_description: "Install, diagnose, and update the local memory runtime"
+  default_prompt: "Use $setup-memory to install or diagnose my local agent memory system."

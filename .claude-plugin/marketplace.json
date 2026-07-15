@@ -1,0 +1,19 @@
+{
+  "name": "agent-memory",
+  "owner": {
+    "name": "chenjing"
+  },
+  "metadata": {
+    "description": "Self-hosted personal memory for coding agents",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "agent-memory",
+      "source": "./",
+      "description": "Install one shared personal memory runtime for Codex and Claude Code.",
+      "category": "productivity",
+      "tags": ["memory", "honcho", "codex", "claude-code"]
+    }
+  ]
+}

@@ -5,19 +5,19 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SPOOL_ROOT = expandHome(process.env.HONCHO_CODEX_GATE_SPOOL || "~/.hermes/spool/codex-honcho");
 const PENDING_DIR = path.join(SPOOL_ROOT, "pending");
 const LOG_PATH = expandHome(process.env.HONCHO_CODEX_GATE_LOG || "~/.hermes/logs/codex-honcho-turn-gate.log");
-const IMPORTER_PATH = expandHome(process.env.HONCHO_CODEX_IMPORTER || path.join(SCRIPT_DIR, "codex_honcho_turn_ended.mjs"));
+const IMPORTER_PATH = expandHome(process.env.HONCHO_CODEX_IMPORTER || path.join(SCRIPT_DIR, "collector.mjs"));
 const IMPORTER_EXEC = process.env.HONCHO_CODEX_IMPORTER_EXEC || "";
 const INTERNAL_BATCH_SIZE = numberEnv("HONCHO_CODEX_INTERNAL_BATCH_SIZE", 1);
 const EXTERNAL_BATCH_SIZE = numberEnv("HONCHO_CODEX_EXTERNAL_BATCH_SIZE", 10);
 const LOCK_STALE_MS = numberEnv("HONCHO_CODEX_GATE_LOCK_STALE_MS", 120_000);
 const MAX_DELAY_SECONDS = numberEnv("HONCHO_CODEX_GATE_MAX_DELAY_SECONDS", 300);
-const DEFAULT_LOCAL_HONCHO_BASE_URL = "http://127.0.0.1:8001";
-const DEFAULT_WINDOWS_HONCHO_BASE_URL = "https://honcho-api.chenjing.org";
+const DEFAULT_HONCHO_BASE_URL = "http://127.0.0.1:8001";
 
 function expandHome(value) {
   if (value === "~") return os.homedir();
@@ -42,10 +42,6 @@ function windowsUserEnv(name) {
   return String(result.stdout || "").trim();
 }
 
-function defaultHonchoBaseUrl() {
-  return process.platform === "win32" ? DEFAULT_WINDOWS_HONCHO_BASE_URL : DEFAULT_LOCAL_HONCHO_BASE_URL;
-}
-
 function importerEnv() {
   const env = {
     ...process.env,
@@ -54,7 +50,7 @@ function importerEnv() {
     HONCHO_CODEX_DREAM_EVERY_MESSAGES: "0",
   };
 
-  env.HONCHO_BASE_URL = env.HONCHO_BASE_URL || windowsUserEnv("HONCHO_BASE_URL") || defaultHonchoBaseUrl();
+  env.HONCHO_BASE_URL = env.HONCHO_BASE_URL || windowsUserEnv("HONCHO_BASE_URL") || DEFAULT_HONCHO_BASE_URL;
   const token = env.HONCHO_API_BEARER_TOKEN || windowsUserEnv("HONCHO_API_BEARER_TOKEN");
   if (token) env.HONCHO_API_BEARER_TOKEN = token;
   return env;
@@ -104,7 +100,7 @@ function pickTranscriptPath(args, hookInput) {
   return "";
 }
 
-async function enqueue(transcriptPath) {
+async function enqueue(transcriptPath, hookInput = {}) {
   await fsp.mkdir(PENDING_DIR, { recursive: true });
   const id = `${utcNow().replace(/[^0-9A-Za-z]+/g, "-")}-${crypto.randomUUID()}`;
   const tmpPath = path.join(PENDING_DIR, `${id}.tmp`);
@@ -113,6 +109,9 @@ async function enqueue(transcriptPath) {
     transcript_path: transcriptPath,
     created_at: utcNow(),
   };
+  if (process.env.HONCHO_GATE_PASS_HOOK_INPUT === "1") {
+    entry.hook_input = hookInput;
+  }
   await fsp.writeFile(tmpPath, JSON.stringify(entry, null, 2), "utf8");
   await fsp.rename(tmpPath, finalPath);
   return finalPath;
@@ -127,7 +126,12 @@ async function readPendingEntries() {
     try {
       const entry = JSON.parse(await fsp.readFile(filePath, "utf8"));
       if (entry && typeof entry.transcript_path === "string" && entry.transcript_path.trim()) {
-        entries.push({ filePath, transcriptPath: entry.transcript_path.trim(), createdAt: entry.created_at || "" });
+        entries.push({
+          filePath,
+          transcriptPath: entry.transcript_path.trim(),
+          createdAt: entry.created_at || "",
+          hookInput: entry.hook_input && typeof entry.hook_input === "object" ? entry.hook_input : {},
+        });
       }
     } catch (error) {
       await logLine(`BAD_QUEUE_FILE ${filePath} ${error?.message || error}`);
@@ -163,7 +167,7 @@ function activeSsid() {
 }
 
 function hasInternalIp() {
-  const prefixes = envList("HONCHO_CODEX_INTERNAL_IP_PREFIXES", "192.168.0.");
+  const prefixes = envList("HONCHO_CODEX_INTERNAL_IP_PREFIXES", "");
   for (const net of Object.values(os.networkInterfaces())) {
     for (const item of net || []) {
       if (item.family === "IPv4" && prefixes.some((prefix) => item.address.startsWith(prefix))) return true;
@@ -179,40 +183,22 @@ function detectMode(forcedMode) {
   if (mode === "internal" || mode === "external") return mode;
 
   const ssid = activeSsid();
-  const internalSsids = envList("HONCHO_CODEX_INTERNAL_SSIDS", "chenjing5G,chenjing2G");
+  const internalSsids = envList("HONCHO_CODEX_INTERNAL_SSIDS", "");
   if (ssid && internalSsids.includes(ssid)) return "internal";
   if (hasInternalIp()) return "internal";
   return "external";
 }
 
-async function acquireLock() {
-  await fsp.mkdir(SPOOL_ROOT, { recursive: true });
-  const lockPath = path.join(SPOOL_ROOT, "drain.lock");
-  try {
-    const handle = await fsp.open(lockPath, "wx");
-    await handle.writeFile(String(process.pid), "utf8");
-    return { handle, lockPath };
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    try {
-      const stat = await fsp.stat(lockPath);
-      if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
-        await fsp.unlink(lockPath).catch(() => {});
-        return acquireLock();
-      }
-    } catch {}
-    return null;
-  }
-}
-
 async function withDrainLock(fn) {
-  const lock = await acquireLock();
+  const lock = await acquireFileLock(path.join(SPOOL_ROOT, "drain.lock"), {
+    attempts: 1,
+    staleMs: LOCK_STALE_MS,
+  });
   if (!lock) return { ok: false, skipped: "drain already running" };
   try {
     return await fn();
   } finally {
-    await lock.handle.close().catch(() => {});
-    await fsp.unlink(lock.lockPath).catch(() => {});
+    await releaseFileLock(lock);
   }
 }
 
@@ -235,10 +221,13 @@ function importerCommand() {
   return { command: process.execPath, args: [IMPORTER_PATH] };
 }
 
-function runImporter(transcriptPath, dryRun) {
+function runImporter(transcriptPath, dryRun, hookInputFile = "") {
   const importer = importerCommand();
   const args = [...importer.args, "--rollout", transcriptPath];
   if (dryRun) args.push("--dry-run");
+  if (process.env.HONCHO_GATE_PASS_HOOK_INPUT === "1" && hookInputFile) {
+    args.push("--hook-input-file", hookInputFile);
+  }
   const result = spawnSync(importer.command, args, { encoding: "utf8", env: importerEnv() });
   const parsed = parseImporterResult(result.stdout);
   if (result.error) return { ok: false, error: result.error.message };
@@ -264,7 +253,7 @@ async function drainPending(dryRun, extraEntries = []) {
 
   const results = [];
   for (const [transcriptPath, group] of groups) {
-    const result = runImporter(transcriptPath, dryRun);
+    const result = runImporter(transcriptPath, dryRun, group.find((entry) => entry.filePath)?.filePath || "");
     results.push({ transcript_path: transcriptPath, result });
     if (result.ok && !dryRun) {
       for (const entry of group) {
@@ -301,7 +290,7 @@ async function main() {
         createdAt: utcNow(),
       };
     } else {
-      await enqueue(transcriptPath);
+      await enqueue(transcriptPath, hookInput);
     }
   }
 

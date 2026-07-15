@@ -1,0 +1,4 @@
+interface:
+  display_name: "Honcho memory"
+  short_description: "Recall prior context from the local Honcho memory"
+  default_prompt: "Use $honcho-memory to recall relevant prior decisions and context."
