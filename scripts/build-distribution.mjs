@@ -19,6 +19,15 @@ const PERSONAL_MODEL_SUFFIXES = new Set([
   "OVERRIDES__BASE_URL",
   "OVERRIDES__API_KEY_ENV",
 ]);
+const SAFE_ENVIRONMENT_VALUE = new Map([
+  ["LOG_LEVEL", /^(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)$/i],
+  ["AUTH_USE_AUTH", /^(?:true|false|0|1)$/i],
+  ["DERIVER_FLUSH_ENABLED", /^(?:true|false|0|1)$/i],
+  ["DERIVER_WORKERS", /^\d{1,4}$/],
+  ["HONCHO_API_PORT", /^\d{1,5}$/],
+  ["HONCHO_DASHBOARD_PORT", /^\d{1,5}$/],
+  ["HONCHO_IMAGE_TAG", /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/],
+]);
 
 function options(argv) {
   const result = {};
@@ -34,6 +43,120 @@ function options(argv) {
 
 async function exists(target) {
   try { await fsp.access(target); return true; } catch { return false; }
+}
+
+function safeBundleName(value) {
+  const candidate = String(value || "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(candidate) || candidate === "." || candidate === "..") {
+    throw new Error("Bundle name must be a single safe file name");
+  }
+  return candidate;
+}
+
+async function replaceableRelease(bundle, archive, packageName) {
+  let stat;
+  try { stat = await fsp.lstat(bundle); } catch (error) {
+    if (error?.code === "ENOENT") stat = null;
+    else throw error;
+  }
+  if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) {
+    throw new Error(`Refusing to replace non-directory release path: ${bundle}`);
+  }
+  if (stat) {
+    let manifest = null;
+    try { manifest = JSON.parse(await fsp.readFile(path.join(bundle, "SOURCE_MANIFEST.json"), "utf8")); } catch {}
+    if (manifest?.package?.name !== packageName) {
+      throw new Error(`Refusing to replace an existing directory not owned by ${packageName}: ${bundle}`);
+    }
+  }
+
+  let archiveStat;
+  try { archiveStat = await fsp.lstat(archive); } catch (error) {
+    if (error?.code === "ENOENT") archiveStat = null;
+    else throw error;
+  }
+  if (archiveStat && (!archiveStat.isFile() || archiveStat.isSymbolicLink())) {
+    throw new Error(`Refusing to replace non-file release archive: ${archive}`);
+  }
+  if (archiveStat && !stat) {
+    throw new Error(`Refusing to replace an archive without its owned release directory: ${archive}`);
+  }
+  return { bundleExists: Boolean(stat), archiveExists: Boolean(archiveStat) };
+}
+
+function transactionPath(target, label) {
+  return `${target}.${label}-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
+}
+
+async function operationExists(target) {
+  try { await fsp.access(target); return true; } catch { return false; }
+}
+
+async function swapReleaseArtifacts({ candidateBundle, candidateArchive, bundle, archive, existing }) {
+  const savedBundle = transactionPath(bundle, "saved");
+  const savedArchive = transactionPath(archive, "saved");
+  const failedBundle = transactionPath(bundle, "failed");
+  const failedArchive = transactionPath(archive, "failed");
+  let bundleSaved = false;
+  let archiveSaved = false;
+  let bundleInstalled = false;
+  let archiveInstalled = false;
+
+  try {
+    if (existing.bundleExists) {
+      await fsp.rename(bundle, savedBundle);
+      bundleSaved = true;
+    }
+    if (existing.archiveExists) {
+      await fsp.rename(archive, savedArchive);
+      archiveSaved = true;
+    }
+    await fsp.rename(candidateBundle, bundle);
+    bundleInstalled = true;
+    await fsp.rename(candidateArchive, archive);
+    archiveInstalled = true;
+  } catch (error) {
+    const recoveryIssues = [];
+    let failedBundleMoved = false;
+    let failedArchiveMoved = false;
+    if (archiveInstalled && await operationExists(archive)) {
+      try { await fsp.rename(archive, failedArchive); failedArchiveMoved = true; }
+      catch (recoveryError) { recoveryIssues.push(`new archive displacement failed: ${recoveryError.message}`); }
+    }
+    if (bundleInstalled && await operationExists(bundle)) {
+      try { await fsp.rename(bundle, failedBundle); failedBundleMoved = true; }
+      catch (recoveryError) { recoveryIssues.push(`new bundle displacement failed: ${recoveryError.message}`); }
+    }
+    if (archiveSaved && !(await operationExists(archive))) {
+      try { await fsp.rename(savedArchive, archive); }
+      catch (recoveryError) { recoveryIssues.push(`prior archive restoration failed: ${recoveryError.message}`); }
+    }
+    if (bundleSaved && !(await operationExists(bundle))) {
+      try { await fsp.rename(savedBundle, bundle); }
+      catch (recoveryError) { recoveryIssues.push(`prior bundle restoration failed: ${recoveryError.message}`); }
+    }
+    if (failedArchiveMoved && (!existing.archiveExists || await operationExists(archive))) {
+      await fsp.rm(failedArchive, { force: true }).catch(() => {});
+    }
+    if (failedBundleMoved && (!existing.bundleExists || await operationExists(bundle))) {
+      await fsp.rm(failedBundle, { recursive: true, force: true }).catch(() => {});
+    }
+    if (recoveryIssues.length) {
+      throw new Error(`Release replacement failed: ${error.message}; recovery issues: ${recoveryIssues.join("; ")}`, { cause: error });
+    }
+    throw error;
+  }
+
+  const warnings = [];
+  if (bundleSaved) {
+    try { await fsp.rm(savedBundle, { recursive: true, force: true }); }
+    catch (error) { warnings.push(`prior bundle cleanup failed: ${error.message}`); }
+  }
+  if (archiveSaved) {
+    try { await fsp.rm(savedArchive, { force: true }); }
+    catch (error) { warnings.push(`prior archive cleanup failed: ${error.message}`); }
+  }
+  return { warnings };
 }
 
 function git(cwd, args) {
@@ -53,21 +176,43 @@ function excluded(sourceRoot, target) {
     || /(?:^|[-_.])(?:backup|runtime-state)(?:[-_.]|$)/i.test(base);
 }
 
-async function copyTree(source, destination) {
-  await fsp.cp(source, destination, {
-    recursive: true,
-    filter: target => !excluded(source, target),
-  });
+function gitFiles(source) {
+  const output = execFileSync(
+    "git",
+    ["ls-files", "-z", "--cached"],
+    { cwd: source, encoding: "buffer" },
+  );
+  return output.toString("utf8").split("\0").filter(Boolean);
 }
 
-async function contentHash(directory) {
+async function copyGitTree(source, destination) {
+  for (const relative of gitFiles(source)) {
+    const input = path.resolve(source, relative);
+    if (path.relative(source, input).startsWith("..") || excluded(source, input)) continue;
+    let stat;
+    try { stat = await fsp.lstat(input); } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    const output = path.join(destination, relative);
+    await fsp.mkdir(path.dirname(output), { recursive: true });
+    if (stat.isSymbolicLink()) {
+      await fsp.symlink(await fsp.readlink(input), output);
+    } else if (stat.isFile()) {
+      await fsp.copyFile(input, output);
+      await fsp.chmod(output, stat.mode & 0o777);
+    }
+  }
+}
+
+async function contentHash(directory, ignored = new Set()) {
   const files = [];
   async function walk(current) {
     const entries = await fsp.readdir(current, { withFileTypes: true });
     for (const entry of entries) {
       const target = path.join(current, entry.name);
       if (entry.isDirectory()) await walk(target);
-      else if (entry.isFile()) files.push(target);
+      else if (entry.isFile() && !ignored.has(path.relative(directory, target))) files.push(target);
     }
   }
   await walk(directory);
@@ -82,27 +227,48 @@ async function contentHash(directory) {
   return hash.digest("hex");
 }
 
+function tarExecutable() {
+  return process.platform === "win32"
+    ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe")
+    : "tar";
+}
+
+function createTarArchive({ stageRoot, bundleName, candidateArchive }) {
+  execFileSync(tarExecutable(), ["--no-xattrs", "-czf", candidateArchive, "-C", stageRoot, bundleName], {
+    stdio: "inherit",
+    env: { ...process.env, COPYFILE_DISABLE: "1" },
+  });
+}
+
+async function validateCandidate({ candidateBundle, candidateArchive, bundleName, packageName, manifest }) {
+  const writtenManifest = JSON.parse(await fsp.readFile(path.join(candidateBundle, "SOURCE_MANIFEST.json"), "utf8"));
+  if (writtenManifest.package?.name !== packageName || writtenManifest.contentId !== manifest.contentId) {
+    throw new Error("Generated release manifest does not match the requested package");
+  }
+  const actualContentId = await contentHash(candidateBundle, new Set(["SOURCE_MANIFEST.json"]));
+  if (actualContentId !== manifest.contentId) throw new Error("Generated release content hash verification failed");
+  const archiveStat = await fsp.lstat(candidateArchive);
+  if (!archiveStat.isFile() || archiveStat.isSymbolicLink() || archiveStat.size === 0) {
+    throw new Error("Generated release archive is empty or invalid");
+  }
+  const listing = execFileSync(tarExecutable(), ["-tzf", candidateArchive], { encoding: "utf8" });
+  const manifestEntry = `${bundleName}/SOURCE_MANIFEST.json`;
+  if (!listing.split(/\r?\n/).some(entry => entry.replace(/^\.\//, "") === manifestEntry)) {
+    throw new Error("Generated release archive does not contain the source manifest");
+  }
+}
+
 function sanitizedEnvironment(text) {
-  const allowed = /^(?:LOG_LEVEL|AUTH_USE_AUTH|EMBED_MESSAGES|EMBEDDING_[A-Z0-9_]*|DERIVER_[A-Z0-9_]*|DIALECTIC_[A-Za-z0-9_]*|SUMMARY_[A-Z0-9_]*|DREAM_[A-Z0-9_]*|VECTOR_STORE_[A-Z0-9_]*|HONCHO_(?:API_PORT|DASHBOARD_PORT|IMAGE_TAG)|LLM_(?:OPENAI|OPENAI_COMPATIBLE|VLLM)_(?:BASE_URL|API_KEY))$/;
   const lines = text.split(/\r?\n/).flatMap(line => {
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match || !allowed.test(match[1])) return [];
+    if (!match) return [];
     const [, key, value] = match;
-    if (key.endsWith("__OVERRIDES__API_KEY")) return [];
-    if (/(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?)$/i.test(key)) return [`${key}=`];
-    if (key.endsWith("BASE_URL")) {
-      try {
-        const url = new URL(value);
-        if (!["host.docker.internal", "127.0.0.1", "localhost"].includes(url.hostname)) return [`${key}=`];
-        url.username = "";
-        url.password = "";
-        url.search = "";
-        url.hash = "";
-        return [`${key}=${url.toString().replace(/\/$/, "")}`];
-      } catch { return [`${key}=`]; }
+    const validator = SAFE_ENVIRONMENT_VALUE.get(key);
+    if (validator?.test(value)) return [line];
+    if (/^DIALECTIC_LEVELS__(?:minimal|low|medium|high|max)__MAX_TOOL_ITERATIONS$/.test(key) && /^\d{1,4}$/.test(value)) {
+      return [line];
     }
-    if (/\b(?:sk-|hch-|Bearer\s+)/i.test(value)) return [`${key}=`];
-    return [line];
+    return [];
   });
   return ["# Generated personal topology. Add secrets only in the installed private .env.", ...lines, ""].join("\n");
 }
@@ -140,6 +306,9 @@ function personalEnvironment(text) {
   const proxyBaseUrl = "http://host.docker.internal:11435/v1";
   const embeddingBaseUrl = "http://host.docker.internal:11434/v1";
   const values = {
+    LLM_OPENAI_API_KEY: "",
+    LLM_OPENAI_COMPATIBLE_API_KEY: "",
+    LLM_VLLM_API_KEY: "",
     EMBED_MESSAGES: "true",
     LLM_VLLM_BASE_URL: proxyBaseUrl,
     LLM_OPENAI_COMPATIBLE_BASE_URL: embeddingBaseUrl,
@@ -153,6 +322,10 @@ function personalEnvironment(text) {
     EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY_ENV: "LLM_OPENAI_COMPATIBLE_API_KEY",
     VECTOR_STORE_TYPE: "pgvector",
     VECTOR_STORE_MIGRATED: "true",
+    // Starlette's current TrustedHost parser does not accept bracketed IPv6
+    // Host headers reliably, so keep the generated local profile on the
+    // verified IPv4 and Compose service-name paths.
+    TRUSTED_HOSTS: '["localhost","127.0.0.1","api"]',
   };
   for (const prefix of PERSONAL_MODEL_PREFIXES) {
     values[`${prefix}__TRANSPORT`] = "openai";
@@ -207,76 +380,103 @@ function personalHostProfile(text) {
   };
 }
 
-async function main() {
-  const args = options(process.argv.slice(2));
+export async function buildDistribution(args, {
+  copyTree = copyGitTree,
+  archiveBuilder = createTarArchive,
+} = {}) {
   if (!args["honcho-source"]) throw new Error("--honcho-source is required");
   const honchoSource = path.resolve(args["honcho-source"]);
   const packageJson = JSON.parse(await fsp.readFile(path.join(ROOT, "package.json"), "utf8"));
+  const packageDirty = git(ROOT, ["status", "--porcelain"]);
+  if (packageDirty && !args["allow-dirty"]) {
+    throw new Error("Agent Memory source has uncommitted changes; commit them or pass --allow-dirty intentionally");
+  }
   const outputRoot = path.resolve(args.output || path.join(path.dirname(ROOT), "agent-memory-releases"));
-  const bundleName = args.name || `agent-memory-${packageJson.version}`;
+  const bundleName = safeBundleName(args.name || `agent-memory-${packageJson.version}`);
   const bundle = path.join(outputRoot, bundleName);
+  const archive = `${bundle}.tar.gz`;
   for (const required of ["Dockerfile", "LICENSE", "src", "database/init.sql", "local-dashboard/Dockerfile"]) {
     if (!(await exists(path.join(honchoSource, required)))) throw new Error(`Honcho source is missing ${required}`);
   }
   const dirty = git(honchoSource, ["status", "--porcelain"]);
   if (dirty && !args["allow-dirty"]) throw new Error("Honcho source has uncommitted changes; commit them or pass --allow-dirty intentionally");
 
-  await fsp.rm(bundle, { recursive: true, force: true });
-  await fsp.mkdir(bundle, { recursive: true });
-  await copyTree(ROOT, bundle);
-  await fsp.mkdir(path.join(bundle, "server", "honcho"), { recursive: true });
-  await copyTree(honchoSource, path.join(bundle, "server", "honcho"));
-  await fsp.copyFile(path.join(honchoSource, "LICENSE"), path.join(bundle, "HONCHO-LICENSE-AGPL-3.0.txt"));
+  const existing = await replaceableRelease(bundle, archive, packageJson.name);
+  await fsp.mkdir(outputRoot, { recursive: true });
+  const stageRoot = transactionPath(path.join(outputRoot, `.${bundleName}`), "stage");
+  const candidateBundle = path.join(stageRoot, bundleName);
+  const candidateArchive = path.join(stageRoot, `${bundleName}.tar.gz`);
+  await fsp.mkdir(candidateBundle, { recursive: true });
+  try {
+    await copyTree(ROOT, candidateBundle);
+    await fsp.mkdir(path.join(candidateBundle, "server", "honcho"), { recursive: true });
+    await copyTree(honchoSource, path.join(candidateBundle, "server", "honcho"));
+    await fsp.copyFile(path.join(honchoSource, "LICENSE"), path.join(candidateBundle, "HONCHO-LICENSE-AGPL-3.0.txt"));
 
-  let hostProfile = null;
-  if (args["env-source"]) {
-    const source = await fsp.readFile(path.resolve(args["env-source"]), "utf8");
-    const environment = personalEnvironment(source);
-    await fsp.writeFile(path.join(bundle, "server", "env.personal.example"), environment, "utf8");
-    hostProfile = personalHostProfile(environment);
-    if (hostProfile.codexProxy.enabled) {
-      for (const required of ["package.json", "server.mjs"]) {
-        if (!(await exists(path.join(honchoSource, "codex-openai-proxy", required)))) {
-          throw new Error(`Personal profile requires codex-openai-proxy/${required}`);
+    let hostProfile = null;
+    if (args["env-source"]) {
+      const source = await fsp.readFile(path.resolve(args["env-source"]), "utf8");
+      const environment = personalEnvironment(source);
+      await fsp.writeFile(path.join(candidateBundle, "server", "env.personal.example"), environment, "utf8");
+      hostProfile = personalHostProfile(environment);
+      if (hostProfile.codexProxy.enabled) {
+        for (const required of ["package.json", "server.mjs"]) {
+          if (!(await exists(path.join(honchoSource, "codex-openai-proxy", required)))) {
+            throw new Error(`Personal profile requires codex-openai-proxy/${required}`);
+          }
         }
       }
+      await fsp.writeFile(
+        path.join(candidateBundle, "server", "host-profile.personal.json"),
+        `${JSON.stringify(hostProfile, null, 2)}\n`,
+        "utf8",
+      );
     }
-    await fsp.writeFile(
-      path.join(bundle, "server", "host-profile.personal.json"),
-      `${JSON.stringify(hostProfile, null, 2)}\n`,
-      "utf8",
-    );
+
+    const manifest = {
+      format: 1,
+      generatedAt: new Date().toISOString(),
+      package: { name: packageJson.name, version: packageJson.version },
+      agentMemory: {
+        commit: git(ROOT, ["rev-parse", "HEAD"]),
+        branch: git(ROOT, ["branch", "--show-current"]),
+        dirty: Boolean(packageDirty),
+      },
+      honcho: {
+        commit: git(honchoSource, ["rev-parse", "HEAD"]),
+        branch: git(honchoSource, ["branch", "--show-current"]),
+        upstreamVersion: (await fsp.readFile(path.join(honchoSource, ".honcho-upstream-version"), "utf8").catch(() => "unknown")).trim(),
+        dirty: Boolean(dirty),
+      },
+      hostServices: hostProfile,
+      contentId: await contentHash(candidateBundle),
+      excluded: ["user conversations", "database volumes", ".env", "API keys", "tokens", "credentials", ".git"],
+    };
+    await fsp.writeFile(path.join(candidateBundle, "SOURCE_MANIFEST.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await archiveBuilder({ stageRoot, bundleName, candidateArchive });
+    await validateCandidate({ candidateBundle, candidateArchive, bundleName, packageName: packageJson.name, manifest });
+    const replacement = await swapReleaseArtifacts({ candidateBundle, candidateArchive, bundle, archive, existing });
+    return {
+      ok: true,
+      bundle,
+      archive,
+      manifest,
+      ...(replacement.warnings.length ? { warnings: replacement.warnings } : {}),
+    };
+  } finally {
+    await fsp.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
   }
-
-  const manifest = {
-    format: 1,
-    generatedAt: new Date().toISOString(),
-    package: { name: packageJson.name, version: packageJson.version },
-    honcho: {
-      commit: git(honchoSource, ["rev-parse", "HEAD"]),
-      branch: git(honchoSource, ["branch", "--show-current"]),
-      upstreamVersion: (await fsp.readFile(path.join(honchoSource, ".honcho-upstream-version"), "utf8").catch(() => "unknown")).trim(),
-      dirty: Boolean(dirty),
-    },
-    hostServices: hostProfile,
-    contentId: await contentHash(bundle),
-    excluded: ["user conversations", "database volumes", ".env", "API keys", "tokens", "credentials", ".git"],
-  };
-  await fsp.writeFile(path.join(bundle, "SOURCE_MANIFEST.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-
-  const archive = `${bundle}.tar.gz`;
-  await fsp.rm(archive, { force: true });
-  const tarExecutable = process.platform === "win32"
-    ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe")
-    : "tar";
-  execFileSync(tarExecutable, ["--no-xattrs", "-czf", archive, "-C", outputRoot, bundleName], {
-    stdio: "inherit",
-    env: { ...process.env, COPYFILE_DISABLE: "1" },
-  });
-  process.stdout.write(`${JSON.stringify({ ok: true, bundle, archive, manifest }, null, 2)}\n`);
 }
 
-main().catch(error => {
-  process.stderr.write(`${error.message}\n`);
-  process.exitCode = 1;
-});
+async function main() {
+  return buildDistribution(options(process.argv.slice(2)));
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().then(result => {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  }).catch(error => {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  });
+}
