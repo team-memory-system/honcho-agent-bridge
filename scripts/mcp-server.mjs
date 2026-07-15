@@ -284,7 +284,7 @@ const TOOLS = [
   tool(
     "chat",
     "Ask Honcho what it knows about a peer using natural language and Honcho's internal dialectic pipeline.",
-    { query: { ...STRING, minLength: 1 }, peer_id: STRING, target_peer_id: STRING, session_id: STRING, reasoning_level: { type: "string", enum: ["low", "medium", "high"], default: "low" }, ...workspaceProp },
+    { query: { ...STRING, minLength: 1 }, peer_id: STRING, target_peer_id: STRING, session_id: STRING, reasoning_level: { type: "string", enum: ["minimal", "low", "medium", "high", "max"], default: "low" }, ...workspaceProp },
     ["query"],
     (context, args) => {
       const resolved = defaults(context, args);

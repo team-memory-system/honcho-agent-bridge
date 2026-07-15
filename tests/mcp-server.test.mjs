@@ -88,6 +88,10 @@ test("bundled MCP exposes all 31 tools, forwards search, and honors tool toggles
   const listed = await rpc("tools/list");
   assert.equal(listed.tools.length, 31);
   assert.deepEqual(listed.tools.map((entry) => entry.name), EXPECTED_TOOLS);
+  assert.deepEqual(
+    listed.tools.find((entry) => entry.name === "chat").inputSchema.properties.reasoning_level.enum,
+    ["minimal", "low", "medium", "high", "max"],
+  );
 
   const search = await rpc("tools/call", { name: "search", arguments: { query: "project decision", limit: 4 } });
   assert.equal(search.isError, false);
