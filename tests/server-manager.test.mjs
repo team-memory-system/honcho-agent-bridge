@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   copyServerBundle,
   dockerCliEnvironment,
+  serverPlan,
   serverPrepare,
   serverStart,
   serverStatus,
@@ -31,6 +32,59 @@ test("Windows Compose uses an isolated anonymous Docker config without changing 
   assert.equal(environment.DOCKER_CONFIG.includes(environment.USERPROFILE), false);
 });
 
+test("server lifecycle rejects mistyped profiles before any mutation", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-invalid-profile-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const destination = path.join(root, "installed");
+  let called = false;
+  const hostRuntime = new Proxy({}, { get: () => async () => { called = true; return { ok: true }; } });
+  const runner = async () => { called = true; return { stdout: "", stderr: "" }; };
+  const inspector = async () => { called = true; return { installed: true, running: true }; };
+
+  await assert.rejects(serverPrepare({
+    profile: "personl",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: root } },
+    serverDirectory: destination,
+  }), /Unsupported server profile/);
+  await assert.rejects(serverStart({
+    profile: "personl",
+    hostRuntime,
+    preparedServer: { ok: true, ready: true },
+    serverDirectory: destination,
+    composeRunner: runner,
+  }), /Unsupported server profile/);
+  await assert.rejects(serverStatus({
+    profile: "personl",
+    hostRuntime,
+    serverDirectory: destination,
+    dockerInspector: inspector,
+    composeRunner: runner,
+  }), /Unsupported server profile/);
+  await assert.rejects(serverStop({
+    profile: "personl",
+    hostRuntime,
+    serverDirectory: destination,
+    composeRunner: runner,
+  }), /Unsupported server profile/);
+  await assert.rejects(serverVerify({ profile: "personl", serverDirectory: destination }), /Unsupported server profile/);
+  assert.equal(called, false);
+  await assert.rejects(fsp.access(destination));
+});
+
+test("personal plan fails closed on native Linux", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-linux-plan-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const personal = await serverPlan({
+    profile: "personal",
+    platform: "linux",
+    dockerInspector: async () => ({ installed: true, running: true }),
+    bundleInspector: async () => ({ ok: true, directory: root, missing: [] }),
+  });
+  assert.equal(personal.ready, false);
+  assert.ok(personal.issues.some((item) => item.includes("requires macOS or Windows")));
+});
+
 test("server bundle updates preserve the installed private environment", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-server-copy-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -47,9 +101,178 @@ test("server bundle updates preserve the installed private environment", async (
   assert.equal(result.changed, true);
   assert.equal(await fsp.readFile(path.join(destination, "compose.yaml"), "utf8"), "name: updated\n");
   assert.equal(await fsp.readFile(path.join(destination, ".env"), "utf8"), "LLM_OPENAI_API_KEY=private-existing\n");
+  assert.equal(await fsp.readFile(path.join(`${destination}.previous`, "compose.yaml"), "utf8"), "name: old\n");
+  assert.equal(await fsp.readFile(path.join(`${destination}.previous`, ".env"), "utf8"), "LLM_OPENAI_API_KEY=private-existing\n");
   if (process.platform !== "win32") {
     assert.equal((await fsp.stat(path.join(destination, ".env"))).mode & 0o777, 0o600);
   }
+});
+
+test("server bundle swap restores both current and prior backup when the final rename fails", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-server-swap-failure-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "installed");
+  const previous = `${destination}.previous`;
+  await fsp.mkdir(source, { recursive: true });
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.mkdir(previous, { recursive: true });
+  await fsp.writeFile(path.join(source, "marker"), "candidate\n");
+  await fsp.writeFile(path.join(destination, "marker"), "current\n");
+  await fsp.writeFile(path.join(previous, "marker"), "prior-backup\n");
+  const fileSystem = new Proxy(fsp, {
+    get(target, property) {
+      if (property !== "rename") return target[property];
+      return async (from, to) => {
+        if (String(from).includes(".candidate-") && path.resolve(to) === path.resolve(destination)) {
+          throw new Error("injected final rename failure");
+        }
+        return fsp.rename(from, to);
+      };
+    },
+  });
+
+  await assert.rejects(
+    copyServerBundle(source, destination, { fileSystem }),
+    /injected final rename failure/,
+  );
+  assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "current\n");
+  assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "prior-backup\n");
+  const leftovers = (await fsp.readdir(root)).filter(item => /\.(?:candidate|failed|saved)-/.test(item));
+  assert.deepEqual(leftovers, []);
+});
+
+test("server bundle swap reports a secret-bearing candidate retained after cleanup failure", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-server-retained-candidate-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "installed");
+  const previous = `${destination}.previous`;
+  const secretEnvironment = "LLM_OPENAI_API_KEY=retained-candidate-secret\n";
+  await fsp.mkdir(source, { recursive: true });
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.mkdir(previous, { recursive: true });
+  await fsp.writeFile(path.join(source, "marker"), "candidate\n");
+  await fsp.writeFile(path.join(destination, "marker"), "current\n");
+  await fsp.writeFile(path.join(destination, ".env"), secretEnvironment);
+  await fsp.writeFile(path.join(previous, "marker"), "prior-backup\n");
+  let finalRenameFailed = false;
+  const fileSystem = new Proxy(fsp, {
+    get(target, property) {
+      if (property === "rename") {
+        return async (from, to) => {
+          if (String(from).includes(".candidate-") && path.resolve(to) === path.resolve(destination)) {
+            finalRenameFailed = true;
+            throw new Error("injected final rename failure");
+          }
+          return fsp.rename(from, to);
+        };
+      }
+      if (property === "rm") {
+        return async (targetPath, options) => {
+          if (finalRenameFailed && String(targetPath).includes(".candidate-")) {
+            throw new Error("injected candidate cleanup failure");
+          }
+          return fsp.rm(targetPath, options);
+        };
+      }
+      return target[property];
+    },
+  });
+  let captured;
+
+  await assert.rejects(copyServerBundle(source, destination, { fileSystem }), (error) => {
+    captured = error;
+    return /injected final rename failure/.test(error.message)
+      && /injected candidate cleanup failure/.test(error.message);
+  });
+  assert.equal(captured.rollback.ok, false);
+  assert.ok(captured.rollback.issues.some(item => item.includes("candidate bundle cleanup failed")));
+  assert.equal(captured.rollback.retainedPaths.length, 1);
+  const retained = captured.rollback.retainedPaths[0];
+  assert.ok(retained.includes(".candidate-"));
+  assert.equal(await fsp.readFile(path.join(retained, ".env"), "utf8"), secretEnvironment);
+  assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "current\n");
+  assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "prior-backup\n");
+});
+
+test("successful bundle swap reports a retained saved backup when its cleanup fails", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-server-retained-saved-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "installed");
+  const previous = `${destination}.previous`;
+  const priorSecret = "LLM_OPENAI_API_KEY=prior-backup-secret\n";
+  await fsp.mkdir(source, { recursive: true });
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.mkdir(previous, { recursive: true });
+  await fsp.writeFile(path.join(source, "marker"), "candidate\n");
+  await fsp.writeFile(path.join(destination, "marker"), "current\n");
+  await fsp.writeFile(path.join(previous, ".env"), priorSecret);
+  const fileSystem = new Proxy(fsp, {
+    get(target, property) {
+      if (property !== "rm") return target[property];
+      return async (targetPath, options) => {
+        if (String(targetPath).includes(".previous.saved-")) {
+          throw new Error("injected saved backup cleanup failure");
+        }
+        return fsp.rm(targetPath, options);
+      };
+    },
+  });
+
+  const result = await copyServerBundle(source, destination, { fileSystem });
+  assert.equal(result.ok, false);
+  assert.equal(result.cleanup.ok, false);
+  assert.match(result.cleanup.issues[0], /saved backup cleanup failure/);
+  assert.equal(result.retainedPaths.length, 1);
+  assert.ok(result.retainedPaths[0].includes(".previous.saved-"));
+  assert.equal(await fsp.readFile(path.join(result.retainedPaths[0], ".env"), "utf8"), priorSecret);
+  assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "candidate\n");
+  assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "current\n");
+});
+
+test("portable prepare fails closed and propagates retained backup cleanup details", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-portable-retained-saved-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "installed");
+  const previous = `${destination}.previous`;
+  const priorSecret = "LLM_OPENAI_API_KEY=portable-prior-secret\n";
+  await fsp.mkdir(source, { recursive: true });
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.mkdir(previous, { recursive: true });
+  await fsp.writeFile(path.join(source, "compose.yaml"), "name: portable-candidate\n");
+  await fsp.writeFile(path.join(source, ".env.example"), "LLM_OPENAI_API_KEY=\n");
+  await fsp.writeFile(path.join(destination, "marker"), "portable-current\n");
+  await fsp.writeFile(path.join(destination, ".env"), "LLM_OPENAI_API_KEY=current-secret\n");
+  await fsp.writeFile(path.join(previous, ".env"), priorSecret);
+  const fileSystem = new Proxy(fsp, {
+    get(target, property) {
+      if (property !== "rm") return target[property];
+      return async (targetPath, options) => {
+        if (String(targetPath).includes(".previous.saved-")) {
+          throw new Error("injected portable saved cleanup failure");
+        }
+        return fsp.rm(targetPath, options);
+      };
+    },
+  });
+
+  const result = await serverPrepare({
+    profile: "portable",
+    fileSystem,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.ready, false);
+  assert.match(result.issues[0], /portable saved cleanup failure/);
+  assert.equal(result.retainedPaths.length, 1);
+  assert.ok(result.retainedPaths[0].includes(".previous.saved-"));
+  assert.equal(await fsp.readFile(path.join(result.retainedPaths[0], ".env"), "utf8"), priorSecret);
+  assert.equal(await fsp.readFile(path.join(destination, "compose.yaml"), "utf8"), "name: portable-candidate\n");
+  assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "portable-current\n");
 });
 
 async function personalBundle(root) {
@@ -245,6 +468,309 @@ test("personal server update stops a running host before swapping the installed 
   assert.equal(result.ok, true);
   assert.equal(result.hostStoppedForUpdate, true);
   assert.deepEqual(events, ["host-status", "host-stop", "host-prepare"]);
+});
+
+test("concurrent prepares allow only one candidate to enter and keep the original at previous", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-concurrent-success-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.writeFile(path.join(destination, "marker"), "original-current\n");
+  let resolveEntered;
+  let releasePrepare;
+  const entered = new Promise(resolve => { resolveEntered = resolve; });
+  const release = new Promise(resolve => { releasePrepare = resolve; });
+  t.after(() => releasePrepare());
+  let prepareCalls = 0;
+  const hostRuntime = {
+    status: async () => ({ ok: true, running: false }),
+    prepare: async () => {
+      prepareCalls += 1;
+      resolveEntered();
+      await release;
+      return { ok: true, ready: true };
+    },
+  };
+  const options = {
+    profile: "personal",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+  };
+
+  const first = serverPrepare(options);
+  await entered;
+  await assert.rejects(serverPrepare(options), (error) => error.code === "AGENT_MEMORY_SERVER_LIFECYCLE_BUSY");
+  assert.equal(prepareCalls, 1);
+  assert.equal(await fsp.readFile(path.join(destination, "compose.yaml"), "utf8"), "name: test\n");
+  assert.equal(await fsp.readFile(path.join(`${destination}.previous`, "marker"), "utf8"), "original-current\n");
+  releasePrepare();
+  const result = await first;
+  assert.equal(result.ok, true);
+  assert.equal(prepareCalls, 1);
+  assert.equal(await fsp.readFile(path.join(`${destination}.previous`, "marker"), "utf8"), "original-current\n");
+  await assert.rejects(fsp.access(`${destination}.lifecycle.lock`));
+});
+
+test("concurrent rejected prepare cannot disturb rollback of the original and its prior previous", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-concurrent-rollback-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const previous = `${destination}.previous`;
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.mkdir(previous, { recursive: true });
+  await fsp.writeFile(path.join(destination, "marker"), "original-current\n");
+  await fsp.writeFile(path.join(previous, "marker"), "original-previous\n");
+  let resolveEntered;
+  let releasePrepare;
+  const entered = new Promise(resolve => { resolveEntered = resolve; });
+  const release = new Promise(resolve => { releasePrepare = resolve; });
+  t.after(() => releasePrepare());
+  let prepareCalls = 0;
+  const hostRuntime = {
+    status: async () => ({ ok: true, running: false }),
+    prepare: async () => {
+      prepareCalls += 1;
+      resolveEntered();
+      await release;
+      return { ok: false, ready: false, issues: ["candidate rejected after barrier"] };
+    },
+  };
+  const options = {
+    profile: "personal",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+  };
+
+  const first = serverPrepare(options);
+  await entered;
+  await assert.rejects(serverPrepare(options), (error) => error.code === "AGENT_MEMORY_SERVER_LIFECYCLE_BUSY");
+  assert.equal(prepareCalls, 1);
+  releasePrepare();
+  const result = await first;
+  assert.equal(result.ok, false);
+  assert.equal(result.rollback.ok, true);
+  assert.equal(prepareCalls, 1);
+  assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "original-current\n");
+  assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "original-previous\n");
+  await assert.rejects(fsp.access(`${destination}.lifecycle.lock`));
+});
+
+test("personal update validates candidate secrets before inspecting or stopping the running host", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-candidate-secrets-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  await fsp.appendFile(path.join(source, "env.personal.example"), [
+    "SUMMARY_MODEL_CONFIG__TRANSPORT=openai",
+    "SUMMARY_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_UNAVAILABLE_API_KEY",
+    "",
+  ].join("\n"));
+  const destination = path.join(root, "installed");
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.writeFile(path.join(destination, "old-marker"), "old\n");
+  let hostCalled = false;
+  const hostRuntime = new Proxy({}, { get: () => async () => { hostCalled = true; return { ok: true, ready: true }; } });
+
+  const result = await serverPrepare({
+    profile: "personal",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.ready, false);
+  assert.deepEqual(result.missingSecretFields, ["LLM_UNAVAILABLE_API_KEY"]);
+  assert.equal(result.hostStoppedForUpdate, false);
+  assert.equal(hostCalled, false);
+  assert.equal(await fsp.readFile(path.join(destination, "old-marker"), "utf8"), "old\n");
+  assert.equal((await fsp.readdir(root)).some(item => item.includes(".candidate-")), false);
+});
+
+test("personal host readiness failure restores both backups and restarts the previously running host", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-host-rollback-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const previous = `${destination}.previous`;
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.mkdir(previous, { recursive: true });
+  await fsp.writeFile(path.join(destination, "marker"), "current\n");
+  const originalEnvironment = "POSTGRES_PASSWORD=private\nLLM_VLLM_API_KEY=private-vllm\nLLM_OPENAI_COMPATIBLE_API_KEY=private-ollama\n";
+  await fsp.writeFile(path.join(destination, ".env"), originalEnvironment);
+  await fsp.writeFile(path.join(previous, "marker"), "prior-backup\n");
+  const events = [];
+  let prepareCalls = 0;
+  const hostRuntime = {
+    status: async () => ({ ok: true, running: true }),
+    stop: async () => { events.push("stop"); return { ok: true, stopped: true }; },
+    prepare: async ({ installedServerDir }) => {
+      prepareCalls += 1;
+      if (prepareCalls === 1) {
+        events.push("prepare-candidate");
+        assert.equal(await fsp.readFile(path.join(installedServerDir, "compose.yaml"), "utf8"), "name: test\n");
+        return { ok: false, ready: false, issues: ["candidate proxy is unavailable"] };
+      }
+      events.push("prepare-restored");
+      assert.equal(await fsp.readFile(path.join(installedServerDir, "marker"), "utf8"), "current\n");
+      return { ok: true, ready: true };
+    },
+    start: async ({ skipPrepare }) => {
+      assert.equal(skipPrepare, true);
+      events.push("start-restored");
+      return { ok: true, running: true };
+    },
+  };
+
+  const result = await serverPrepare({
+    profile: "personal",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.ready, false);
+  assert.equal(result.rollback.ok, true);
+  assert.equal(result.rollback.restored, true);
+  assert.match(result.issues[0], /candidate proxy is unavailable/);
+  assert.deepEqual(events, ["stop", "prepare-candidate", "prepare-restored", "start-restored"]);
+  assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "current\n");
+  assert.equal(await fsp.readFile(path.join(destination, ".env"), "utf8"), originalEnvironment);
+  assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "prior-backup\n");
+});
+
+test("fresh personal host failure removes the candidate installation", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-fresh-rollback-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const result = await serverPrepare({
+    profile: "personal",
+    hostRuntime: {
+      prepare: async () => ({ ok: false, ready: false, issues: ["host profile rejected"] }),
+    },
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.rollback.ok, true);
+  assert.equal(result.rollback.bundle.removedFreshInstall, true);
+  await assert.rejects(fsp.access(destination));
+  assert.equal((await fsp.readdir(root)).some(item => item.includes(".candidate-") || item.includes(".failed-")), false);
+});
+
+test("personal rollback reports a retained failed candidate instead of hiding cleanup failure", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-retained-failed-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const previous = `${destination}.previous`;
+  const originalEnvironment = "POSTGRES_PASSWORD=private\nLLM_VLLM_API_KEY=private-vllm\nLLM_OPENAI_COMPATIBLE_API_KEY=private-ollama\n";
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.mkdir(previous, { recursive: true });
+  await fsp.writeFile(path.join(destination, "marker"), "original-current\n");
+  await fsp.writeFile(path.join(destination, ".env"), originalEnvironment);
+  await fsp.writeFile(path.join(previous, "marker"), "original-previous\n");
+  const fileSystem = new Proxy(fsp, {
+    get(target, property) {
+      if (property !== "rm") return target[property];
+      return async (targetPath, options) => {
+        if (String(targetPath).includes(".failed-")) {
+          throw new Error("injected failed candidate cleanup failure");
+        }
+        return fsp.rm(targetPath, options);
+      };
+    },
+  });
+
+  const result = await serverPrepare({
+    profile: "personal",
+    fileSystem,
+    hostRuntime: {
+      status: async () => ({ ok: true, running: false }),
+      prepare: async () => ({ ok: false, ready: false, issues: ["candidate host rejected"] }),
+    },
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.rollback.ok, false);
+  assert.ok(result.rollback.issues.some(item => item.includes("failed candidate cleanup failure")));
+  assert.equal(result.retainedPaths.length, 1);
+  const retained = result.retainedPaths[0];
+  assert.ok(retained.includes(".failed-"));
+  assert.match(await fsp.readFile(path.join(retained, ".env"), "utf8"), /^LLM_VLLM_API_KEY=private-vllm$/m);
+  assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "original-current\n");
+  assert.equal(await fsp.readFile(path.join(destination, ".env"), "utf8"), originalEnvironment);
+  assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "original-previous\n");
+});
+
+test("personal host exception keeps the original error visible when host recovery also fails", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-recovery-error-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const previous = `${destination}.previous`;
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.mkdir(previous, { recursive: true });
+  await fsp.writeFile(path.join(destination, "marker"), "current\n");
+  await fsp.writeFile(path.join(previous, "marker"), "prior-backup\n");
+  let prepareCalls = 0;
+  const original = new Error("candidate preparation exploded");
+  let captured;
+
+  await assert.rejects(serverPrepare({
+    profile: "personal",
+    hostRuntime: {
+      status: async () => ({ ok: true, running: true }),
+      stop: async () => ({ ok: true, stopped: true }),
+      prepare: async () => {
+        prepareCalls += 1;
+        if (prepareCalls === 1) throw original;
+        throw new Error("restored host preparation exploded");
+      },
+      start: async () => { throw new Error("must not start after failed recovery preparation"); },
+    },
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+  }), (error) => {
+    captured = error;
+    return /candidate preparation exploded/.test(error.message)
+      && /restored host preparation exploded/.test(error.message);
+  });
+  assert.equal(captured.cause, original);
+  assert.equal(captured.rollback.ok, false);
+  assert.ok(captured.rollback.issues.some(item => item.includes("restored host preparation exploded")));
+  assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "current\n");
+  assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "prior-backup\n");
+});
+
+test("personal start prepares under its existing lifecycle lock without reentrant deadlock", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-start-unlocked-prepare-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const events = [];
+  const result = await serverStart({
+    profile: "personal",
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    serverDirectory: destination,
+    hostRuntime: {
+      prepare: async () => { events.push("prepare"); return { ok: true, ready: true }; },
+      start: async ({ skipPrepare }) => {
+        assert.equal(skipPrepare, true);
+        events.push("start");
+        return { ok: true, running: true };
+      },
+    },
+    composeRunner: async () => { events.push("compose"); return { stdout: "started\n", stderr: "" }; },
+    healthWaiter: async () => ({ ok: true, status: 200 }),
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(events, ["prepare", "start", "compose"]);
+  await assert.rejects(fsp.access(`${destination}.lifecycle.lock`));
 });
 
 test("personal start requires a healthy host before Compose and rolls it back on Compose failure", async () => {

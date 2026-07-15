@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { installPaths } from "./config.mjs";
+import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import { hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 
@@ -21,6 +22,7 @@ const DEFAULT_HOST_RUNTIME = Object.freeze({
 const VERIFY_EMBEDDING_DIMENSIONS = 1536;
 const VERIFY_MINIMUM_PROMPT_TOKENS = 2048;
 const VERIFY_EMBEDDING_INPUT = "verify\n".repeat(3000);
+const SERVER_PROFILES = new Set(["personal", "portable"]);
 const CONTAINER_HOST_PROBE_SCRIPT = `import json
 import urllib.error
 import urllib.request
@@ -45,12 +47,36 @@ async function exists(target) {
   try { await fsp.access(target); return true; } catch { return false; }
 }
 
+function requireServerProfile(profile) {
+  if (!SERVER_PROFILES.has(profile)) {
+    throw new Error(`Unsupported server profile: ${profile}. Expected personal or portable.`);
+  }
+  return profile;
+}
+
 function sourceServerDir() {
   return path.resolve(process.env.AGENT_MEMORY_SERVER_SOURCE || path.join(PLUGIN_ROOT, "server"));
 }
 
 export function installedServerDir(config = null) {
   return path.resolve(process.env.AGENT_MEMORY_SERVER_DIR || config?.paths?.serverDir || path.join(installPaths(config).appHome, "server"));
+}
+
+async function withServerLifecycleLock(directory, operation, callback) {
+  const lockPath = `${path.resolve(directory)}.lifecycle.lock`;
+  const lock = await acquireFileLock(lockPath, {
+    attempts: 1,
+    staleMs: 3_600_000,
+    reclaimDeadImmediately: true,
+  });
+  if (!lock) {
+    const error = new Error(`Server lifecycle operation is already running for ${path.resolve(directory)}`);
+    error.code = "AGENT_MEMORY_SERVER_LIFECYCLE_BUSY";
+    error.operation = operation;
+    throw error;
+  }
+  try { return await callback(); }
+  finally { await releaseFileLock(lock); }
 }
 
 async function dockerProbe() {
@@ -135,7 +161,7 @@ function isPersonalModelConfigKey(key) {
 }
 
 function isManagedPersonalTopologyKey(key) {
-  if (["LLM_VLLM_BASE_URL", "LLM_OPENAI_COMPATIBLE_BASE_URL"].includes(key)) return true;
+  if (["LLM_VLLM_BASE_URL", "LLM_OPENAI_COMPATIBLE_BASE_URL", "TRUSTED_HOSTS"].includes(key)) return true;
   if (/^EMBEDDING_(?:MAX_INPUT_TOKENS|MAX_TOKENS_PER_REQUEST|VECTOR_DIMENSIONS|QUERY_INSTRUCTION)$/.test(key)) return true;
   if (/^EMBEDDING_MODEL_CONFIG__(?:TRANSPORT|MODEL|OVERRIDES__(?:BASE_URL|API_KEY_ENV))$/.test(key)) return true;
   return /^(?:DERIVER_MODEL_CONFIG|SUMMARY_MODEL_CONFIG|DREAM_(?:DEDUCTION|INDUCTION)_MODEL_CONFIG|DIALECTIC_LEVELS__(?:minimal|low|medium|high|max)__MODEL_CONFIG)__(?:TRANSPORT|MODEL|THINKING_EFFORT|OVERRIDES__(?:BASE_URL|API_KEY_ENV))$/.test(key);
@@ -224,8 +250,14 @@ async function initializeEnvironment(directory, profile = "portable", privateFil
   return { created: true, path: target, profile };
 }
 
-export async function serverPlan({ profile = "portable" } = {}) {
-  const [docker, bundle] = await Promise.all([dockerProbe(), bundleProbe()]);
+export async function serverPlan({
+  profile = "portable",
+  platform = process.platform,
+  dockerInspector = dockerProbe,
+  bundleInspector = bundleProbe,
+} = {}) {
+  requireServerProfile(profile);
+  const [docker, bundle] = await Promise.all([dockerInspector(), bundleInspector()]);
   const issues = [];
   const warnings = [];
   if (!docker.installed) issues.push("Docker CLI is not installed");
@@ -234,6 +266,9 @@ export async function serverPlan({ profile = "portable" } = {}) {
   const profilePath = profile === "personal" ? "env.personal.example" : ".env.example";
   if (!(await exists(path.join(bundle.directory, profilePath)))) issues.push(`The ${profile} environment profile is not included`);
   if (profile === "personal") {
+    if (platform === "linux") {
+      issues.push("The personal host profile currently requires macOS or Windows; use the portable profile on native Linux");
+    }
     const hostAssets = ["host-profile.personal.json", "host/supervisor.mjs", "host/qwen3-embedding-8192.Modelfile"];
     const missingHostAssets = [];
     for (const asset of hostAssets) if (!(await exists(path.join(bundle.directory, asset)))) missingHostAssets.push(asset);
@@ -269,33 +304,326 @@ async function missingLlmSecrets(environmentPath) {
   return [...required].filter(key => !String(environment[key] || "").trim()).sort();
 }
 
-export async function copyServerBundle(source, destination, privateFileOptions = {}) {
-  if (path.resolve(source) === path.resolve(destination)) return { changed: false, source, destination };
-  const temporary = `${destination}.tmp-${process.pid}`;
-  const previous = `${destination}.previous`;
-  const currentEnvironment = await fsp.readFile(path.join(destination, ".env")).catch(() => null);
-  await fsp.rm(temporary, { recursive: true, force: true });
-  await fsp.cp(source, temporary, { recursive: true, filter: item => path.basename(item) !== ".env" });
-  if (currentEnvironment) {
-    const temporaryEnvironment = path.join(temporary, ".env");
-    await fsp.writeFile(temporaryEnvironment, currentEnvironment, { mode: 0o600 });
-    try {
-      await securePrivateFile(temporaryEnvironment, privateFileOptions);
-    } catch (error) {
-      await fsp.rm(temporary, { recursive: true, force: true }).catch(() => {});
-      throw error;
-    }
-  }
-  if (await exists(destination)) {
-    await fsp.rm(previous, { recursive: true, force: true });
-    await fsp.rename(destination, previous);
-  }
-  await fsp.mkdir(path.dirname(destination), { recursive: true });
-  await fsp.rename(temporary, destination);
-  return { changed: true, source, destination, previous: (await exists(previous)) ? previous : null };
+function transactionPath(target, label) {
+  return `${target}.${label}-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
 }
 
-export async function serverPrepare({
+function operationError(error) {
+  return String(error?.message || error);
+}
+
+function errorWithRecovery(original, context, recovery) {
+  const recoveryDetail = recovery?.issues?.length
+    ? ` Rollback recovery also failed: ${recovery.issues.join("; ")}`
+    : "";
+  const wrapped = new Error(`${context}: ${operationError(original)}.${recoveryDetail}`, { cause: original });
+  wrapped.code = "AGENT_MEMORY_SERVER_UPDATE_FAILED";
+  wrapped.rollback = recovery;
+  return wrapped;
+}
+
+async function operationExists(fileSystem, target) {
+  try { await fileSystem.access(target); return true; } catch { return false; }
+}
+
+function privateFileConfiguration(options = {}) {
+  const { fileSystem = fsp, ...permissions } = options;
+  return { fileSystem, permissions };
+}
+
+async function removeTransactionArtifact(fileSystem, target, label) {
+  try {
+    await fileSystem.rm(target, { recursive: true, force: true });
+    return { ok: true, issues: [], retainedPaths: [] };
+  } catch (error) {
+    return {
+      ok: false,
+      issues: [`${label} cleanup failed: ${operationError(error)}`],
+      retainedPaths: [target],
+    };
+  }
+}
+
+function uniquePaths(paths) {
+  return [...new Set(paths.filter(Boolean))];
+}
+
+async function prepareBundleCandidate(source, destination, privateFileOptions = {}) {
+  const { fileSystem, permissions } = privateFileConfiguration(privateFileOptions);
+  const candidate = transactionPath(destination, "candidate");
+  let currentEnvironment = null;
+  try { currentEnvironment = await fileSystem.readFile(path.join(destination, ".env")); }
+  catch (error) {
+    if (!["ENOENT", "ENOTDIR"].includes(error?.code)) throw error;
+  }
+  await fileSystem.rm(candidate, { recursive: true, force: true });
+  try {
+    await fileSystem.cp(source, candidate, { recursive: true, filter: item => path.basename(item) !== ".env" });
+    if (currentEnvironment) {
+      const candidateEnvironment = path.join(candidate, ".env");
+      await fileSystem.writeFile(candidateEnvironment, currentEnvironment, { mode: 0o600 });
+      await securePrivateFile(candidateEnvironment, permissions);
+    }
+    return { path: candidate, fileSystem, permissions };
+  } catch (error) {
+    const cleanup = await removeTransactionArtifact(fileSystem, candidate, "candidate bundle");
+    if (!cleanup.ok) throw errorWithRecovery(error, "Server bundle candidate preparation failed", cleanup);
+    throw error;
+  }
+}
+
+async function beginBundleSwap(candidate, destination, fileSystem = fsp) {
+  const previous = `${destination}.previous`;
+  const savedPrevious = transactionPath(previous, "saved");
+  const failedCandidate = transactionPath(destination, "failed");
+  const hadDestination = await operationExists(fileSystem, destination);
+  const hadPrevious = await operationExists(fileSystem, previous);
+  let previousSaved = false;
+  let currentMoved = false;
+
+  try {
+    await fileSystem.mkdir(path.dirname(destination), { recursive: true });
+    if (hadPrevious) {
+      await fileSystem.rename(previous, savedPrevious);
+      previousSaved = true;
+    }
+    if (hadDestination) {
+      await fileSystem.rename(destination, previous);
+      currentMoved = true;
+    }
+    await fileSystem.rename(candidate, destination);
+  } catch (error) {
+    const issues = [];
+    const retainedPaths = [];
+    let restorationFailed = false;
+    let displacedCandidate = false;
+    if ((currentMoved || !hadDestination) && await operationExists(fileSystem, destination)) {
+      try {
+        await fileSystem.rename(destination, failedCandidate);
+        displacedCandidate = true;
+      } catch (restoreError) {
+        issues.push(`candidate displacement failed: ${operationError(restoreError)}`);
+        retainedPaths.push(destination);
+        restorationFailed = true;
+      }
+    }
+    if (currentMoved && !(await operationExists(fileSystem, destination))) {
+      try { await fileSystem.rename(previous, destination); }
+      catch (restoreError) {
+        issues.push(`current bundle restoration failed: ${operationError(restoreError)}`);
+        retainedPaths.push(previous);
+        restorationFailed = true;
+      }
+    }
+    if (previousSaved && !(await operationExists(fileSystem, previous))) {
+      try { await fileSystem.rename(savedPrevious, previous); }
+      catch (restoreError) {
+        issues.push(`prior backup restoration failed: ${operationError(restoreError)}`);
+        retainedPaths.push(savedPrevious);
+        restorationFailed = true;
+      }
+    }
+    if (displacedCandidate) {
+      const cleanup = await removeTransactionArtifact(fileSystem, failedCandidate, "displaced candidate bundle");
+      issues.push(...cleanup.issues);
+      retainedPaths.push(...cleanup.retainedPaths);
+    }
+    const candidateCleanup = await removeTransactionArtifact(fileSystem, candidate, "candidate bundle");
+    issues.push(...candidateCleanup.issues);
+    retainedPaths.push(...candidateCleanup.retainedPaths);
+    const recovery = {
+      ok: issues.length === 0,
+      restored: !restorationFailed,
+      destination,
+      previous,
+      issues,
+      retainedPaths: uniquePaths(retainedPaths),
+    };
+    if (!issues.length) throw error;
+    throw errorWithRecovery(error, "Server bundle swap failed", recovery);
+  }
+
+  let finished = false;
+  return {
+    destination,
+    previous,
+    hadDestination,
+    hadPrevious,
+    async commit() {
+      if (finished) return { ok: true, committed: true, destination, previous: hadDestination ? previous : null, issues: [], retainedPaths: [] };
+      finished = true;
+      const issues = [];
+      const retainedPaths = [];
+      if (previousSaved) {
+        const cleanup = await removeTransactionArtifact(fileSystem, savedPrevious, "retired backup bundle");
+        issues.push(...cleanup.issues);
+        retainedPaths.push(...cleanup.retainedPaths);
+      }
+      return {
+        ok: issues.length === 0,
+        committed: true,
+        destination,
+        previous: hadDestination ? previous : null,
+        issues,
+        retainedPaths: uniquePaths(retainedPaths),
+      };
+    },
+    async rollback() {
+      if (finished) return {
+        ok: false,
+        restored: false,
+        destination,
+        previous,
+        issues: ["bundle transaction is already finished"],
+        retainedPaths: [destination],
+      };
+      finished = true;
+      const issues = [];
+      const retainedPaths = [];
+      let restorationFailed = false;
+      let newBundleMoved = false;
+      if (await operationExists(fileSystem, destination)) {
+        try {
+          await fileSystem.rename(destination, failedCandidate);
+          newBundleMoved = true;
+        } catch (error) {
+          issues.push(`candidate displacement failed: ${operationError(error)}`);
+          retainedPaths.push(destination);
+          restorationFailed = true;
+        }
+      }
+      if (hadDestination && !(await operationExists(fileSystem, destination))) {
+        try { await fileSystem.rename(previous, destination); }
+        catch (error) {
+          issues.push(`current bundle restoration failed: ${operationError(error)}`);
+          retainedPaths.push(previous);
+          restorationFailed = true;
+        }
+      }
+      if (previousSaved && !(await operationExists(fileSystem, previous))) {
+        try { await fileSystem.rename(savedPrevious, previous); }
+        catch (error) {
+          issues.push(`prior backup restoration failed: ${operationError(error)}`);
+          retainedPaths.push(savedPrevious);
+          restorationFailed = true;
+        }
+      }
+      if (!hadDestination && await operationExists(fileSystem, destination)) {
+        issues.push("fresh candidate installation could not be removed");
+        retainedPaths.push(destination);
+        restorationFailed = true;
+      }
+      if (newBundleMoved) {
+        const oldRestored = !hadDestination || await operationExists(fileSystem, destination);
+        if (oldRestored) {
+          const cleanup = await removeTransactionArtifact(fileSystem, failedCandidate, "failed candidate bundle");
+          issues.push(...cleanup.issues);
+          retainedPaths.push(...cleanup.retainedPaths);
+        }
+        else {
+          try {
+            await fileSystem.rename(failedCandidate, destination);
+            retainedPaths.push(destination);
+          } catch (error) {
+            issues.push(`candidate safety restoration failed: ${operationError(error)}`);
+            retainedPaths.push(failedCandidate);
+          }
+          restorationFailed = true;
+        }
+      }
+      return {
+        ok: issues.length === 0,
+        restored: !restorationFailed,
+        removedFreshInstall: !hadDestination && !(await operationExists(fileSystem, destination)),
+        destination,
+        previous: hadPrevious ? previous : null,
+        issues,
+        retainedPaths: uniquePaths(retainedPaths),
+      };
+    },
+  };
+}
+
+export async function copyServerBundle(source, destination, privateFileOptions = {}) {
+  if (path.resolve(source) === path.resolve(destination)) return { changed: false, source, destination };
+  const candidate = await prepareBundleCandidate(source, destination, privateFileOptions);
+  const transaction = await beginBundleSwap(candidate.path, destination, candidate.fileSystem);
+  const committed = await transaction.commit();
+  return {
+    ok: committed.ok,
+    changed: true,
+    source,
+    destination,
+    previous: transaction.hadDestination ? transaction.previous : null,
+    ...(committed.issues.length ? { warnings: committed.issues } : {}),
+    ...(!committed.ok ? { cleanup: committed, retainedPaths: committed.retainedPaths } : {}),
+  };
+}
+
+async function recoverPersonalUpdate({
+  transaction = null,
+  bundleRecovery = null,
+  previouslyRunning,
+  hostRuntime,
+  profile,
+  installedServerDir: installed,
+}) {
+  const issues = [];
+  let bundle = bundleRecovery || { ok: true, restored: true, destination: installed, issues: [], retainedPaths: [] };
+  if (transaction) {
+    try { bundle = await transaction.rollback(); }
+    catch (error) {
+      bundle = {
+        ok: false,
+        restored: false,
+        destination: installed,
+        issues: [operationError(error)],
+        retainedPaths: [installed, `${installed}.previous`],
+      };
+    }
+  }
+  for (const issue of bundle.issues || []) issues.push(`bundle rollback: ${issue}`);
+
+  let hostPreparation = null;
+  let hostStartResult = null;
+  if (previouslyRunning) {
+    if (!bundle.restored) {
+      issues.push("host recovery was skipped because the prior server bundle was not restored safely");
+    } else {
+      try {
+        hostPreparation = await hostRuntime.prepare({ profile, installedServerDir: installed });
+        if (!hostPreparation?.ok || !hostPreparation?.ready) {
+          const detail = hostPreparation?.issues?.join("; ") || "the restored host runtime was not ready";
+          issues.push(`host re-prepare: ${detail}`);
+        }
+      } catch (error) {
+        issues.push(`host re-prepare: ${operationError(error)}`);
+      }
+      if (hostPreparation?.ok && hostPreparation?.ready) {
+        try {
+          hostStartResult = await hostRuntime.start({ profile, installedServerDir: installed, skipPrepare: true });
+          if (!hostStartResult?.ok || hostStartResult?.running === false) {
+            const detail = hostStartResult?.issues?.join("; ") || "the restored host runtime did not start";
+            issues.push(`host restart: ${detail}`);
+          }
+        } catch (error) {
+          issues.push(`host restart: ${operationError(error)}`);
+        }
+      }
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    restored: Boolean(bundle.restored),
+    bundle,
+    host: previouslyRunning ? { prepare: hostPreparation, start: hostStartResult } : null,
+    issues,
+    retainedPaths: uniquePaths(bundle.retainedPaths || []),
+  };
+}
+
+async function serverPrepareUnlocked({
   profile = "portable",
   hostRuntime = DEFAULT_HOST_RUNTIME,
   preparedPlan = null,
@@ -303,64 +631,240 @@ export async function serverPrepare({
   platform = process.platform,
   env = process.env,
   privateFileRunner,
+  fileSystem,
 } = {}) {
+  requireServerProfile(profile);
   const plan = preparedPlan || await serverPlan({ profile });
   if (!plan.ready) return plan;
   const installed = path.resolve(serverDirectory || installedServerDir());
-  let hostStoppedForUpdate = false;
-  if (profile === "personal" && await exists(installed)) {
-    let existingHost;
-    try { existingHost = await hostRuntime.status({ profile, installedServerDir: installed }); }
-    catch {
+  const privateFileOptions = {
+    platform,
+    env,
+    ...(privateFileRunner ? { run: privateFileRunner } : {}),
+    ...(fileSystem ? { fileSystem } : {}),
+  };
+
+  if (profile !== "personal") {
+    const installation = await copyServerBundle(plan.bundle.directory, installed, privateFileOptions);
+    if (installation.ok === false) {
+      const issues = installation.cleanup?.issues || installation.warnings || ["Server bundle cleanup failed"];
+      const retainedPaths = uniquePaths(installation.retainedPaths || installation.cleanup?.retainedPaths || []);
       return {
         ok: false,
         ready: false,
         mode: "local-docker",
         profile,
-        issues: ["The existing host runtime could not be inspected safely before the server update"],
+        installation,
+        missingSecretFields: [],
+        issues,
+        retainedPaths,
+        next: "Remove the retained secret-bearing backup paths reported by cleanup before retrying",
+      };
+    }
+    const environment = await initializeEnvironment(installed, profile, privateFileOptions);
+    const missingSecretFields = await missingLlmSecrets(environment.path);
+    return {
+      ok: true,
+      ready: missingSecretFields.length === 0,
+      mode: "local-docker",
+      profile,
+      installation,
+      environment,
+      missingSecretFields,
+      next: missingSecretFields.length
+        ? `Fill the listed fields in ${environment.path}, then run server start`
+        : "Run server start",
+    };
+  }
+
+  const hadInstalledBundle = await exists(installed);
+  const candidate = await prepareBundleCandidate(plan.bundle.directory, installed, privateFileOptions);
+  let candidateEnvironment;
+  let missingSecretFields;
+  try {
+    candidateEnvironment = await initializeEnvironment(candidate.path, profile, privateFileOptions);
+    missingSecretFields = await missingLlmSecrets(candidateEnvironment.path);
+  } catch (error) {
+    const cleanup = await removeTransactionArtifact(candidate.fileSystem, candidate.path, "candidate bundle");
+    if (!cleanup.ok) throw errorWithRecovery(error, "Personal server candidate validation failed", cleanup);
+    throw error;
+  }
+  const environment = { ...candidateEnvironment, path: path.join(installed, ".env") };
+  if (missingSecretFields.length) {
+    const cleanup = await removeTransactionArtifact(candidate.fileSystem, candidate.path, "rejected candidate bundle");
+    return {
+      ok: cleanup.ok,
+      ready: false,
+      mode: "local-docker",
+      profile,
+      installation: { changed: false, source: plan.bundle.directory, destination: installed, candidateRejected: true },
+      environment: { ...environment, installed: hadInstalledBundle, candidateInstalled: false },
+      missingSecretFields,
+      cleanup,
+      ...(cleanup.issues.length ? { issues: cleanup.issues, retainedPaths: cleanup.retainedPaths } : {}),
+      hostStoppedForUpdate: false,
+      next: cleanup.ok
+        ? `Provide the listed secret fields in the source or existing ${path.join(installed, ".env")}, then run server prepare again`
+        : "Remove the retained secret-bearing candidate path reported by cleanup before retrying",
+    };
+  }
+
+  let hostStoppedForUpdate = false;
+  let previouslyRunning = false;
+  if (hadInstalledBundle) {
+    let existingHost;
+    try { existingHost = await hostRuntime.status({ profile, installedServerDir: installed }); }
+    catch {
+      const cleanup = await removeTransactionArtifact(candidate.fileSystem, candidate.path, "candidate bundle");
+      return {
+        ok: false,
+        ready: false,
+        mode: "local-docker",
+        profile,
+        issues: [
+          "The existing host runtime could not be inspected safely before the server update",
+          ...cleanup.issues,
+        ],
+        cleanup,
+        ...(cleanup.retainedPaths.length ? { retainedPaths: cleanup.retainedPaths } : {}),
         hostStoppedForUpdate: false,
       };
     }
-    if (existingHost.running || existingHost.supervisor?.processAlive) {
-      const stopped = await hostRuntime.stop({ profile, installedServerDir: installed });
-      if (!stopped.ok || !stopped.stopped) {
+    previouslyRunning = Boolean(existingHost.running || existingHost.supervisor?.processAlive);
+    if (previouslyRunning) {
+      let stopped;
+      try { stopped = await hostRuntime.stop({ profile, installedServerDir: installed }); }
+      catch (error) {
+        const cleanup = await removeTransactionArtifact(candidate.fileSystem, candidate.path, "candidate bundle");
         return {
           ok: false,
           ready: false,
           mode: "local-docker",
           profile,
-          issues: ["The existing host runtime could not be stopped safely before the server update"],
+          issues: [
+            `The existing host runtime could not be stopped safely before the server update: ${operationError(error)}`,
+            ...cleanup.issues,
+          ],
+          cleanup,
+          ...(cleanup.retainedPaths.length ? { retainedPaths: cleanup.retainedPaths } : {}),
+          hostStoppedForUpdate: false,
+        };
+      }
+      if (!stopped.ok || !stopped.stopped) {
+        const cleanup = await removeTransactionArtifact(candidate.fileSystem, candidate.path, "candidate bundle");
+        return {
+          ok: false,
+          ready: false,
+          mode: "local-docker",
+          profile,
+          issues: [
+            "The existing host runtime could not be stopped safely before the server update",
+            ...cleanup.issues,
+          ],
           host: stopped,
+          cleanup,
+          ...(cleanup.retainedPaths.length ? { retainedPaths: cleanup.retainedPaths } : {}),
           hostStoppedForUpdate: false,
         };
       }
       hostStoppedForUpdate = true;
     }
   }
-  const privateFileOptions = { platform, env, ...(privateFileRunner ? { run: privateFileRunner } : {}) };
-  const installation = await copyServerBundle(plan.bundle.directory, installed, privateFileOptions);
-  const environment = await initializeEnvironment(installed, profile, privateFileOptions);
-  const missingSecretFields = await missingLlmSecrets(environment.path);
-  const host = profile === "personal"
-    ? await hostRuntime.prepare({ profile, installedServerDir: installed })
-    : null;
-  const hostReady = host ? Boolean(host.ok && host.ready) : true;
-  const ready = missingSecretFields.length === 0 && hostReady;
+
+  let transaction;
+  try {
+    transaction = await beginBundleSwap(candidate.path, installed, candidate.fileSystem);
+  } catch (error) {
+    const recovery = await recoverPersonalUpdate({
+      bundleRecovery: error.rollback || { ok: true, restored: true, destination: installed, issues: [] },
+      previouslyRunning,
+      hostRuntime,
+      profile,
+      installedServerDir: installed,
+    });
+    throw errorWithRecovery(error, "Personal server bundle installation failed", recovery);
+  }
+
+  let host;
+  try {
+    host = await hostRuntime.prepare({ profile, installedServerDir: installed });
+  } catch (error) {
+    const recovery = await recoverPersonalUpdate({
+      transaction,
+      previouslyRunning,
+      hostRuntime,
+      profile,
+      installedServerDir: installed,
+    });
+    throw errorWithRecovery(error, "Personal host preparation failed", recovery);
+  }
+
+  if (!host?.ok || !host?.ready) {
+    const recovery = await recoverPersonalUpdate({
+      transaction,
+      previouslyRunning,
+      hostRuntime,
+      profile,
+      installedServerDir: installed,
+    });
+    const originalIssues = host?.issues?.length ? host.issues : ["The candidate host runtime was not ready"];
+    return {
+      ok: false,
+      ready: false,
+      mode: "local-docker",
+      profile,
+      installation: { changed: false, source: plan.bundle.directory, destination: installed, rolledBack: true },
+      environment: { ...environment, installed: hadInstalledBundle, candidateInstalled: false },
+      missingSecretFields,
+      host,
+      rollback: recovery,
+      ...(recovery.retainedPaths.length ? { retainedPaths: recovery.retainedPaths } : {}),
+      issues: [
+        ...originalIssues,
+        ...recovery.issues.map(issue => `Rollback recovery: ${issue}`),
+      ],
+      hostStoppedForUpdate,
+      next: recovery.ok
+        ? "The previous server was restored; resolve the candidate host-service issue, then run server prepare again"
+        : "The update failed and automatic recovery was incomplete; inspect the rollback report before retrying",
+    };
+  }
+
+  const committed = await transaction.commit();
   const result = {
-    ok: host ? Boolean(host.ok) : true,
-    ready,
+    ok: committed.ok,
+    ready: committed.ok,
     mode: "local-docker",
     profile,
-    installation,
+    installation: {
+      changed: true,
+      source: plan.bundle.directory,
+      destination: installed,
+      previous: transaction.hadDestination ? transaction.previous : null,
+      ...(committed.issues.length ? { warnings: committed.issues } : {}),
+      ...(!committed.ok ? { cleanup: committed, retainedPaths: committed.retainedPaths } : {}),
+    },
     environment,
     missingSecretFields,
-    next: missingSecretFields.length
-      ? `Fill the listed fields in ${environment.path}, then run server start`
-      : (hostReady ? "Run server start" : "Resolve the reported host-service issues, then run server prepare again"),
+    ...(committed.issues.length ? { issues: committed.issues, retainedPaths: committed.retainedPaths } : {}),
+    next: committed.ok
+      ? "Run server start"
+      : "Remove the retained retired-backup path reported by cleanup before starting the server",
+    host,
+    hostStoppedForUpdate,
   };
-  if (host) result.host = host;
-  if (profile === "personal") result.hostStoppedForUpdate = hostStoppedForUpdate;
   return result;
+}
+
+export async function serverPrepare(options = {}) {
+  const profile = options.profile || "portable";
+  requireServerProfile(profile);
+  const installed = path.resolve(options.serverDirectory || installedServerDir());
+  return withServerLifecycleLock(installed, "prepare", () => serverPrepareUnlocked({
+    ...options,
+    profile,
+    serverDirectory: installed,
+  }));
 }
 
 async function waitForHealth(url, timeoutMs = 120_000) {
@@ -377,17 +881,24 @@ async function waitForHealth(url, timeoutMs = 120_000) {
   return { ok: false, error: lastError || "health check timed out", elapsedMs: Date.now() - started };
 }
 
-export async function serverStart({
+async function serverStartUnlocked({
   profile = "portable",
   build = true,
   hostRuntime = DEFAULT_HOST_RUNTIME,
   preparedServer = null,
+  preparedPlan = null,
   serverDirectory = null,
   composeRunner = compose,
   healthWaiter = waitForHealth,
 } = {}) {
+  requireServerProfile(profile);
   const installed = path.resolve(serverDirectory || installedServerDir());
-  const prepared = preparedServer || await serverPrepare({ profile, hostRuntime, serverDirectory: installed });
+  const prepared = preparedServer || await serverPrepareUnlocked({
+    profile,
+    hostRuntime,
+    preparedPlan,
+    serverDirectory: installed,
+  });
   if (!prepared.ok || !prepared.ready) return prepared;
   const host = profile === "personal"
     ? await hostRuntime.start({ profile, installedServerDir: installed, skipPrepare: true })
@@ -429,6 +940,17 @@ export async function serverStart({
   return result;
 }
 
+export async function serverStart(options = {}) {
+  const profile = options.profile || "portable";
+  requireServerProfile(profile);
+  const installed = path.resolve(options.serverDirectory || installedServerDir());
+  return withServerLifecycleLock(installed, "start", () => serverStartUnlocked({
+    ...options,
+    profile,
+    serverDirectory: installed,
+  }));
+}
+
 export async function serverStatus({
   profile = "portable",
   hostRuntime = DEFAULT_HOST_RUNTIME,
@@ -437,6 +959,7 @@ export async function serverStatus({
   composeRunner = compose,
   healthWaiter = waitForHealth,
 } = {}) {
+  requireServerProfile(profile);
   const directory = path.resolve(serverDirectory || installedServerDir());
   const [docker, host] = await Promise.all([
     dockerInspector(),
@@ -470,12 +993,13 @@ export async function serverStatus({
   }
 }
 
-export async function serverStop({
+async function serverStopUnlocked({
   profile = "portable",
   hostRuntime = DEFAULT_HOST_RUNTIME,
   serverDirectory = null,
   composeRunner = compose,
 } = {}) {
+  requireServerProfile(profile);
   const directory = path.resolve(serverDirectory || installedServerDir());
   const composeFileExists = await exists(path.join(directory, "compose.yaml"));
   if (profile !== "personal") {
@@ -502,6 +1026,17 @@ export async function serverStop({
     ...(composeError ? { error: composeError } : {}),
     ...(!composeFileExists ? { reason: "Honcho containers were not installed; host services were still stopped" } : {}),
   };
+}
+
+export async function serverStop(options = {}) {
+  const profile = options.profile || "portable";
+  requireServerProfile(profile);
+  const installed = path.resolve(options.serverDirectory || installedServerDir());
+  return withServerLifecycleLock(installed, "stop", () => serverStopUnlocked({
+    ...options,
+    profile,
+    serverDirectory: installed,
+  }));
 }
 
 async function discardBody(response) {
@@ -699,6 +1234,7 @@ export async function serverVerify({
   fetchImpl = globalThis.fetch,
   requestTimeoutMs = 120_000,
 } = {}) {
+  requireServerProfile(profile);
   const directory = path.resolve(serverDirectory || installedServerDir());
   if (profile !== "personal") {
     return {
