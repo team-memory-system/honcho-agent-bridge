@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import fsp from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -147,7 +147,9 @@ test("setup apply refuses malformed host settings before installing anything", a
   await assert.rejects(fsp.access(path.join(appHome, "config.json")));
 });
 
-test("setup apply restores runtime and host files byte-for-byte when the final config write fails", async (t) => {
+test("setup apply restores runtime and host files byte-for-byte when the final config write fails", {
+  skip: process.platform === "win32" || (typeof process.getuid === "function" && process.getuid() === 0),
+}, async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-rollback-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const home = path.join(root, "user");
@@ -161,11 +163,19 @@ test("setup apply restores runtime and host files byte-for-byte when the final c
   await fsp.mkdir(appHome, { recursive: true });
   await fsp.writeFile(codexHooks, codexOriginal);
   await fsp.writeFile(claudeSettings, claudeOriginal);
-  const env = { ...process.env, AGENT_MEMORY_HOME: appHome, AGENT_MEMORY_USER_HOME: home, HOME: home };
-  const child = spawn(
-    process.execPath,
-    [
-      CLI,
+  const lockedConfigDirectory = path.join(root, "locked-config");
+  const configPath = path.join(lockedConfigDirectory, "config.json");
+  await fsp.mkdir(lockedConfigDirectory, { mode: 0o500 });
+  await fsp.chmod(lockedConfigDirectory, 0o500);
+  const env = {
+    ...process.env,
+    AGENT_MEMORY_HOME: appHome,
+    AGENT_MEMORY_USER_HOME: home,
+    AGENT_MEMORY_CONFIG: configPath,
+    HOME: home,
+  };
+  await assert.rejects(
+    runCli([
       "setup",
       "apply",
       "--agents",
@@ -174,21 +184,13 @@ test("setup apply restores runtime and host files byte-for-byte when the final c
       "user_test",
       "--honcho-url",
       "http://127.0.0.1:9",
-    ],
-    { env, stdio: ["ignore", "pipe", "pipe"] },
+    ], env),
+    (error) => /changes were rolled back/.test(String(error.stdout || "")),
   );
-  await fsp.mkdir(path.join(appHome, `config.json.tmp-${child.pid}`));
-  let stdout = "";
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk;
-  });
-  const exitCode = await new Promise((resolve) => child.on("exit", resolve));
-  assert.notEqual(exitCode, 0);
-  assert.match(stdout, /changes were rolled back/);
   assert.equal(await fsp.readFile(codexHooks, "utf8"), codexOriginal);
   assert.equal(await fsp.readFile(claudeSettings, "utf8"), claudeOriginal);
   await assert.rejects(fsp.access(path.join(appHome, "runtime", "collector")));
-  await assert.rejects(fsp.access(path.join(appHome, "config.json")));
+  await assert.rejects(fsp.access(configPath));
   await assert.rejects(fsp.access(path.join(appHome, "setup.lock")));
 });
 

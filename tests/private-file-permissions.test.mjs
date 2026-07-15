@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { securePrivateFile } from "../scripts/private-file-permissions.mjs";
+import { securePrivateFile, writePrivateFileAtomic } from "../scripts/private-file-permissions.mjs";
 
 const USER_SID = "S-1-5-21-111-222-333-1001";
 
@@ -95,4 +95,45 @@ test("non-Windows private files retain owner-only mode", { skip: process.platfor
   const result = await securePrivateFile(target, { platform: "darwin" });
   assert.equal(result.method, "posix-mode");
   assert.equal((await fsp.stat(target)).mode & 0o777, 0o600);
+});
+
+test("Windows atomic private writes apply ACLs before writing any secret bytes", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-private-atomic-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, "config.json");
+  const securedTargets = [];
+  const sizesWhileSecuring = [];
+  await writePrivateFileAtomic(target, '{"token":"private"}\n', {
+    platform: "win32",
+    env: { USERNAME: "alice", SystemRoot: "C:\\Windows" },
+    run: async (command, args) => {
+      if (command.endsWith("\\whoami.exe")) return { ok: true, stdout: `"WORKSTATION\\alice","${USER_SID}"\r\n` };
+      securedTargets.push(args[0]);
+      sizesWhileSecuring.push((await fsp.stat(args[0])).size);
+      return { ok: true };
+    },
+  });
+  assert.equal(await fsp.readFile(target, "utf8"), '{"token":"private"}\n');
+  assert.equal(securedTargets.length, 2);
+  assert.equal(securedTargets.every((item) => item !== target && item.startsWith(`${target}.private-`)), true);
+  assert.deepEqual(sizesWhileSecuring, [0, 0]);
+});
+
+test("atomic private writes never publish content when ACL restriction fails", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-private-fail-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, "config.json");
+  await fsp.writeFile(target, "original\n");
+  await assert.rejects(
+    writePrivateFileAtomic(target, "replacement\n", {
+      platform: "win32",
+      env: { USERNAME: "alice", SystemRoot: "C:\\Windows" },
+      run: async (command) => command.endsWith("\\whoami.exe")
+        ? { ok: true, stdout: `"WORKSTATION\\alice","${USER_SID}"\r\n` }
+        : { ok: false },
+    }),
+    /ACL reset failed/,
+  );
+  assert.equal(await fsp.readFile(target, "utf8"), "original\n");
+  assert.deepEqual((await fsp.readdir(root)).sort(), ["config.json"]);
 });

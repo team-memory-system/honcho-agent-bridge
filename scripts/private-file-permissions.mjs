@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -111,4 +112,33 @@ export async function securePrivateFile(target, {
   if (!restricted.ok) throw new Error("Unable to secure private file on Windows: ACL restriction failed");
 
   return { ok: true, method: "windows-acl", userSid: identity.sid };
+}
+
+export async function writePrivateFileAtomic(target, content, {
+  mode = 0o600,
+  ...permissionOptions
+} = {}) {
+  await fsp.mkdir(path.dirname(target), { recursive: true });
+  const platform = permissionOptions.platform || process.platform;
+  const temporary = `${target}.private-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
+  let temporaryCreated = false;
+  try {
+    if (platform === "win32") {
+      // Windows ignores POSIX creation modes. Publish no secret bytes until the
+      // temporary file has a restricted DACL, then replace the destination.
+      await fsp.writeFile(temporary, "", { mode, flag: "wx" });
+      temporaryCreated = true;
+      await securePrivateFile(temporary, { ...permissionOptions, platform });
+      await fsp.writeFile(temporary, content, { flag: "r+" });
+    } else {
+      // On POSIX the exclusive create and owner-only mode apply atomically.
+      await fsp.writeFile(temporary, content, { mode, flag: "wx" });
+      temporaryCreated = true;
+      await securePrivateFile(temporary, { ...permissionOptions, platform });
+    }
+    await fsp.rename(temporary, target);
+  } catch (error) {
+    if (temporaryCreated) await fsp.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
 }

@@ -13,6 +13,7 @@ import {
   userHome,
 } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
+import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { VERSION } from "./version.mjs";
 import { serverPlan, serverPrepare, serverStart, serverStatus, serverStop, serverVerify } from "./server-manager.mjs";
 
@@ -369,11 +370,20 @@ function backupName(filePath) {
   return `${filePath}.agent-memory-backup-${stamp}`;
 }
 
-async function writeJsonAtomic(filePath, value, { backup = false } = {}) {
+async function writeJsonAtomic(filePath, value, { backup = false, privateFile = false } = {}) {
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  if (backup && (await pathExists(filePath))) await fsp.copyFile(filePath, backupName(filePath));
+  if (backup && (await pathExists(filePath))) {
+    const backupPath = backupName(filePath);
+    if (privateFile) await writePrivateFileAtomic(backupPath, await fsp.readFile(filePath));
+    else await fsp.copyFile(filePath, backupPath);
+  }
+  const content = `${JSON.stringify(value, null, 2)}\n`;
+  if (privateFile) {
+    await writePrivateFileAtomic(filePath, content);
+    return;
+  }
   const temporary = `${filePath}.tmp-${process.pid}`;
-  await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await fsp.writeFile(temporary, content, { mode: 0o600 });
   await fsp.rename(temporary, filePath);
   await fsp.chmod(filePath, 0o600).catch(() => {});
 }
@@ -428,9 +438,13 @@ async function fileSnapshot(filePath) {
   }
 }
 
-async function restoreFileSnapshot(filePath, snapshot) {
+async function restoreFileSnapshot(filePath, snapshot, { privateFile = false } = {}) {
   if (!snapshot.existed) {
     await fsp.rm(filePath, { force: true });
+    return;
+  }
+  if (privateFile) {
+    await writePrivateFileAtomic(filePath, snapshot.content, { mode: snapshot.mode ?? 0o600 });
     return;
   }
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
@@ -518,7 +532,7 @@ async function applySetupPlan(plan, paths) {
     await writeJsonAtomic(
       paths.configPath,
       { ...plan.config, installedVersion: VERSION, installedAt: new Date().toISOString() },
-      { backup: true },
+      { backup: true, privateFile: true },
     );
     await finalizeRuntime(runtime);
     return { ok: true, version: VERSION, paths, runtime, hooks, restartRequired: true };
@@ -532,7 +546,7 @@ async function applySetupPlan(plan, paths) {
       }
     }
     try {
-      await restoreFileSnapshot(paths.configPath, configSnapshot);
+      await restoreFileSnapshot(paths.configPath, configSnapshot, { privateFile: true });
     } catch (rollbackError) {
       rollbackErrors.push(`configuration: ${rollbackError?.message || rollbackError}`);
     }
