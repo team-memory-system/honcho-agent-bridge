@@ -12,6 +12,10 @@ import { buildDistribution } from "../scripts/build-distribution.mjs";
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUILDER = path.join(ROOT, "scripts", "build-distribution.mjs");
+const SOURCE_CHECKOUT = await fsp.access(path.join(ROOT, ".git")).then(() => true, () => false);
+const SOURCE_CHECKOUT_ONLY = {
+  skip: SOURCE_CHECKOUT ? false : "release-builder tests require Git source provenance",
+};
 
 async function createMinimalHoncho(root) {
   const honcho = path.join(root, "honcho");
@@ -32,7 +36,7 @@ async function createMinimalHoncho(root) {
   return honcho;
 }
 
-test("distribution includes source and topology but excludes state and secrets", async (t) => {
+test("distribution includes source and topology but excludes state and secrets", SOURCE_CHECKOUT_ONLY, async (t) => {
   const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-distribution-"));
   t.after(() => fsp.rm(temporary, { recursive: true, force: true }));
   const honcho = path.join(temporary, "honcho");
@@ -174,7 +178,7 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.equal(JSON.parse(rerun.stdout).ok, true, "a builder-owned release directory may be replaced");
 });
 
-test("failed environment, copy, and archive stages preserve the prior release byte-for-byte", async (t) => {
+test("failed environment, copy, and archive stages preserve the prior release byte-for-byte", SOURCE_CHECKOUT_ONLY, async (t) => {
   const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-distribution-rollback-"));
   t.after(() => fsp.rm(temporary, { recursive: true, force: true }));
   const honcho = await createMinimalHoncho(temporary);
@@ -226,7 +230,7 @@ test("failed environment, copy, and archive stages preserve the prior release by
   await assertPriorRelease();
 });
 
-test("distribution refuses unsafe names and unrelated existing directories", async (t) => {
+test("distribution refuses unsafe names and unrelated existing directories", SOURCE_CHECKOUT_ONLY, async (t) => {
   const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-distribution-path-"));
   t.after(() => fsp.rm(temporary, { recursive: true, force: true }));
   const output = path.join(temporary, "output");
