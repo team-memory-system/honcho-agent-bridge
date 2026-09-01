@@ -348,7 +348,9 @@ function buildCodexMessages(sessionId, parsed, sessionState) {
 async function ensureSession(workspace, provider, sessionId, parsed, peers) {
   const peerConfig = {};
   for (const peer of peers) {
-    peerConfig[peer] = { observe_me: true, observe_others: false };
+    // 에이전트·자동화 피어는 학습(파생) 대상에서 제외 — 셀프 표상 노이즈 방지
+    const isAgentPeer = peer.startsWith("assistant_") || peer.startsWith("automation_");
+    peerConfig[peer] = { observe_me: !isAgentPeer, observe_others: false };
   }
   const metadata = {
     ...parsed.metadata,

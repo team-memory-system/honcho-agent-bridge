@@ -62,7 +62,7 @@ test("Claude collector maps peers, stores source IDs, and remains idempotent", a
   const sessionCreate = api.requests.find((entry) => entry.url === "/v3/workspaces/memory/sessions");
   assert.deepEqual(sessionCreate.body.peers, {
     user_test: { observe_me: true, observe_others: false },
-    assistant_claude: { observe_me: true, observe_others: false },
+    assistant_claude: { observe_me: false, observe_others: false },
   });
   const messageWrite = api.requests.find((entry) => entry.url?.endsWith("/messages"));
   assert.deepEqual(messageWrite.body.messages.map((message) => message.peer_id), ["user_test", "assistant_claude"]);

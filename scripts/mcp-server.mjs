@@ -145,7 +145,8 @@ function coercePeers(peers) {
     peers.map((item) => {
       const peerId = item?.peer_id || item?.id;
       if (!peerId) throw new Error("Each peer item must include peer_id or id");
-      return [String(peerId), { observe_me: item.observe_me ?? true, observe_others: item.observe_others ?? true }];
+      const isAgentPeer = String(peerId).startsWith("assistant_") || String(peerId).startsWith("automation_");
+      return [String(peerId), { observe_me: item.observe_me ?? !isAgentPeer, observe_others: item.observe_others ?? false }];
     }),
   );
 }
