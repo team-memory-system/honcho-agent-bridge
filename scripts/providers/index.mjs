@@ -1,8 +1,9 @@
 import * as codex from "./codex.mjs";
 import * as claude from "./claude.mjs";
 import * as agy from "./agy.mjs";
+import * as chatgpt from "./chatgpt.mjs";
 
-const providers = { codex, claude, agy };
+const providers = { codex, claude, agy, chatgpt };
 
 export function getProvider(name) {
   const provider = providers[name];

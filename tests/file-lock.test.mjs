@@ -7,7 +7,7 @@ import test from "node:test";
 import { acquireFileLock, releaseFileLock } from "../scripts/file-lock.mjs";
 
 test("an old owner never removes a replacement owner's lock", async (t) => {
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-lock-owner-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-lock-owner-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const lockPath = path.join(directory, "state.lock");
   const oldOwner = await acquireFileLock(lockPath);

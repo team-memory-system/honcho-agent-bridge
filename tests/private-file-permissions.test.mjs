@@ -16,7 +16,7 @@ test("Windows private files grant only the current SID, LocalSystem, and Adminis
     return { ok: true, stdout: "Successfully processed 1 files\r\n" };
   };
 
-  const result = await securePrivateFile("C:\\AgentMemory\\runtime\\host-config.json", {
+  const result = await securePrivateFile("C:\\HonchoAgentBridge\\runtime\\host-config.json", {
     platform: "win32",
     env: { USERNAME: "Alice", SystemRoot: "C:\\Windows" },
     run,
@@ -31,12 +31,12 @@ test("Windows private files grant only the current SID, LocalSystem, and Adminis
     },
     {
       command: "C:\\Windows\\System32\\icacls.exe",
-      args: ["C:\\AgentMemory\\runtime\\host-config.json", "/reset", "/q"],
+      args: ["C:\\HonchoAgentBridge\\runtime\\host-config.json", "/reset", "/q"],
     },
     {
       command: "C:\\Windows\\System32\\icacls.exe",
       args: [
-        "C:\\AgentMemory\\runtime\\host-config.json",
+        "C:\\HonchoAgentBridge\\runtime\\host-config.json",
         "/inheritancelevel:r",
         "/grant:r",
         `*${USER_SID}:F`,
@@ -88,7 +88,7 @@ test("Windows private-file setup propagates icacls failure and stops before late
 });
 
 test("non-Windows private files retain owner-only mode", { skip: process.platform === "win32" }, async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-private-file-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-private-file-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const target = path.join(root, "private.env");
   await fsp.writeFile(target, "SECRET=value\n", { mode: 0o644 });
@@ -98,7 +98,7 @@ test("non-Windows private files retain owner-only mode", { skip: process.platfor
 });
 
 test("Windows atomic private writes apply ACLs before writing any secret bytes", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-private-atomic-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-private-atomic-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const target = path.join(root, "config.json");
   const securedTargets = [];
@@ -120,7 +120,7 @@ test("Windows atomic private writes apply ACLs before writing any secret bytes",
 });
 
 test("atomic private writes never publish content when ACL restriction fails", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-private-fail-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-private-fail-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const target = path.join(root, "config.json");
   await fsp.writeFile(target, "original\n");

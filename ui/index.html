@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>기억 설치</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>기억 설치</h1>
+  <p>대화를 자기 Honcho에 모으는 데 필요한 것만 여기서 끝냅니다. 터미널은 필요 없습니다.</p>
+  <button id="refresh" class="quiet">다시 확인</button>
+</header>
+
+<main>
+  <section class="card" id="status-card">
+    <h2>1. 지금 상태</h2>
+    <div id="status" class="status-grid"><p class="muted">확인 중…</p></div>
+    <pre id="status-detail" hidden></pre>
+  </section>
+
+  <section class="card">
+    <h2>2. 훅 설치</h2>
+    <p class="muted">에이전트가 대화를 끝낼 때마다 수집기가 그 기록을 읽어 Honcho로 보냅니다.</p>
+    <form id="setup-form">
+      <label>내 peer id
+        <input name="userPeer" placeholder="user_chen" autocomplete="off" required>
+      </label>
+      <label>workspace
+        <input name="workspace" placeholder="memory" autocomplete="off">
+      </label>
+      <label>Honcho 주소
+        <input name="honchoUrl" placeholder="http://127.0.0.1:8001" autocomplete="off">
+      </label>
+      <label>대상 에이전트
+        <input name="agents" placeholder="codex,claude" autocomplete="off">
+      </label>
+      <div class="actions">
+        <button type="button" data-setup="plan" class="quiet">무엇이 바뀌는지 먼저 보기</button>
+        <button type="submit" class="primary">설치</button>
+      </div>
+    </form>
+    <pre id="setup-result" hidden></pre>
+  </section>
+
+  <section class="card">
+    <h2>3. 서버와 프록시</h2>
+    <p class="muted">Honcho 컨테이너와, 구독 계정을 API로 바꿔 주는 프록시를 올립니다.</p>
+    <div class="actions">
+      <button data-server="status" class="quiet">서버 상태</button>
+      <button data-server="prepare" class="quiet">서버 준비</button>
+      <button data-server="start" class="primary">서버 시작</button>
+      <button data-server="stop" class="quiet">서버 정지</button>
+    </div>
+    <form id="proxy-config">
+      <label>프록시 소스 위치
+        <input name="llmProxyRoot" placeholder="/Users/me/dev/llm-proxy" autocomplete="off">
+      </label>
+      <div class="actions">
+        <label class="inline"><input type="checkbox" name="codex"> Codex</label>
+        <label class="inline"><input type="checkbox" name="claude"> Claude</label>
+        <label class="inline"><input type="checkbox" name="router"> 라우터</label>
+        <button type="submit" class="quiet">저장</button>
+      </div>
+    </form>
+    <div class="actions">
+      <button data-proxy="health" class="quiet">프록시 상태</button>
+      <button data-proxy="install" class="quiet">프록시 설치</button>
+      <button data-proxy="start" class="primary">프록시 시작</button>
+      <button data-proxy="stop" class="quiet">프록시 정지</button>
+    </div>
+    <pre id="server-result" hidden></pre>
+  </section>
+
+  <section class="card">
+    <h2>4. ChatGPT 웹 대화 넣기</h2>
+    <p class="muted">
+      ChatGPT 설정에서 <strong>데이터 내보내기</strong>를 하면 메일로 zip이 옵니다.
+      그 안의 <code>conversations.json</code>을 그대로 올리세요. 이미 들어간 대화는 다시 넣지 않습니다.
+    </p>
+    <input type="file" id="chatgpt-file" accept=".json,application/json">
+    <div class="actions">
+      <button id="chatgpt-import" class="primary" disabled>넣기</button>
+      <span id="chatgpt-progress" class="muted"></span>
+    </div>
+    <pre id="chatgpt-result" hidden></pre>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

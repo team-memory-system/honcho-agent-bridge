@@ -5,15 +5,55 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SELF = fileURLToPath(import.meta.url);
-const HEARTBEAT_MS = 5_000;
-const DISABLED_POLL_MS = 2_000;
 const privateValues = new Set();
 let stopping = false;
-let proxyChild = null;
 let ollamaChild = null;
-let proxyRestartTimer = null;
-let proxyRestartDelay = 1_000;
 const timers = new Set();
+
+/**
+ * One entry per managed proxy: the child, its pending restart, and how long the
+ * next restart waits. Keyed by service name so the Codex proxy, the Claude proxy
+ * and the router each back off on their own schedule.
+ */
+const proxyRuntime = new Map();
+
+function runtimeFor(name) {
+  let entry = proxyRuntime.get(name);
+  if (!entry) {
+    entry = { child: null, restartTimer: null, restartDelay: 1_000 };
+    proxyRuntime.set(name, entry);
+  }
+  return entry;
+}
+
+/** The proxies this config asks for, oldest config shape included. */
+function proxyServices(config) {
+  if (config.proxies && typeof config.proxies === "object") {
+    return Object.entries(config.proxies)
+      .map(([name, service]) => ({ name, ...service }))
+      .filter((service) => service.enabled);
+  }
+  return config.proxy?.enabled ? [{ name: "codex", ...config.proxy }] : [];
+}
+
+/**
+ * What each proxy expects in its environment. The shared secret is the only value
+ * that is a secret, and it is added by name so a service never sees another's.
+ */
+function proxyEnvironment(service) {
+  const environment = { HOST: "127.0.0.1", PORT: String(service.port) };
+  if (service.secretEnv && service.sharedSecret) environment[service.secretEnv] = service.sharedSecret;
+  if (service.name === "codex") {
+    environment.CODEX_AUTH_PATH = service.authPath;
+    environment.DEFAULT_CODEX_MODEL = service.defaultModel;
+  }
+  if (service.name === "claude") {
+    environment.CLAUDE_BIN = service.claudeBin || "claude";
+    if (service.defaultModel) environment.CLAUDE_PROXY_MODEL = service.defaultModel;
+  }
+  if (service.name === "router" && service.configPath) environment.ROUTER_CONFIG = service.configPath;
+  return environment;
+}
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -45,10 +85,6 @@ function log(event, detail = {}) {
   process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), event, ...clean })}\n`);
 }
 
-async function exists(target) {
-  try { await fsp.access(target); return true; } catch { return false; }
-}
-
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -58,26 +94,29 @@ async function readJson(target) {
   try { return JSON.parse(await fsp.readFile(target, "utf8")); } catch { return null; }
 }
 
-async function writeJsonAtomic(target, value) {
-  await fsp.mkdir(path.dirname(target), { recursive: true });
-  const temporary = `${target}.tmp-${process.pid}`;
-  await fsp.writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  await fsp.rename(temporary, target);
-  await fsp.chmod(target, 0o600).catch(() => {});
-}
-
 function validateConfig(config, configFile) {
   if (!config || config.format !== 1) throw new Error("Unsupported host runtime config");
-  for (const target of [config?.state?.pidFile, config?.state?.disabledFile, config?.proxy?.entrypoint, config?.supervisorFile]) {
+  const services = proxyServices(config);
+  const paths = [config?.state?.pidFile, config?.supervisorFile];
+  for (const service of services) paths.push(service.entrypoint);
+  if (!services.length && config?.proxy?.entrypoint) paths.push(config.proxy.entrypoint);
+  for (const target of paths) {
     if (!target || !path.isAbsolute(target)) throw new Error("Host runtime config contains an invalid path");
   }
-  for (const endpoint of [config.proxy?.baseUrl, config.ollama?.baseUrl].filter(Boolean)) {
+  const endpoints = [config.ollama?.baseUrl, ...services.map((service) => service.baseUrl)].filter(Boolean);
+  for (const endpoint of endpoints) {
     const url = new URL(endpoint);
     if (url.username || url.password || !["127.0.0.1", "localhost", "::1"].includes(url.hostname)) {
       throw new Error("Managed host services must use a credential-free loopback URL");
     }
   }
-  if (config.proxy?.enabled && !config.proxy.sharedSecret) throw new Error("Codex proxy shared secret is missing");
+  // The Codex proxy is what Honcho itself calls, so a missing secret there is a
+  // broken install rather than an open door. The others may legitimately run without.
+  const codex = services.find((service) => service.name === "codex");
+  if (codex && !codex.sharedSecret) throw new Error("Codex proxy shared secret is missing");
+  for (const service of services) {
+    if (service.sharedSecret) privateValues.add(String(service.sharedSecret));
+  }
   if (config.proxy?.sharedSecret) privateValues.add(String(config.proxy.sharedSecret));
   config.state.configFile = path.resolve(config.state.configFile || configFile);
   return config;
@@ -91,7 +130,6 @@ async function acquirePid(config) {
   const record = {
     pid: process.pid,
     startedAt: new Date().toISOString(),
-    heartbeatAt: new Date().toISOString(),
     configFile: config.state.configFile,
     supervisorFile: config.supervisorFile,
   };
@@ -137,36 +175,37 @@ function pipeLines(stream, source) {
   });
 }
 
-function startProxy(config) {
-  if (stopping || !config.proxy.enabled || proxyChild) return;
-  proxyChild = spawn(process.execPath, [config.proxy.entrypoint], {
-    cwd: config.proxy.sourceDir,
-    env: safeEnvironment({
-      PORT: String(config.proxy.port),
-      CODEX_AUTH_PATH: config.proxy.authPath,
-      DEFAULT_CODEX_MODEL: config.proxy.defaultModel,
-      CODEX_PROXY_SHARED_SECRET: config.proxy.sharedSecret,
-    }),
+function startProxyService(config, service) {
+  const runtime = runtimeFor(service.name);
+  if (stopping || !service.enabled || runtime.child) return;
+  const child = spawn(process.execPath, [service.entrypoint], {
+    cwd: service.sourceDir,
+    env: safeEnvironment(proxyEnvironment(service)),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
-  pipeLines(proxyChild.stdout, "codex-proxy");
-  pipeLines(proxyChild.stderr, "codex-proxy-error");
-  proxyChild.once("spawn", () => {
-    log("proxy-started", { pid: proxyChild.pid, port: config.proxy.port, model: config.proxy.defaultModel });
-    proxyRestartDelay = 1_000;
+  runtime.child = child;
+  pipeLines(child.stdout, `${service.name}-proxy`);
+  pipeLines(child.stderr, `${service.name}-proxy-error`);
+  child.once("spawn", () => {
+    log("proxy-started", { service: service.name, pid: child.pid, port: service.port, model: service.defaultModel });
+    runtime.restartDelay = 1_000;
   });
-  proxyChild.once("error", (error) => log("proxy-error", { message: error?.message || error }));
-  proxyChild.once("exit", (code, signal) => {
-    proxyChild = null;
-    log("proxy-exited", { code, signal });
+  child.once("error", (error) => log("proxy-error", { service: service.name, message: error?.message || error }));
+  child.once("exit", (code, signal) => {
+    runtime.child = null;
+    log("proxy-exited", { service: service.name, code, signal });
     if (stopping) return;
-    proxyRestartTimer = setTimeout(() => {
-      proxyRestartTimer = null;
-      startProxy(config);
-    }, proxyRestartDelay);
-    proxyRestartDelay = Math.min(proxyRestartDelay * 2, 30_000);
+    runtime.restartTimer = setTimeout(() => {
+      runtime.restartTimer = null;
+      startProxyService(config, service);
+    }, runtime.restartDelay);
+    runtime.restartDelay = Math.min(runtime.restartDelay * 2, 30_000);
   });
+}
+
+function startProxies(config) {
+  for (const service of proxyServices(config)) startProxyService(config, service);
 }
 
 async function request(url, options = {}, timeoutMs = 5_000) {
@@ -260,7 +299,9 @@ async function shutdown(config, reason) {
   if (stopping) return;
   stopping = true;
   log("supervisor-stopping", { reason });
-  if (proxyRestartTimer) clearTimeout(proxyRestartTimer);
+  for (const runtime of proxyRuntime.values()) {
+    if (runtime.restartTimer) clearTimeout(runtime.restartTimer);
+  }
   for (const timer of timers) clearInterval(timer);
   const stopChild = async (child) => {
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
@@ -277,7 +318,10 @@ async function shutdown(config, reason) {
       ]);
     }
   };
-  await Promise.all([stopChild(proxyChild), stopChild(ollamaChild)]);
+  await Promise.all([
+    ...[...proxyRuntime.values()].map((runtime) => stopChild(runtime.child)),
+    stopChild(ollamaChild),
+  ]);
   await removeOwnPid(config);
   process.exit(0);
 }
@@ -286,28 +330,12 @@ async function main() {
   const configFile = path.resolve(option("--config") || "");
   if (!configFile) throw new Error("--config is required");
   const config = validateConfig(await readJson(configFile), configFile);
-  if (await exists(config.state.disabledFile)) {
-    log("supervisor-disabled");
-    return;
-  }
   const pid = await acquirePid(config);
   if (!pid.acquired) {
     log("supervisor-already-running", { pid: pid.owner });
     return;
   }
   log("supervisor-started", { pid: process.pid, profile: config.profile });
-
-  const heartbeat = setInterval(async () => {
-    const record = await readJson(config.state.pidFile);
-    if (record?.pid !== process.pid) return shutdown(config, "pid-ownership-lost");
-    await writeJsonAtomic(config.state.pidFile, { ...record, heartbeatAt: new Date().toISOString() });
-  }, HEARTBEAT_MS);
-  timers.add(heartbeat);
-
-  const disabledPoll = setInterval(async () => {
-    if (await exists(config.state.disabledFile)) await shutdown(config, "disabled-marker");
-  }, DISABLED_POLL_MS);
-  timers.add(disabledPoll);
 
   process.on("SIGINT", () => shutdown(config, "SIGINT"));
   process.on("SIGTERM", () => shutdown(config, "SIGTERM"));
@@ -318,7 +346,7 @@ async function main() {
   });
   process.on("unhandledRejection", (error) => log("unhandled-rejection", { message: error?.message || error }));
 
-  startProxy(config);
+  startProxies(config);
   if (config.ollama.enabled) {
     await warmEmbedding(config);
     const warmer = setInterval(() => warmEmbedding(config), config.ollama.warmIntervalMs);

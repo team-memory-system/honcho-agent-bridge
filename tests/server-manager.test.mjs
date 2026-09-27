@@ -16,14 +16,14 @@ import {
 } from "../scripts/server-manager.mjs";
 
 test("Windows Compose uses an isolated anonymous Docker config without changing the user config", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-docker-config-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-docker-config-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const serverDirectory = path.join(root, "server");
   const environment = await dockerCliEnvironment(serverDirectory, {
     platform: "win32",
     env: { USERPROFILE: path.join(root, "user") },
   });
-  assert.equal(environment.COMPOSE_PROJECT_NAME, "agent-memory");
+  assert.equal(environment.COMPOSE_PROJECT_NAME, "honcho-agent-bridge");
   assert.equal(environment.DOCKER_CONFIG, path.join(root, "runtime", "docker-cli"));
   assert.deepEqual(
     JSON.parse(await fsp.readFile(path.join(environment.DOCKER_CONFIG, "config.json"), "utf8")),
@@ -33,7 +33,7 @@ test("Windows Compose uses an isolated anonymous Docker config without changing 
 });
 
 test("server lifecycle rejects mistyped profiles before any mutation", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-invalid-profile-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-invalid-profile-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const destination = path.join(root, "installed");
   let called = false;
@@ -73,7 +73,7 @@ test("server lifecycle rejects mistyped profiles before any mutation", async (t)
 });
 
 test("personal plan fails closed on native Linux", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-linux-plan-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-linux-plan-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const personal = await serverPlan({
     profile: "personal",
@@ -86,7 +86,7 @@ test("personal plan fails closed on native Linux", async (t) => {
 });
 
 test("server bundle updates preserve the installed private environment", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-server-copy-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-server-copy-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = path.join(root, "source");
   const destination = path.join(root, "installed");
@@ -109,7 +109,7 @@ test("server bundle updates preserve the installed private environment", async (
 });
 
 test("server bundle swap restores both current and prior backup when the final rename fails", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-server-swap-failure-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-server-swap-failure-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = path.join(root, "source");
   const destination = path.join(root, "installed");
@@ -143,7 +143,7 @@ test("server bundle swap restores both current and prior backup when the final r
 });
 
 test("server bundle swap reports a secret-bearing candidate retained after cleanup failure", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-server-retained-candidate-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-server-retained-candidate-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = path.join(root, "source");
   const destination = path.join(root, "installed");
@@ -197,7 +197,7 @@ test("server bundle swap reports a secret-bearing candidate retained after clean
 });
 
 test("successful bundle swap reports a retained saved backup when its cleanup fails", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-server-retained-saved-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-server-retained-saved-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = path.join(root, "source");
   const destination = path.join(root, "installed");
@@ -233,7 +233,7 @@ test("successful bundle swap reports a retained saved backup when its cleanup fa
 });
 
 test("portable prepare fails closed and propagates retained backup cleanup details", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-portable-retained-saved-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-portable-retained-saved-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = path.join(root, "source");
   const destination = path.join(root, "installed");
@@ -279,6 +279,7 @@ async function personalBundle(root) {
   const source = path.join(root, "source");
   await fsp.mkdir(source, { recursive: true });
   await fsp.writeFile(path.join(source, "compose.yaml"), "name: test\n");
+  await fsp.writeFile(path.join(source, "host-profile.personal.json"), JSON.stringify({codexProxy: {enabled: true}}));
   await fsp.writeFile(path.join(source, "env.personal.example"), `
 POSTGRES_PASSWORD=
 LLM_VLLM_API_KEY=
@@ -298,7 +299,7 @@ DIALECTIC_LEVELS__high__MODEL_CONFIG__THINKING_EFFORT=high
 }
 
 test("personal server prepare adds missing safe profile settings without replacing secrets or custom values", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-profile-merge-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-profile-merge-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -346,7 +347,7 @@ test("personal server prepare adds missing safe profile settings without replaci
 });
 
 test("personal server prepare generates only missing local secrets for an existing environment", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-existing-secrets-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-existing-secrets-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -377,7 +378,7 @@ test("personal server prepare generates only missing local secrets for an existi
 });
 
 test("personal server prepare installs its environment before preparing host services", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-prepare-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-prepare-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -406,7 +407,7 @@ test("personal server prepare installs its environment before preparing host ser
 });
 
 test("personal server prepare fails closed before host setup when Windows .env ACLs cannot be restricted", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-acl-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-acl-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -439,7 +440,7 @@ test("personal server prepare fails closed before host setup when Windows .env A
 });
 
 test("personal server update stops a running host before swapping the installed bundle", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-update-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-update-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -471,7 +472,7 @@ test("personal server update stops a running host before swapping the installed 
 });
 
 test("concurrent prepares allow only one candidate to enter and keep the original at previous", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-concurrent-success-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-concurrent-success-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -501,7 +502,7 @@ test("concurrent prepares allow only one candidate to enter and keep the origina
 
   const first = serverPrepare(options);
   await entered;
-  await assert.rejects(serverPrepare(options), (error) => error.code === "AGENT_MEMORY_SERVER_LIFECYCLE_BUSY");
+  await assert.rejects(serverPrepare(options), (error) => error.code === "HONCHO_AGENT_BRIDGE_SERVER_LIFECYCLE_BUSY");
   assert.equal(prepareCalls, 1);
   assert.equal(await fsp.readFile(path.join(destination, "compose.yaml"), "utf8"), "name: test\n");
   assert.equal(await fsp.readFile(path.join(`${destination}.previous`, "marker"), "utf8"), "original-current\n");
@@ -514,7 +515,7 @@ test("concurrent prepares allow only one candidate to enter and keep the origina
 });
 
 test("concurrent rejected prepare cannot disturb rollback of the original and its prior previous", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-concurrent-rollback-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-concurrent-rollback-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -547,7 +548,7 @@ test("concurrent rejected prepare cannot disturb rollback of the original and it
 
   const first = serverPrepare(options);
   await entered;
-  await assert.rejects(serverPrepare(options), (error) => error.code === "AGENT_MEMORY_SERVER_LIFECYCLE_BUSY");
+  await assert.rejects(serverPrepare(options), (error) => error.code === "HONCHO_AGENT_BRIDGE_SERVER_LIFECYCLE_BUSY");
   assert.equal(prepareCalls, 1);
   releasePrepare();
   const result = await first;
@@ -560,7 +561,7 @@ test("concurrent rejected prepare cannot disturb rollback of the original and it
 });
 
 test("personal update validates candidate secrets before inspecting or stopping the running host", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-candidate-secrets-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-candidate-secrets-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   await fsp.appendFile(path.join(source, "env.personal.example"), [
@@ -590,7 +591,7 @@ test("personal update validates candidate secrets before inspecting or stopping 
 });
 
 test("personal host readiness failure restores both backups and restarts the previously running host", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-host-rollback-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-host-rollback-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -642,7 +643,7 @@ test("personal host readiness failure restores both backups and restarts the pre
 });
 
 test("fresh personal host failure removes the candidate installation", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-fresh-rollback-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-fresh-rollback-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -662,7 +663,7 @@ test("fresh personal host failure removes the candidate installation", async (t)
 });
 
 test("personal rollback reports a retained failed candidate instead of hiding cleanup failure", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-retained-failed-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-retained-failed-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -708,7 +709,7 @@ test("personal rollback reports a retained failed candidate instead of hiding cl
 });
 
 test("personal host exception keeps the original error visible when host recovery also fails", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-recovery-error-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-recovery-error-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -748,7 +749,7 @@ test("personal host exception keeps the original error visible when host recover
 });
 
 test("personal start prepares under its existing lifecycle lock without reentrant deadlock", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-start-unlocked-prepare-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-start-unlocked-prepare-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
   const destination = path.join(root, "installed");
@@ -784,7 +785,7 @@ test("personal start requires a healthy host before Compose and rolls it back on
     profile: "personal",
     hostRuntime,
     preparedServer,
-    serverDirectory: path.join(os.tmpdir(), "agent-memory-start-order"),
+    serverDirectory: path.join(os.tmpdir(), "honcho-agent-bridge-start-order"),
     composeRunner: async () => { events.push("compose-start"); return { stdout: "started\n", stderr: "" }; },
     healthWaiter: async () => ({ ok: true, status: 200 }),
   });
@@ -798,7 +799,7 @@ test("personal start requires a healthy host before Compose and rolls it back on
       profile: "personal",
       hostRuntime,
       preparedServer,
-      serverDirectory: path.join(os.tmpdir(), "agent-memory-start-rollback"),
+      serverDirectory: path.join(os.tmpdir(), "honcho-agent-bridge-start-rollback"),
       composeRunner: async () => { events.push("compose-start"); throw new Error("compose failed"); },
     }),
     /compose failed/,
@@ -814,7 +815,7 @@ test("personal start never invokes Compose when the host runtime is unhealthy", 
       start: async () => ({ ok: false, running: false, issues: ["proxy unavailable"] }),
     },
     preparedServer: { ok: true, ready: true, installation: {}, environment: {} },
-    serverDirectory: path.join(os.tmpdir(), "agent-memory-start-blocked"),
+    serverDirectory: path.join(os.tmpdir(), "honcho-agent-bridge-start-blocked"),
     composeRunner: async () => { composeCalled = true; return { stdout: "", stderr: "" }; },
   });
   assert.equal(result.ok, false);
@@ -823,7 +824,7 @@ test("personal start never invokes Compose when the host runtime is unhealthy", 
 });
 
 test("personal status combines Docker and host health", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-status-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-status-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   await fsp.writeFile(path.join(root, "compose.yaml"), "name: test\n");
   const result = await serverStatus({
@@ -840,7 +841,7 @@ test("personal status combines Docker and host health", async (t) => {
 });
 
 test("personal stop orders Compose before host shutdown and still stops host without a Compose bundle", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-personal-stop-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-stop-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   await fsp.writeFile(path.join(root, "compose.yaml"), "name: test\n");
   const events = [];
@@ -862,7 +863,7 @@ test("personal stop orders Compose before host shutdown and still stops host wit
 });
 
 test("portable server lifecycle never invokes personal host services", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-portable-lifecycle-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-portable-lifecycle-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   await fsp.writeFile(path.join(root, "compose.yaml"), "name: test\n");
   const hostRuntime = new Proxy({}, { get: () => async () => { throw new Error("portable must not call host runtime"); } });
@@ -922,8 +923,16 @@ function healthyVerifyStatus() {
 }
 
 test("personal verify proves long 1536d embeddings and both Docker-to-host routes without a live completion", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-verify-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  // The probe asks about the endpoints this install actually configured, so the
+  // installed environment is what decides which routes have to answer.
+  const installedEnvironment = [
+    "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11434/v1",
+    "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11435/v1",
+    "",
+  ].join("\n");
+  await fsp.writeFile(path.join(root, ".env"), installedEnvironment);
   const calls = [];
   let composeArgs = null;
   const result = await serverVerify({
@@ -968,11 +977,67 @@ test("personal verify proves long 1536d embeddings and both Docker-to-host route
   assert.match(composeArgs.at(-1), /host\.docker\.internal:11435\/health/);
   assert.equal(result.checks.completion.skipped, true);
   assert.equal(calls.some((call) => call.url.includes("chat/completions")), false);
-  await assert.rejects(fsp.access(path.join(root, ".env")));
+  assert.equal(await fsp.readFile(path.join(root, ".env"), "utf8"), installedEnvironment, "verify never writes to the installed environment");
+});
+
+test("verify does not demand a proxy the installed environment never configured", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-noproxy-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(
+    path.join(root, ".env"),
+    "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11434/v1\n",
+  );
+  let composeArgs = null;
+  const result = await serverVerify({
+    profile: "personal",
+    serverDirectory: root,
+    statusInspector: async () => healthyVerifyStatus(),
+    composeRunner: async (_directory, args) => {
+      composeArgs = args;
+      return { stdout: `${JSON.stringify({ ollama: { ok: true, status: 200 } })}\n`, stderr: "" };
+    },
+    fetchImpl: async (url, options = {}) => {
+      if (String(url).endsWith("/api/embed")) {
+        const body = JSON.parse(options.body);
+        return fakeResponse({ model: body.model, prompt_eval_count: 3001, embeddings: [Array(1536).fill(0.25)] });
+      }
+      if (String(url) === "http://127.0.0.1:8001/health") return fakeResponse({ status: "ok" });
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
+
+  assert.equal(result.ok, true, "a completion proxy is not a precondition for every install");
+  assert.equal(result.checks.containerHost.ollama.ok, true);
+  assert.equal(result.checks.containerHost.proxy.skipped, true);
+  assert.equal(composeArgs.at(-1).includes("/health"), false, "the unconfigured endpoint is never probed");
+});
+
+test("verify skips the container probe entirely when no host endpoint is configured", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-none-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(root, ".env"), "POSTGRES_PASSWORD=x\n");
+  let composeCalled = false;
+  const result = await serverVerify({
+    profile: "personal",
+    serverDirectory: root,
+    statusInspector: async () => healthyVerifyStatus(),
+    composeRunner: async () => { composeCalled = true; return { stdout: "", stderr: "" }; },
+    fetchImpl: async (url, options = {}) => {
+      if (String(url).endsWith("/api/embed")) {
+        const body = JSON.parse(options.body);
+        return fakeResponse({ model: body.model, prompt_eval_count: 3001, embeddings: [Array(1536).fill(0.25)] });
+      }
+      if (String(url) === "http://127.0.0.1:8001/health") return fakeResponse({ status: "ok" });
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
+  assert.equal(result.checks.containerHost.skipped, true);
+  assert.equal(result.checks.containerHost.ok, true);
+  assert.equal(composeCalled, false);
 });
 
 test("personal verify fails when Ollama cannot prove more than 2048 tokens or exact dimensions", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-verify-shape-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-shape-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const result = await serverVerify({
     profile: "personal",
@@ -993,7 +1058,7 @@ test("personal verify fails when Ollama cannot prove more than 2048 tokens or ex
 });
 
 test("live verification reads the proxy secret only in-process and discards the completion body", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-verify-live-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-live-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const secret = "must-never-appear-in-output-or-argv";
   const responseMarker = "must-never-parse-completion-body";
@@ -1045,3 +1110,15 @@ test("live verification reads the proxy secret only in-process and discards the 
   assert.equal(serialized.includes(responseMarker), false);
   assert.equal(JSON.stringify(composeArgs).includes(secret), false);
 });
+
+ test("external proxy profile does not invent a key for an independently managed service", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "external-proxy-"));
+  t.after(() => fsp.rm(root, {recursive:true, force:true}));
+  const source = await personalBundle(root);
+  await fsp.writeFile(path.join(source, "host-profile.personal.json"), JSON.stringify({codexProxy: {enabled:false}}));
+  const destination = path.join(root, "installed");
+  const result = await serverPrepare({profile:"personal", serverDirectory:destination, preparedPlan:{ok:true, ready:true, bundle:{directory:source}}, hostRuntime:{prepare:async()=>({ok:true,ready:true})}});
+  assert.equal(result.ready, false);
+  assert.equal(result.installation.candidateRejected, true);
+  assert.ok(result.missingSecretFields.includes("LLM_VLLM_API_KEY"));
+ });

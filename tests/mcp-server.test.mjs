@@ -57,7 +57,7 @@ function rpcClient(child) {
 test("bundled MCP exposes all 31 tools, forwards search, and honors tool toggles", async (t) => {
   const api = await startApi();
   t.after(() => api.server.close());
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-mcp-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-mcp-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const appHome = path.join(root, "app");
   const userHome = path.join(root, "user");
@@ -74,14 +74,14 @@ test("bundled MCP exposes all 31 tools, forwards search, and honors tool toggles
     }),
   );
   const child = spawn(process.execPath, [SERVER, "--provider", "codex"], {
-    env: { ...process.env, AGENT_MEMORY_HOME: appHome, AGENT_MEMORY_USER_HOME: userHome, HOME: userHome },
+    env: { ...process.env, HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: userHome, HOME: userHome },
     stdio: ["pipe", "pipe", "pipe"],
   });
   t.after(() => child.kill());
   const rpc = rpcClient(child);
 
   const initialized = await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {} });
-  assert.equal(initialized.serverInfo.name, "Agent Memory Honcho");
+  assert.equal(initialized.serverInfo.name, "Honcho Agent Bridge");
   const negotiated = await rpc("initialize", { protocolVersion: "2099-01-01", capabilities: {} });
   assert.equal(negotiated.protocolVersion, "2025-11-25");
   await assert.rejects(rpc("initialize", { capabilities: {} }), /protocolVersion/);

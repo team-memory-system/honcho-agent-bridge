@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "agent-memory-honcho": {
+    "honcho-agent-bridge": {
       "command": "node",
       "args": ["./scripts/mcp-server.mjs", "--provider", "codex"],
       "cwd": "."

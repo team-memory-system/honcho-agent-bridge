@@ -1,0 +1,59 @@
+:root {
+  --bg: #0c0f0d;
+  --card: #12161300;
+  --line: #262c28;
+  --text: #e6ebe7;
+  --muted: #8d968f;
+  --accent: #6fd39a;
+  --danger: #e3705f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 32px 20px 64px;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 ui-sans-serif, -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif;
+}
+header, main { max-width: 760px; margin: 0 auto; }
+header { position: relative; margin-bottom: 28px; }
+h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: -.01em; }
+h2 { margin: 0 0 4px; font-size: 16px; }
+p { margin: 0 0 12px; }
+.muted { color: var(--muted); font-size: 13px; }
+#refresh { position: absolute; top: 0; right: 0; }
+.card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 18px 16px;
+  margin-bottom: 18px;
+  background: var(--card);
+}
+label { display: block; margin-bottom: 10px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+input[type="text"], input:not([type]), input[type="file"] {
+  display: block; width: 100%; margin-top: 4px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: #0f1310; color: var(--text); font: inherit; text-transform: none; letter-spacing: normal;
+}
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+button {
+  padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line);
+  background: #161b17; color: var(--text); font: inherit; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #07130c; font-weight: 600; }
+pre {
+  margin: 12px 0 0; padding: 12px; max-height: 340px; overflow: auto;
+  border: 1px solid var(--line); border-radius: 8px; background: #0f1310;
+  font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.status-grid { display: grid; gap: 8px; }
+.status-row { display: flex; gap: 10px; align-items: baseline; }
+.status-row b { min-width: 150px; font-weight: 600; }
+.status-row .ok { color: var(--accent); }
+.status-row .bad { color: var(--danger); }
+code { background: #0f1310; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+label.inline { display: inline-flex; align-items: center; gap: 6px; margin: 0; text-transform: none; letter-spacing: normal; font-size: 14px; color: var(--text); }
+label.inline input { width: auto; margin: 0; }

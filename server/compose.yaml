@@ -1,7 +1,7 @@
-name: agent-memory
+name: honcho-agent-bridge
 
 x-honcho-service: &honcho-service
-  image: agent-memory-honcho:${HONCHO_IMAGE_TAG:-local}
+  image: honcho-agent-bridge-server:${HONCHO_IMAGE_TAG:-local}
   build:
     context: ./honcho
     dockerfile: Dockerfile
@@ -74,7 +74,7 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: agent-memory-dashboard:${HONCHO_IMAGE_TAG:-local}
+    image: honcho-agent-bridge-dashboard:${HONCHO_IMAGE_TAG:-local}
     build:
       context: ./honcho/local-dashboard
       dockerfile: Dockerfile
@@ -84,11 +84,11 @@ services:
       DASHBOARD_PORT: "4173"
       MCP_CONTROL_MODE: file
       MCP_CONTROL_ALLOW_REMOTE: "1"
-      HONCHO_MCP_TOOL_CONFIG: /agent-memory-data/mcp-tools.json
+      HONCHO_MCP_TOOL_CONFIG: /honcho-agent-bridge-data/mcp-tools.json
     ports:
       - "127.0.0.1:${HONCHO_DASHBOARD_PORT:-4173}:4173"
     volumes:
-      - ../data:/agent-memory-data
+      - ../data:/honcho-agent-bridge-data
     depends_on:
       api:
         condition: service_healthy

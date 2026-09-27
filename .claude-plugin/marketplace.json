@@ -1,5 +1,5 @@
 {
-  "name": "agent-memory",
+  "name": "honcho-agent-bridge",
   "owner": {
     "name": "chenjing"
   },
@@ -9,7 +9,7 @@
   },
   "plugins": [
     {
-      "name": "agent-memory",
+      "name": "honcho-agent-bridge",
       "source": "./",
       "description": "Install one shared personal memory runtime for Codex and Claude Code.",
       "category": "productivity",

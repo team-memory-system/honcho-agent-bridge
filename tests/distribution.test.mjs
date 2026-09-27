@@ -37,7 +37,7 @@ async function createMinimalHoncho(root) {
 }
 
 test("distribution includes source and topology but excludes state and secrets", SOURCE_CHECKOUT_ONLY, async (t) => {
-  const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-distribution-"));
+  const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-distribution-"));
   t.after(() => fsp.rm(temporary, { recursive: true, force: true }));
   const honcho = path.join(temporary, "honcho");
   await fsp.mkdir(path.join(honcho, "src"), { recursive: true });
@@ -127,7 +127,10 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.match(profile, /^VECTOR_STORE_TYPE=pgvector$/m);
   assert.match(profile, /^VECTOR_STORE_MIGRATED=true$/m);
   assert.match(profile, /^LLM_OPENAI_COMPATIBLE_BASE_URL=http:\/\/host\.docker\.internal:11434\/v1$/m);
-  assert.match(profile, /^LLM_VLLM_BASE_URL=http:\/\/host\.docker\.internal:11435\/v1$/m);
+  // The generated profile follows the endpoint the source environment named rather
+  // than assuming the Codex proxy's port: a personal install may route completions
+  // through the llm-proxy router instead.
+  assert.match(profile, /^LLM_VLLM_BASE_URL=http:\/\/host\.docker\.internal:9999\/v1$/m);
   const codexPrefixes = [
     "DERIVER_MODEL_CONFIG",
     "SUMMARY_MODEL_CONFIG",
@@ -139,7 +142,7 @@ test("distribution includes source and topology but excludes state and secrets",
     assert.match(profile, new RegExp(`^${prefix}__TRANSPORT=openai$`, "m"));
     assert.match(profile, new RegExp(`^${prefix}__MODEL=gpt-5\\.6-sol$`, "m"));
     assert.match(profile, new RegExp(`^${prefix}__THINKING_EFFORT=high$`, "m"));
-    assert.match(profile, new RegExp(`^${prefix}__OVERRIDES__BASE_URL=http://host\\.docker\\.internal:11435/v1$`, "m"));
+    assert.match(profile, new RegExp(`^${prefix}__OVERRIDES__BASE_URL=http://host\\.docker\\.internal:9999/v1$`, "m"));
     assert.match(profile, new RegExp(`^${prefix}__OVERRIDES__API_KEY_ENV=LLM_VLLM_API_KEY$`, "m"));
   }
   assert.match(profile, /^DIALECTIC_LEVELS__minimal__MAX_TOOL_ITERATIONS=7$/m);
@@ -152,7 +155,17 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.equal(profile.includes("CONFIDENTIAL_"), false);
   assert.match(profile, /^TRUSTED_HOSTS=\["localhost","127\.0\.0\.1","api"\]$/m);
   const hostProfile = JSON.parse(await fsp.readFile(path.join(bundle, "server", "host-profile.personal.json"), "utf8"));
-  assert.equal(hostProfile.codexProxy.enabled, true);
+  assert.equal(hostProfile.codexProxy.enabled, false);
+  // The proxies ship separately, so the bundle records all three as off and leaves
+  // the source location blank instead of guessing a path from the build machine.
+  assert.equal(hostProfile.llmProxyRoot, "");
+  assert.equal(hostProfile.claudeProxy.enabled, false);
+  assert.equal(hostProfile.claudeProxy.port, 11446);
+  assert.equal(hostProfile.router.enabled, false);
+  assert.equal(hostProfile.router.port, 11400);
+  for (const name of ["codex-openai-proxy", "claude-print-proxy"]) {
+    await assert.rejects(fsp.access(path.join(bundle, "server", "honcho", name)));
+  }
   assert.equal(hostProfile.codexProxy.defaultModel, "gpt-5.6-sol");
   assert.equal(hostProfile.ollama.enabled, true);
   assert.equal(hostProfile.ollama.model, "qwen3-embedding-honcho-8192");
@@ -161,11 +174,11 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.equal(hostProfile.ollama.keepAlive, -1);
   assert.equal(JSON.stringify(hostProfile).includes("private-value"), false);
   const manifest = JSON.parse(await fsp.readFile(path.join(bundle, "SOURCE_MANIFEST.json"), "utf8"));
-  assert.equal(typeof manifest.agentMemory.commit, "string");
-  assert.equal(typeof manifest.agentMemory.dirty, "boolean");
+  assert.equal(typeof manifest.honchoAgentBridge.commit, "string");
+  assert.equal(typeof manifest.honchoAgentBridge.dirty, "boolean");
   assert.equal(manifest.honcho.upstreamVersion, "v3.0.11");
   assert.equal(manifest.honcho.dirty, true);
-  assert.equal(manifest.hostServices.codexProxy.enabled, true);
+  assert.equal(manifest.hostServices.codexProxy.enabled, false);
 
   const rerun = await execFileAsync(process.execPath, [
     BUILDER,
@@ -179,7 +192,7 @@ test("distribution includes source and topology but excludes state and secrets",
 });
 
 test("failed environment, copy, and archive stages preserve the prior release byte-for-byte", SOURCE_CHECKOUT_ONLY, async (t) => {
-  const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-distribution-rollback-"));
+  const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-distribution-rollback-"));
   t.after(() => fsp.rm(temporary, { recursive: true, force: true }));
   const honcho = await createMinimalHoncho(temporary);
   const output = path.join(temporary, "output");
@@ -231,7 +244,7 @@ test("failed environment, copy, and archive stages preserve the prior release by
 });
 
 test("distribution refuses unsafe names and unrelated existing directories", SOURCE_CHECKOUT_ONLY, async (t) => {
-  const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-distribution-path-"));
+  const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-distribution-path-"));
   t.after(() => fsp.rm(temporary, { recursive: true, force: true }));
   const output = path.join(temporary, "output");
   const unrelated = path.join(output, "release");

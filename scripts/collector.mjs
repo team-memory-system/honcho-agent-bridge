@@ -9,6 +9,10 @@ import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 
 const ROOT_URL = (process.env.HONCHO_BASE_URL || "http://127.0.0.1:8001").replace(/\/+$/, "");
 const AUTH_TOKEN = process.env.HONCHO_API_BEARER_TOKEN || "";
+// Cloudflare Access sits in front of Honcho once it is reachable from outside this
+// machine. A browser gets a login page; a collector has to present a service token.
+const CF_ACCESS_CLIENT_ID = process.env.CF_ACCESS_CLIENT_ID || "";
+const CF_ACCESS_CLIENT_SECRET = process.env.CF_ACCESS_CLIENT_SECRET || "";
 const DEFAULT_WORKSPACE = process.env.HONCHO_WORKSPACE_ID || "memory";
 const DEFAULT_USER_PEER = process.env.HONCHO_USER_NAME || "user";
 const HTTP_TIMEOUT_SECONDS = Number(
@@ -20,7 +24,7 @@ const MESSAGE_CHAR_LIMIT = Number(
 const STATE_LOCK_STALE_MS = Number(process.env.HONCHO_AGENT_STATE_LOCK_STALE_MS || "120000");
 const IMPORT_TRIGGER = process.env.HONCHO_AGENT_IMPORT_TRIGGER || process.env.HONCHO_CODEX_IMPORT_TRIGGER || "manual";
 
-const SUPPORTED_PROVIDERS = new Set(["codex", "claude", "agy"]);
+const SUPPORTED_PROVIDERS = new Set(["codex", "claude", "agy", "chatgpt"]);
 const CODEX_SESSION_ROOT = expandHome(process.env.CODEX_SESSION_ROOT || "~/.codex/sessions");
 const CODEX_MAX_AGE_SECONDS = Number(process.env.HONCHO_CODEX_IMPORT_MAX_AGE_SECONDS || "180");
 const CODEX_DREAM_EVERY_MESSAGES = Number(process.env.HONCHO_CODEX_DREAM_EVERY_MESSAGES || "20");
@@ -49,6 +53,9 @@ function parseArgs() {
     maxAgeSeconds: CODEX_MAX_AGE_SECONDS,
     dryRun: process.env.HONCHO_AGENT_DRY_RUN === "1" || process.env.HONCHO_CODEX_DRY_RUN === "1",
     hookInputFile: "",
+    // A ChatGPT export holds every conversation in one file, so it imports as a
+    // batch instead of as one transcript.
+    exportPath: "",
   };
   const argv = process.argv.slice(2);
   for (let index = 0; index < argv.length; index += 1) {
@@ -60,6 +67,7 @@ function parseArgs() {
     else if (item === "--max-age-seconds") args.maxAgeSeconds = Number(argv[++index] || CODEX_MAX_AGE_SECONDS);
     else if (item === "--dry-run") args.dryRun = true;
     else if (item === "--hook-input-file") args.hookInputFile = argv[++index] || "";
+    else if (item === "--export") args.exportPath = argv[++index] || "";
   }
   args.provider = args.provider.trim().toLowerCase();
   if (!SUPPORTED_PROVIDERS.has(args.provider)) throw new Error(`unsupported provider: ${args.provider}`);
@@ -143,6 +151,8 @@ async function jsonRequest(method, apiPath, payload) {
   const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_SECONDS * 1000);
   const headers = { "Content-Type": "application/json" };
   if (AUTH_TOKEN) headers.Authorization = `Bearer ${AUTH_TOKEN}`;
+  if (CF_ACCESS_CLIENT_ID) headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID;
+  if (CF_ACCESS_CLIENT_SECRET) headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET;
   try {
     const response = await fetch(`${ROOT_URL}${apiPath}`, {
       method,
@@ -556,12 +566,16 @@ async function importGenericProvider(args, hookInput) {
   if (!fs.existsSync(args.transcript)) throw new Error(`transcript not found: ${args.transcript}`);
 
   const parsed = await getProvider(args.provider).parseTranscript(args.transcript, hookInput);
+  return importParsedSession(args, parsed, args.transcript);
+}
+
+async function importParsedSession(args, parsed, transcriptPath) {
   const sessionId = parsed.session_id;
   return withStateLock(args.provider, async () => {
     const state = await loadState(args.provider);
     const sessions = (state.sessions ||= {});
     const sessionState = (sessions[sessionId] ||= { imported_hashes: [] });
-    sessionState.transcript_path = args.transcript;
+    sessionState.transcript_path = transcriptPath;
     const basePeers = new Set([DEFAULT_USER_PEER, assistantPeer(args.provider)]);
     if (!args.dryRun) await ensureSession(args.workspace, args.provider, sessionId, parsed, basePeers);
     const [syncedTurns, honchoMessageTotal, stateReconciled] = args.dryRun
@@ -573,7 +587,7 @@ async function importGenericProvider(args, hookInput) {
       provider: args.provider,
       workspace: args.workspace,
       session_id: sessionId,
-      transcript_path: args.transcript,
+      transcript_path: transcriptPath,
       parsed_turns: parsed.turns.length,
       new_turns: pendingHashes.length,
       new_messages: messages.length,
@@ -602,12 +616,56 @@ async function importGenericProvider(args, hookInput) {
   });
 }
 
+async function importChatGptExport(args) {
+  const exportPath = args.exportPath || args.transcript;
+  if (!exportPath) throw new Error("missing ChatGPT export path (--export)");
+  if (!fs.existsSync(exportPath)) throw new Error(`export not found: ${exportPath}`);
+
+  const chatgpt = getProvider("chatgpt");
+  const { path: sourcePath, conversations } = await chatgpt.readExport(exportPath);
+  const sessions = [];
+  let newMessages = 0;
+  let failed = 0;
+  for (const conversation of conversations) {
+    const parsed = chatgpt.parseConversation(conversation);
+    if (!parsed.turns.length) continue;
+    parsed.metadata.file_path = sourcePath;
+    try {
+      const result = await importParsedSession(args, parsed, sourcePath);
+      newMessages += result.new_messages;
+      sessions.push({ session_id: result.session_id, new_messages: result.new_messages, parsed_turns: result.parsed_turns });
+    } catch (error) {
+      // One unreadable conversation must not abandon the rest of the export.
+      failed += 1;
+      sessions.push({ session_id: parsed.session_id, error: String(error?.message || error) });
+    }
+  }
+  return {
+    ok: failed === 0,
+    provider: "chatgpt",
+    workspace: args.workspace,
+    export_path: sourcePath,
+    conversations: conversations.length,
+    imported_sessions: sessions.filter((session) => !session.error).length,
+    failed_sessions: failed,
+    new_messages: newMessages,
+    dry_run: Boolean(args.dryRun),
+    sessions,
+  };
+}
+
 async function main() {
   const args = parseArgs();
-  const hookInput = args.hookInputFile || !args.transcript ? await readHookInput(args.hookInputFile) : {};
+  const hookInput =
+    args.provider === "chatgpt"
+      ? {}
+      : args.hookInputFile || !args.transcript
+        ? await readHookInput(args.hookInputFile)
+        : {};
   if (!args.transcript) {
     args.transcript = hookInput.transcript_path || hookInput.transcriptPath || "";
   }
+  if (args.provider === "chatgpt") return importChatGptExport(args);
   if (args.provider === "codex") return importCodex(args, hookInput);
   return importGenericProvider(args, hookInput);
 }

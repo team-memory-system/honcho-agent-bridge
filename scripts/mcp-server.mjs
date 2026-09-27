@@ -4,7 +4,7 @@ import readline from "node:readline";
 import { installPaths, loadConfig, readJson, userHome } from "./config.mjs";
 import { VERSION } from "./version.mjs";
 
-const SERVER_NAME = "Agent Memory Honcho";
+const SERVER_NAME = "Honcho Agent Bridge";
 const SERVER_VERSION = VERSION;
 const DEFAULT_PROTOCOL_VERSION = "2025-11-25";
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
@@ -13,6 +13,8 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   "2025-03-26",
   "2024-11-05",
 ]);
+
+let negotiatedProtocolVersion = DEFAULT_PROTOCOL_VERSION;
 
 const providerIndex = process.argv.indexOf("--provider");
 const PROVIDER = providerIndex >= 0 ? String(process.argv[providerIndex + 1] || "agent").trim().toLowerCase() : "agent";
@@ -72,12 +74,12 @@ function boolParam(value) {
 async function runtimeContext() {
   const config = await loadConfig();
   if (!config) {
-    throw new Error("Agent Memory is not configured. Run the setup-memory skill first.");
+    throw new Error("Honcho Agent Bridge is not configured. Run the setup-memory skill first.");
   }
   const baseUrl = String(config.honcho?.baseUrl || "http://127.0.0.1:8001").replace(/\/+$/, "");
   const workspaceId = String(config.honcho?.workspaceId || "memory");
   const userName = String(config.user?.peerId || "").trim();
-  if (!userName) throw new Error("Agent Memory has no user peer ID. Run setup again.");
+  if (!userName) throw new Error("Honcho Agent Bridge has no user peer ID. Run setup again.");
   const configuredAssistant = config.peers?.assistants?.[PROVIDER] || config.peers?.assistant;
   const assistantName = String(configuredAssistant || (PROVIDER === "agent" ? "assistant" : `assistant_${PROVIDER}`));
   const token = String(config.honcho?.apiToken || process.env.HONCHO_API_BEARER_TOKEN || "").trim();
@@ -128,6 +130,116 @@ async function honchoRequest(context, method, apiPath, { body, params } = {}) {
     }
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+// --------------------------------------------------------------- bridge relay
+//
+// A teammate reaches someone else's memory through that person's MCP bridge, not
+// through their Honcho REST API: the bridge is where the audit log and the
+// judgment gate live, and where the tool list is narrowed to what is shared. When
+// the config names a bridge, this process stops being a second implementation of
+// the tools and becomes a stdio-to-streamable-http relay, so the tool definitions
+// exist in exactly one place. Credentials stay in the external config file, never
+// in the plugin cache.
+
+let bridgeSession = null;
+
+async function bridgeContext() {
+  const config = await loadConfig();
+  const url = String(config?.honcho?.mcpBridgeUrl || "").trim();
+  if (!url) return null;
+  return {
+    url,
+    token: String(config.honcho?.mcpBridgeToken || config.honcho?.apiToken || process.env.HONCHO_MCP_BEARER_TOKEN || "").trim(),
+    accessClientId: String(config.honcho?.accessClientId || process.env.CF_ACCESS_CLIENT_ID || "").trim(),
+    accessClientSecret: String(config.honcho?.accessClientSecret || process.env.CF_ACCESS_CLIENT_SECRET || "").trim(),
+    timeoutMs: Number(config.honcho?.timeoutMs || 120_000),
+  };
+}
+
+function bridgeHeaders(context, protocolVersion) {
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+    "MCP-Protocol-Version": protocolVersion,
+  };
+  if (context.token) headers.Authorization = `Bearer ${context.token}`;
+  if (context.accessClientId) headers["CF-Access-Client-Id"] = context.accessClientId;
+  if (context.accessClientSecret) headers["CF-Access-Client-Secret"] = context.accessClientSecret;
+  if (bridgeSession?.id) headers["Mcp-Session-Id"] = bridgeSession.id;
+  return headers;
+}
+
+/** One JSON-RPC message out of either an application/json or an SSE response. */
+function bridgePayload(text, contentType, id) {
+  if (contentType.includes("text/event-stream")) {
+    const messages = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data) continue;
+      try { messages.push(JSON.parse(data)); } catch {}
+    }
+    return messages.find((message) => message.id === id) || messages.at(-1) || null;
+  }
+  if (!text.trim()) return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+let bridgeRequestId = 0;
+
+async function bridgeSend(context, protocolVersion, message, { notification = false } = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), context.timeoutMs);
+  try {
+    const response = await fetch(context.url, {
+      method: "POST",
+      headers: bridgeHeaders(context, protocolVersion),
+      body: JSON.stringify(message),
+      signal: controller.signal,
+    });
+    const sessionId = response.headers.get("mcp-session-id");
+    if (sessionId && bridgeSession) bridgeSession.id = sessionId;
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`MCP bridge ${response.status} for ${message.method}: ${text.slice(0, 2000)}`);
+    }
+    if (notification) return null;
+    const payload = bridgePayload(text, response.headers.get("content-type") || "", message.id);
+    if (!payload) throw new Error(`MCP bridge returned no result for ${message.method}`);
+    if (payload.error) throw new Error(payload.error.message || `MCP bridge error for ${message.method}`);
+    return payload.result;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function bridgeReady(context, protocolVersion) {
+  if (bridgeSession?.initialized) return;
+  bridgeSession = { id: null, initialized: false };
+  await bridgeSend(context, protocolVersion, {
+    jsonrpc: "2.0",
+    id: (bridgeRequestId += 1),
+    method: "initialize",
+    params: {
+      protocolVersion,
+      capabilities: {},
+      clientInfo: { name: `${SERVER_NAME} relay`, version: SERVER_VERSION },
+    },
+  });
+  await bridgeSend(context, protocolVersion, { jsonrpc: "2.0", method: "notifications/initialized" }, { notification: true });
+  bridgeSession.initialized = true;
+}
+
+async function bridgeCall(context, protocolVersion, method, params) {
+  try {
+    await bridgeReady(context, protocolVersion);
+    return await bridgeSend(context, protocolVersion, { jsonrpc: "2.0", id: (bridgeRequestId += 1), method, params });
+  } catch (error) {
+    // A dropped session must not strand the relay; the next call re-initializes.
+    bridgeSession = null;
+    throw error;
   }
 }
 
@@ -188,7 +300,7 @@ const workspaceProp = { workspace_id: { ...STRING, description: "Workspace ID; d
 const filterProp = { filters: { ...OBJECT, description: "Optional Honcho API filters." } };
 
 const TOOLS = [
-  tool("server_info", "Inspect this local Agent Memory bridge and its upstream Honcho health.", {}, [], async (context) => {
+  tool("server_info", "Inspect this local Honcho Agent Bridge bridge and its upstream Honcho health.", {}, [], async (context) => {
     const disabled = await disabledToolNames(context.config);
     return {
       mcp_name: SERVER_NAME,
@@ -457,8 +569,9 @@ async function handle(message) {
       sendError(id, -32602, "initialize requires a protocolVersion string");
       return;
     }
+    negotiatedProtocolVersion = SUPPORTED_PROTOCOL_VERSIONS.has(requestedVersion) ? requestedVersion : DEFAULT_PROTOCOL_VERSION;
     sendResult(id, {
-      protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.has(requestedVersion) ? requestedVersion : DEFAULT_PROTOCOL_VERSION,
+      protocolVersion: negotiatedProtocolVersion,
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
       instructions: "Self-hosted Honcho personal memory. For broad recall, read the configured user's representation from the user's own observer perspective and also run workspace-wide search.",
@@ -470,11 +583,29 @@ async function handle(message) {
     return;
   }
   if (method === "tools/list") {
+    const bridge = await bridgeContext();
+    if (bridge) {
+      try {
+        sendResult(id, await bridgeCall(bridge, negotiatedProtocolVersion, "tools/list", {}));
+      } catch (error) {
+        sendError(id, -32603, String(error?.message || error));
+      }
+      return;
+    }
     const entries = await availableTools();
     sendResult(id, { tools: entries.map(({ run, ...definition }) => definition) });
     return;
   }
   if (method === "tools/call") {
+    const bridge = await bridgeContext();
+    if (bridge) {
+      try {
+        sendResult(id, await bridgeCall(bridge, negotiatedProtocolVersion, "tools/call", params || {}));
+      } catch (error) {
+        sendResult(id, { content: [{ type: "text", text: String(error?.message || error) }], isError: true });
+      }
+      return;
+    }
     try {
       const result = await callTool(params?.name, params?.arguments);
       sendResult(id, {

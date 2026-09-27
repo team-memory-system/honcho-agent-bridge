@@ -2,21 +2,21 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export const APP_ID = "agent-memory";
+export const APP_ID = "honcho-agent-bridge";
 export const CONFIG_VERSION = 1;
 
 export function userHome() {
-  return path.resolve(process.env.AGENT_MEMORY_USER_HOME || os.homedir());
+  return path.resolve(process.env.HONCHO_AGENT_BRIDGE_USER_HOME || os.homedir());
 }
 
 export function defaultAppHome() {
-  if (process.env.AGENT_MEMORY_HOME) return path.resolve(process.env.AGENT_MEMORY_HOME);
+  if (process.env.HONCHO_AGENT_BRIDGE_HOME) return path.resolve(process.env.HONCHO_AGENT_BRIDGE_HOME);
   if (process.platform === "win32") {
     const base = process.env.LOCALAPPDATA || path.join(userHome(), "AppData", "Local");
-    return path.join(base, "AgentMemory");
+    return path.join(base, "HonchoAgentBridge");
   }
   if (process.platform === "darwin") {
-    return path.join(userHome(), "Library", "Application Support", "AgentMemory");
+    return path.join(userHome(), "Library", "Application Support", "HonchoAgentBridge");
   }
   const base = process.env.XDG_DATA_HOME || path.join(userHome(), ".local", "share");
   return path.join(base, APP_ID);
@@ -27,7 +27,7 @@ export function installPaths(config = null) {
   const dataDir = path.resolve(config?.paths?.dataDir || path.join(appHome, "data"));
   return {
     appHome,
-    configPath: path.resolve(process.env.AGENT_MEMORY_CONFIG || path.join(appHome, "config.json")),
+    configPath: path.resolve(process.env.HONCHO_AGENT_BRIDGE_CONFIG || path.join(appHome, "config.json")),
     dataDir,
     // Keep the replaceable collector runtime isolated from the long-running
     // personal-profile host supervisor in runtime/host. On Windows a running
@@ -57,8 +57,8 @@ export function configEnvironment(config, provider = "") {
   if (!config) return {};
   const paths = installPaths(config);
   const env = {
-    AGENT_MEMORY_HOME: paths.appHome,
-    AGENT_MEMORY_CONFIG: paths.configPath,
+    HONCHO_AGENT_BRIDGE_HOME: paths.appHome,
+    HONCHO_AGENT_BRIDGE_CONFIG: paths.configPath,
     HONCHO_BASE_URL: config.honcho?.baseUrl || "http://127.0.0.1:8001",
     HONCHO_WORKSPACE_ID: config.honcho?.workspaceId || "memory",
     HONCHO_USER_NAME: config.user?.peerId || "",

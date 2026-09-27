@@ -1,4 +1,4 @@
-# Agent Memory
+# Honcho Agent Bridge
 
 Self-contained Codex and Claude Code plugin for one personal, self-hosted Honcho memory.
 
@@ -21,7 +21,7 @@ Company memory, folder-based sharing rules, and cross-device database synchroniz
 
 The `personal` profile also requires macOS or Windows, a working Codex login, and Ollama on the host. It reuses the current user's `~/.codex/auth.json`; it never copies Codex credentials into the plugin, Docker image, release archive, or private server environment. Run `codex login` on a new computer before setup. The setup process validates only that usable access and refresh credentials exist. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
 
-On Windows, Docker Desktop must use its WSL 2 backend, hardware virtualization and the WSL features must be enabled, and Ollama must be installed for the current user and available on `PATH`. `server plan` checks Docker CLI/Compose and engine health; personal preparation checks Codex authentication, npm/pnpm, Ollama and its local API, the required base/alias/context, and the native startup adapter. Docker engine readiness is the current gate for the WSL backend: setup does not independently enable WSL, clear a pending reboot, or preflight every port. If Docker reports that a WSL feature change requires a reboot, restart Windows and run the same plan again.
+On Windows, Docker Desktop must use its WSL 2 backend, hardware virtualization and the WSL features must be enabled, and Ollama must be installed for the current user and available on `PATH`. `server plan` checks Docker CLI/Compose and engine health; personal preparation checks Codex authentication, npm/pnpm, Ollama and its local API, and the required base/alias/context. Docker engine readiness is the current gate for the WSL backend: setup does not independently enable WSL, clear a pending reboot, or preflight every port. If Docker reports that a WSL feature change requires a reboot, restart Windows and run the same plan again.
 
 When Docker or Ollama is absent, the setup skill offers an explicitly confirmed installation through the detected platform's official package manager or vendor installer, then reruns the prerequisite checks. System software installation is never hidden inside the release archive.
 
@@ -33,10 +33,10 @@ From a private Git repository, replace `OWNER/REPOSITORY` below:
 
 ```sh
 codex plugin marketplace add OWNER/REPOSITORY
-codex plugin add agent-memory@agent-memory
+codex plugin add honcho-agent-bridge@honcho-agent-bridge
 
 claude plugin marketplace add OWNER/REPOSITORY
-claude plugin install agent-memory@agent-memory
+claude plugin install honcho-agent-bridge@honcho-agent-bridge
 ```
 
 For a local checkout, pass its absolute directory instead of `OWNER/REPOSITORY`. Start a new Codex session or reload Claude plugins after installation. Then invoke `$setup-memory` in Codex or `/memory-setup` in Claude Code.
@@ -59,7 +59,7 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 | `personal` | Honcho API, Deriver, PostgreSQL/pgvector, Redis, dashboard | Codex OpenAI-compatible proxy, Ollama, `qwen3-embedding-honcho-8192`, collector and MCP bridge | Reuses the current `codex login`; the Docker-to-proxy shared secret is generated locally | macOS/Windows reproduction of this self-hosted topology with local 1536-dimensional, 8192-token embeddings |
 | `portable` | Honcho API, Deriver, PostgreSQL/pgvector, Redis, dashboard | Collector and MCP bridge only | External OpenAI-compatible API key entered in the installed private `.env` | Generic installation when the personal host topology is unavailable or unwanted |
 
-The `personal` profile is available only in a release that contains `server/env.personal.example` and `server/host-profile.personal.json`. `server prepare --profile personal` copies the bundled Honcho source, creates the private database and proxy secrets, installs the host proxy dependencies, pulls `qwen3-embedding:8b` when needed, creates the `qwen3-embedding-honcho-8192` alias, and installs the native auto-start adapter. `server start --profile personal` starts and verifies the host supervisor first, then the Docker stack. The supervisor keeps the Codex proxy healthy and the Qwen alias resident across logins. `server status` and `server stop` with the same profile cover both layers; stopping preserves the database volumes and installed configuration.
+The `personal` profile requires `server/env.personal.example` and `server/host-profile.personal.json`. The LLM proxy is an independently installed service from `../llm-proxy`; this bundle neither includes its source nor starts/stops it by default (`codexProxy.enabled: false` means externally managed). Supply that service's existing shared key as `LLM_VLLM_API_KEY` in a private source or installed `.env` before preparing. No random proxy key is generated for an external service. `server prepare --profile personal` prepares Honcho and local Ollama; the host supervisor keeps the Qwen alias resident. Server stop leaves the independently managed proxy running. Legacy opt-in managed profiles must explicitly set `codexProxy.enabled: true` and may set `codexProxy.sourceDir` to an independently installed source directory.
 
 For development or recovery, the same deterministic workflow is available directly:
 
@@ -93,17 +93,17 @@ node scripts/build-distribution.mjs \
 
 The optional environment source becomes `server/env.personal.example`, and its non-secret host requirements become `server/host-profile.personal.json`. Model names, dimensions, context length, ports, and topology remain; keys, tokens, passwords, credentials, and secret-looking values are blank. The resulting bundle contains no conversations, database volume, Codex authentication, or Ollama model blobs. Run `server plan`, `prepare`, and `start` with `--profile personal` to reproduce the complete Docker-plus-host topology. Use `--profile portable` for the generic external OpenAI-compatible configuration.
 
-`setup apply` copies the runtime to a stable application-data directory, writes a private `config.json`, merges only the managed Codex Stop hook, and removes obsolete Agent Memory hooks. Claude Code uses the hook bundled with the plugin. Existing unrelated hooks and settings are preserved.
+`setup apply` copies the runtime to a stable application-data directory, writes a private `config.json`, merges only the managed Codex Stop hook, and removes obsolete Honcho Agent Bridge hooks. Claude Code uses the hook bundled with the plugin. Existing unrelated hooks and settings are preserved.
 
 ## Runtime locations
 
 | Platform | Default application data |
 | --- | --- |
-| macOS | `~/Library/Application Support/AgentMemory` |
-| Windows | `%LOCALAPPDATA%\AgentMemory` |
-| Linux | `$XDG_DATA_HOME/agent-memory` or `~/.local/share/agent-memory` |
+| macOS | `~/Library/Application Support/HonchoAgentBridge` |
+| Windows | `%LOCALAPPDATA%\HonchoAgentBridge` |
+| Linux | `$XDG_DATA_HOME/honcho-agent-bridge` or `~/.local/share/honcho-agent-bridge` |
 
-The directory contains the private configuration and data plus isolated runtime trees: `runtime/collector` for the replaceable collector/MCP bridge and, in the personal profile, `runtime/host` for the long-running proxy/Ollama supervisor. Collector rollback is retained beside it as `runtime/collector.previous`; server rollback uses `server.previous`. Override the application-data root for testing with `AGENT_MEMORY_HOME`; override the detected user home with `AGENT_MEMORY_USER_HOME`.
+The directory contains the private configuration and data plus isolated runtime trees: `runtime/collector` for the replaceable collector/MCP bridge and, in the personal profile, `runtime/host` for the long-running proxy/Ollama supervisor. Collector rollback is retained beside it as `runtime/collector.previous`; server rollback uses `server.previous`. Override the application-data root for testing with `HONCHO_AGENT_BRIDGE_HOME`; override the detected user home with `HONCHO_AGENT_BRIDGE_USER_HOME`.
 
 ## Architecture
 
@@ -148,9 +148,9 @@ The existing `~/.hermes/local-honcho-mcp/tool-config.json` format is also recogn
 Installation rollback and memory backup are different:
 
 - Setup automatically rolls back the managed runtime, private configuration, and edited host hook files when an apply step fails. Updates retain `runtime/collector.previous` and `server.previous`; unrelated host settings and the running host supervisor are preserved.
-- Durable memory lives primarily in the Docker PostgreSQL `pgdata` volume. A machine-migration or disaster backup must contain a consistent PostgreSQL dump (or an offline copy of that volume) plus the Agent Memory application-data directory containing `config.json`, the private server `.env`, MCP tool settings, and any pending collector spool/state. Include the Redis volume only when preserving in-flight Deriver jobs is important; Redis is not the authoritative long-term memory store.
-- Codex `auth.json`, Ollama model blobs, generated proxy dependencies, plugin caches, hooks, and startup adapters are deliberately outside the portable backup set. On a restored computer, install the prerequisites, run `codex login`, restore the database and private Agent Memory files, then rerun `server prepare/start --profile personal` and `setup apply`. Qwen and the native startup integration are recreated when absent.
-- Keep backups encrypted because the private `.env` and Agent Memory configuration can contain database passwords or API bearer tokens. The release builder never includes them.
+- Durable memory lives primarily in the Docker PostgreSQL `pgdata` volume. A machine-migration or disaster backup must contain a consistent PostgreSQL dump (or an offline copy of that volume) plus the Honcho Agent Bridge application-data directory containing `config.json`, the private server `.env`, MCP tool settings, and any pending collector spool/state. Include the Redis volume only when preserving in-flight Deriver jobs is important; Redis is not the authoritative long-term memory store.
+- Codex `auth.json`, Ollama model blobs, generated proxy dependencies, plugin caches, and hooks are deliberately outside the portable backup set. On a restored computer, install the prerequisites, run `codex login`, restore the database and private Honcho Agent Bridge files, then rerun `server prepare/start --profile personal`, `host start`, and `setup apply`. Qwen models are recreated when absent.
+- Keep backups encrypted because the private `.env` and Honcho Agent Bridge configuration can contain database passwords or API bearer tokens. The release builder never includes them.
 - `server stop --profile personal` preserves Docker volumes. Never use `docker compose down -v` unless permanently deleting the memory database is the explicit goal.
 
 ## Verification

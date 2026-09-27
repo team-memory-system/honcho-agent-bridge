@@ -303,7 +303,16 @@ function replaceEnvironmentValues(text, values) {
 
 function personalEnvironment(text) {
   const sanitized = withoutConflictingPersonalModelSettings(sanitizedEnvironment(text));
-  const proxyBaseUrl = "http://host.docker.internal:11435/v1";
+  const source = parseEnvironment(text);
+  // Follow whatever the owner's own environment points at instead of assuming the
+  // Codex proxy: a personal install may route completions through the llm-proxy
+  // router rather than one adapter. The proxies themselves are released separately,
+  // so the bundle records the endpoint and the host profile records where the source
+  // has to be found.
+  const proxyBaseUrl = dockerHostEndpoint(
+    source.DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL || source.LLM_VLLM_BASE_URL,
+    "http://host.docker.internal:11435/v1",
+  );
   const embeddingBaseUrl = "http://host.docker.internal:11434/v1";
   const values = {
     LLM_OPENAI_API_KEY: "",
@@ -348,6 +357,20 @@ function portFromUrl(value, fallback) {
   try { return Number(new URL(value).port || fallback); } catch { return fallback; }
 }
 
+/** A loopback endpoint as the API container has to address it. */
+function dockerHostEndpoint(value, fallback) {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  try {
+    const url = new URL(raw);
+    if (!["127.0.0.1", "localhost", "::1", "host.docker.internal"].includes(url.hostname)) return fallback;
+    url.hostname = "host.docker.internal";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return fallback;
+  }
+}
+
 function personalHostProfile(text) {
   const env = parseEnvironment(text);
   const embeddingUrl = env.EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL
@@ -359,19 +382,33 @@ function personalHostProfile(text) {
   const embeddingModel = env.EMBEDDING_MODEL_CONFIG__MODEL || "";
   const codexModel = env.DERIVER_MODEL_CONFIG__MODEL || "gpt-5.6-sol";
   const ollamaEnabled = /(?:host\.docker\.internal|127\.0\.0\.1|localhost):11434(?:\/|$)/.test(embeddingUrl);
-  const codexProxyEnabled = /(?:host\.docker\.internal|127\.0\.0\.1|localhost):11435(?:\/|$)/.test(proxyUrl);
   return {
     format: 1,
     profile: "personal",
+    // The proxies live in their own repository and are installed separately. Until
+    // this points at that checkout, no proxy can be enabled — which is better than
+    // guessing a path that only existed on the machine the bundle was built on.
+    llmProxyRoot: "",
     codexProxy: {
-      enabled: codexProxyEnabled,
+      enabled: false,
+      baseUrl: proxyUrl.replace("host.docker.internal", "127.0.0.1").replace(/\/v1\/?$/, ""),
       defaultModel: codexModel,
       port: portFromUrl(proxyUrl, 11435),
+    },
+    claudeProxy: {
+      enabled: false,
+      baseUrl: "http://127.0.0.1:11446",
+      port: 11446,
+    },
+    router: {
+      enabled: false,
+      baseUrl: "http://127.0.0.1:11400",
+      port: 11400,
     },
     ollama: {
       enabled: ollamaEnabled,
       baseUrl: "http://127.0.0.1:11434",
-      baseModel: env.AGENT_MEMORY_OLLAMA_BASE_MODEL || "qwen3-embedding:8b",
+      baseModel: env.HONCHO_AGENT_BRIDGE_OLLAMA_BASE_MODEL || "qwen3-embedding:8b",
       model: embeddingModel || "qwen3-embedding-honcho-8192",
       contextLength: Number(env.EMBEDDING_MAX_INPUT_TOKENS || 8192),
       dimensions: Number(env.EMBEDDING_VECTOR_DIMENSIONS || 1536),
@@ -389,10 +426,10 @@ export async function buildDistribution(args, {
   const packageJson = JSON.parse(await fsp.readFile(path.join(ROOT, "package.json"), "utf8"));
   const packageDirty = git(ROOT, ["status", "--porcelain"]);
   if (packageDirty && !args["allow-dirty"]) {
-    throw new Error("Agent Memory source has uncommitted changes; commit them or pass --allow-dirty intentionally");
+    throw new Error("Honcho Agent Bridge source has uncommitted changes; commit them or pass --allow-dirty intentionally");
   }
-  const outputRoot = path.resolve(args.output || path.join(path.dirname(ROOT), "agent-memory-releases"));
-  const bundleName = safeBundleName(args.name || `agent-memory-${packageJson.version}`);
+  const outputRoot = path.resolve(args.output || path.join(path.dirname(ROOT), "honcho-agent-bridge-releases"));
+  const bundleName = safeBundleName(args.name || `honcho-agent-bridge-${packageJson.version}`);
   const bundle = path.join(outputRoot, bundleName);
   const archive = `${bundle}.tar.gz`;
   for (const required of ["Dockerfile", "LICENSE", "src", "database/init.sql", "local-dashboard/Dockerfile"]) {
@@ -411,6 +448,10 @@ export async function buildDistribution(args, {
     await copyTree(ROOT, candidateBundle);
     await fsp.mkdir(path.join(candidateBundle, "server", "honcho"), { recursive: true });
     await copyTree(honchoSource, path.join(candidateBundle, "server", "honcho"));
+    // Older source checkouts may still contain proxies. They are independently released.
+    for (const name of ["codex-openai-proxy", "claude-print-proxy"]) {
+      await fsp.rm(path.join(candidateBundle, "server", "honcho", name), { recursive: true, force: true });
+    }
     await fsp.copyFile(path.join(honchoSource, "LICENSE"), path.join(candidateBundle, "HONCHO-LICENSE-AGPL-3.0.txt"));
 
     let hostProfile = null;
@@ -419,13 +460,6 @@ export async function buildDistribution(args, {
       const environment = personalEnvironment(source);
       await fsp.writeFile(path.join(candidateBundle, "server", "env.personal.example"), environment, "utf8");
       hostProfile = personalHostProfile(environment);
-      if (hostProfile.codexProxy.enabled) {
-        for (const required of ["package.json", "server.mjs"]) {
-          if (!(await exists(path.join(honchoSource, "codex-openai-proxy", required)))) {
-            throw new Error(`Personal profile requires codex-openai-proxy/${required}`);
-          }
-        }
-      }
       await fsp.writeFile(
         path.join(candidateBundle, "server", "host-profile.personal.json"),
         `${JSON.stringify(hostProfile, null, 2)}\n`,
@@ -437,7 +471,7 @@ export async function buildDistribution(args, {
       format: 1,
       generatedAt: new Date().toISOString(),
       package: { name: packageJson.name, version: packageJson.version },
-      agentMemory: {
+      honchoAgentBridge: {
         commit: git(ROOT, ["rev-parse", "HEAD"]),
         branch: git(ROOT, ["branch", "--show-current"]),
         dirty: Boolean(packageDirty),

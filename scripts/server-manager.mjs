@@ -23,7 +23,8 @@ const VERIFY_EMBEDDING_DIMENSIONS = 1536;
 const VERIFY_MINIMUM_PROMPT_TOKENS = 2048;
 const VERIFY_EMBEDDING_INPUT = "verify\n".repeat(3000);
 const SERVER_PROFILES = new Set(["personal", "portable"]);
-const CONTAINER_HOST_PROBE_SCRIPT = `import json
+function containerHostProbeScript(targets) {
+  return `import json
 import urllib.error
 import urllib.request
 
@@ -38,10 +39,47 @@ def probe(url):
     except Exception:
         return {"ok": False, "status": None}
 
-print(json.dumps({
-    "ollama": probe("http://host.docker.internal:11434/api/version"),
-    "proxy": probe("http://host.docker.internal:11435/health"),
-}))`;
+targets = json.loads(${JSON.stringify(JSON.stringify(targets))})
+print(json.dumps({name: probe(url) for name, url in targets.items()}))`;
+}
+
+/**
+ * A health URL the API container can reach, or "" when the value is not a local
+ * endpoint. Only loopback and the Docker host alias are ever probed, and only the
+ * host and port are taken from the environment - never a path or credentials.
+ */
+function containerHostHealthUrl(value, healthPath) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  let url;
+  try { url = new URL(raw); }
+  catch { return ""; }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+  if (url.username || url.password) return "";
+  if (!["127.0.0.1", "localhost", "::1", "host.docker.internal"].includes(url.hostname)) return "";
+  return `http://host.docker.internal:${url.port || (url.protocol === "https:" ? 443 : 80)}${healthPath}`;
+}
+
+/**
+ * What this install actually expects to reach from inside the API container. An
+ * endpoint the environment never configured is not a failure: requiring the Codex
+ * proxy unconditionally is what made `server verify` impossible to pass on an
+ * install that routes completions elsewhere, or has no proxy at all.
+ */
+function containerHostTargets(environment) {
+  const ollama = containerHostHealthUrl(
+    environment.EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL || environment.LLM_OPENAI_COMPATIBLE_BASE_URL,
+    "/api/version",
+  );
+  const proxy = containerHostHealthUrl(
+    environment.DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL || environment.LLM_VLLM_BASE_URL,
+    "/health",
+  );
+  const targets = {};
+  if (ollama) targets.ollama = ollama;
+  if (proxy) targets.proxy = proxy;
+  return targets;
+}
 
 async function exists(target) {
   try { await fsp.access(target); return true; } catch { return false; }
@@ -55,11 +93,11 @@ function requireServerProfile(profile) {
 }
 
 function sourceServerDir() {
-  return path.resolve(process.env.AGENT_MEMORY_SERVER_SOURCE || path.join(PLUGIN_ROOT, "server"));
+  return path.resolve(process.env.HONCHO_AGENT_BRIDGE_SERVER_SOURCE || path.join(PLUGIN_ROOT, "server"));
 }
 
 export function installedServerDir(config = null) {
-  return path.resolve(process.env.AGENT_MEMORY_SERVER_DIR || config?.paths?.serverDir || path.join(installPaths(config).appHome, "server"));
+  return path.resolve(process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR || config?.paths?.serverDir || path.join(installPaths(config).appHome, "server"));
 }
 
 async function withServerLifecycleLock(directory, operation, callback) {
@@ -71,7 +109,7 @@ async function withServerLifecycleLock(directory, operation, callback) {
   });
   if (!lock) {
     const error = new Error(`Server lifecycle operation is already running for ${path.resolve(directory)}`);
-    error.code = "AGENT_MEMORY_SERVER_LIFECYCLE_BUSY";
+    error.code = "HONCHO_AGENT_BRIDGE_SERVER_LIFECYCLE_BUSY";
     error.operation = operation;
     throw error;
   }
@@ -101,7 +139,7 @@ export async function dockerCliEnvironment(directory, {
   platform = process.platform,
   env = process.env,
 } = {}) {
-  const result = { ...env, COMPOSE_PROJECT_NAME: "agent-memory" };
+  const result = { ...env, COMPOSE_PROJECT_NAME: "honcho-agent-bridge" };
   if (platform !== "win32") return result;
   const configDirectory = path.join(path.dirname(path.resolve(directory)), "runtime", "docker-cli");
   const configFile = path.join(configDirectory, "config.json");
@@ -142,6 +180,17 @@ function parseEnvironment(text) {
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
     return match ? [[match[1], match[2]]] : [];
   }));
+}
+
+async function readEnvironmentFile(target) {
+  try { return parseEnvironment(await fsp.readFile(target, "utf8")); }
+  catch { return {}; }
+}
+
+async function managesCodexProxy() {
+  const hostProfilePath = path.join(installedServerDir(), "host-profile.personal.json");
+  try { return JSON.parse(await fsp.readFile(hostProfilePath, "utf8")).codexProxy?.enabled === true; }
+  catch { return false; }
 }
 
 function localEndpointConfigured(environment, port) {
@@ -185,6 +234,9 @@ function mergePersonalProfileEnvironment(currentText, profileText) {
 
 async function initializeEnvironment(directory, profile = "portable", privateFileOptions = {}) {
   const target = path.join(directory, ".env");
+  const hostProfilePath = path.join(directory, "host-profile.personal.json");
+  const managesProxy = profile === "personal" && await exists(hostProfilePath)
+    && JSON.parse(await fsp.readFile(hostProfilePath, "utf8")).codexProxy?.enabled === true;
   const candidate = profile === "personal" ? path.join(directory, "env.personal.example") : path.join(directory, ".env.example");
   if (await exists(target)) {
     const original = await fsp.readFile(target, "utf8");
@@ -200,7 +252,7 @@ async function initializeEnvironment(directory, profile = "portable", privateFil
       if (localEndpointConfigured(templateEnvironment, 11434) && !String(currentEnvironment.LLM_OPENAI_COMPATIBLE_API_KEY || "").trim()) {
         generatedValues.LLM_OPENAI_COMPATIBLE_API_KEY = "ollama-local";
       }
-      if (localEndpointConfigured(templateEnvironment, 11435) && !String(currentEnvironment.LLM_VLLM_API_KEY || "").trim()) {
+      if (managesProxy && localEndpointConfigured(templateEnvironment, 11435) && !String(currentEnvironment.LLM_VLLM_API_KEY || "").trim()) {
         generatedValues.LLM_VLLM_API_KEY = crypto.randomBytes(32).toString("base64url");
       }
     }
@@ -231,7 +283,7 @@ async function initializeEnvironment(directory, profile = "portable", privateFil
   if (profile === "personal" && localEndpointConfigured(templateEnvironment, 11434)) {
     values.LLM_OPENAI_COMPATIBLE_API_KEY = templateEnvironment.LLM_OPENAI_COMPATIBLE_API_KEY || "ollama-local";
   }
-  if (profile === "personal" && localEndpointConfigured(templateEnvironment, 11435)) {
+  if (managesProxy && localEndpointConfigured(templateEnvironment, 11435)) {
     values.LLM_VLLM_API_KEY = templateEnvironment.LLM_VLLM_API_KEY || crypto.randomBytes(32).toString("base64url");
   }
   for (const [key, value] of Object.entries(process.env)) {
@@ -277,6 +329,20 @@ export async function serverPlan({
   if (profile === "portable" && !process.env.LLM_OPENAI_API_KEY && !(await exists(path.join(bundle.directory, ".env")))) {
     warnings.push("No OpenAI key was supplied; add the required LLM key to server/.env before memory processing");
   }
+  if (profile === "personal") {
+    // A key is only invented for a proxy this install manages. When the proxy is
+    // run elsewhere the key has to match that proxy's, so it can only be copied in
+    // by hand — and saying nothing left Honcho calling the proxy with no key at all.
+    const installedEnvironment = await readEnvironmentFile(path.join(installedServerDir(), ".env"));
+    const templatePath = path.join(bundle.directory, profilePath);
+    const template = await readEnvironmentFile(templatePath);
+    const managed = await managesCodexProxy();
+    const wantsProxy = localEndpointConfigured(template, 11435) || localEndpointConfigured(installedEnvironment, 11435);
+    const hasSecret = Boolean(String(installedEnvironment.LLM_VLLM_API_KEY || "").trim());
+    if (wantsProxy && !managed && !hasSecret) {
+      warnings.push("Honcho is configured to reach a proxy this install does not manage; copy that proxy's shared secret into LLM_VLLM_API_KEY in server/.env");
+    }
+  }
   return {
     ok: issues.length === 0,
     ready: issues.length === 0,
@@ -317,7 +383,7 @@ function errorWithRecovery(original, context, recovery) {
     ? ` Rollback recovery also failed: ${recovery.issues.join("; ")}`
     : "";
   const wrapped = new Error(`${context}: ${operationError(original)}.${recoveryDetail}`, { cause: original });
-  wrapped.code = "AGENT_MEMORY_SERVER_UPDATE_FAILED";
+  wrapped.code = "HONCHO_AGENT_BRIDGE_SERVER_UPDATE_FAILED";
   wrapped.rollback = recovery;
   return wrapped;
 }
@@ -1132,6 +1198,12 @@ async function verifyOllamaEmbedding({ fetchImpl, model, timeoutMs }) {
 }
 
 async function verifyContainerHostAccess({ directory, composeRunner }) {
+  const environment = await readEnvironmentFile(path.join(directory, ".env"));
+  const targets = containerHostTargets(environment);
+  const skipped = { ok: true, status: null, skipped: true };
+  if (!Object.keys(targets).length) {
+    return { ok: true, ollama: skipped, proxy: skipped, skipped: true };
+  }
   let result;
   try {
     result = await composeRunner(directory, [
@@ -1140,13 +1212,13 @@ async function verifyContainerHostAccess({ directory, composeRunner }) {
       "api",
       "python",
       "-c",
-      CONTAINER_HOST_PROBE_SCRIPT,
+      containerHostProbeScript(targets),
     ], { timeout: 30_000 });
   } catch {
     return {
       ok: false,
-      ollama: { ok: false, status: null },
-      proxy: { ok: false, status: null },
+      ollama: targets.ollama ? { ok: false, status: null } : skipped,
+      proxy: targets.proxy ? { ok: false, status: null } : skipped,
       error: "Docker API-container host connectivity probe failed",
     };
   }
@@ -1155,14 +1227,15 @@ async function verifyContainerHostAccess({ directory, composeRunner }) {
     const line = String(result?.stdout || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean).at(-1);
     document = line ? JSON.parse(line) : null;
   } catch {}
-  const ollama = {
-    ok: Boolean(document?.ollama?.ok),
-    status: Number.isInteger(document?.ollama?.status) ? document.ollama.status : null,
+  const reading = (name) => {
+    if (!targets[name]) return skipped;
+    return {
+      ok: Boolean(document?.[name]?.ok),
+      status: Number.isInteger(document?.[name]?.status) ? document[name].status : null,
+    };
   };
-  const proxy = {
-    ok: Boolean(document?.proxy?.ok),
-    status: Number.isInteger(document?.proxy?.status) ? document.proxy.status : null,
-  };
+  const ollama = reading("ollama");
+  const proxy = reading("proxy");
   return {
     ok: ollama.ok && proxy.ok,
     ollama,

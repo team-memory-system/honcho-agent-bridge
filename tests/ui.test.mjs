@@ -1,0 +1,349 @@
+// The setup UI can install hooks and start services, so the checks that matter are:
+// it only listens to a browser on this machine, it runs the same CLI a terminal
+// would, and an uploaded ChatGPT export actually lands in Honcho.
+import assert from "node:assert/strict";
+import fsp from "node:fs/promises";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import test, { after, before } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { createUiServer, rejectUnsafeRequest } from "../scripts/ui.mjs";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+let server;
+let port;
+let honcho;
+let honchoRequests = [];
+let workdir;
+
+async function availablePort() {
+  const probe = http.createServer();
+  await new Promise((resolve, reject) => { probe.once("error", reject); probe.listen(0, "127.0.0.1", resolve); });
+  const selected = probe.address().port;
+  await new Promise((resolve) => probe.close(() => resolve()));
+  return selected;
+}
+
+function send(pathname, { method = "GET", body, headers = {}, raw } = {}) {
+  const payload = raw ?? (body === undefined ? "" : JSON.stringify(body));
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      hostname: "127.0.0.1",
+      port,
+      path: pathname,
+      method,
+      headers: {
+        host: headers.host ?? `127.0.0.1:${port}`,
+        ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {}),
+        ...headers,
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let parsed = null;
+        try { parsed = text ? JSON.parse(text) : null; } catch {}
+        resolve({ status: response.statusCode, headers: response.headers, text, body: parsed });
+      });
+    });
+    request.on("error", reject);
+    request.end(payload);
+  });
+}
+
+before(async () => {
+  workdir = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-ui-"));
+  honcho = http.createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    honchoRequests.push({ url: request.url, body: raw ? JSON.parse(raw) : null });
+    response.setHeader("Content-Type", "application/json");
+    if (request.url.endsWith("/messages/list")) response.end(JSON.stringify({ items: [], total: 0 }));
+    else response.end(JSON.stringify({ ok: true }));
+  });
+  const honchoPort = await availablePort();
+  await new Promise((resolve, reject) => { honcho.once("error", reject); honcho.listen(honchoPort, "127.0.0.1", resolve); });
+  process.env.HONCHO_BASE_URL = `http://127.0.0.1:${honchoPort}`;
+  process.env.HONCHO_WORKSPACE_ID = "memory";
+  process.env.HONCHO_USER_NAME = "user_test";
+  process.env.HONCHO_AGENT_HOOK_STATE = path.join(workdir, "state.json");
+  process.env.HONCHO_AGENT_HOOK_LOG = path.join(workdir, "collector.log");
+
+  port = await availablePort();
+  server = createUiServer();
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
+});
+
+after(async () => {
+  if (server) await new Promise((resolve) => server.close(() => resolve()));
+  if (honcho) await new Promise((resolve) => honcho.close(() => resolve()));
+  if (workdir) await fsp.rm(workdir, { recursive: true, force: true });
+});
+
+test("the page and its assets are served, and nothing above the ui directory is", async () => {
+  const page = await send("/");
+  assert.equal(page.status, 200);
+  assert.match(page.headers["content-type"], /text\/html/);
+  assert.match(page.text, /기억 설치/);
+
+  assert.equal((await send("/styles.css")).status, 200);
+  assert.equal((await send("/app.js")).status, 200);
+  assert.equal((await send("/../package.json")).status, 404);
+  assert.equal((await send("/../../etc/passwd")).status, 404);
+});
+
+test("only a same-origin browser on this machine may drive the UI", async () => {
+  assert.equal((await send("/api/status", { headers: { host: "evil.example" } })).status, 403);
+  assert.equal((await send("/api/setup/plan", { method: "POST", body: {}, headers: { origin: "http://evil.example" } })).status, 403);
+  assert.equal(
+    (await send("/api/setup/plan", { method: "POST", raw: "a=1", headers: { "content-type": "application/x-www-form-urlencoded" } })).status,
+    415,
+    "a form post is what a cross-site page can send without a preflight",
+  );
+  assert.equal((await send("/", { method: "POST", body: {} })).status, 405);
+  assert.equal((await send("/api/nope")).status, 404);
+});
+
+test("the host and origin checks are decided by the request, not by the route", () => {
+  const base = { method: "GET", headers: { host: "127.0.0.1:1" } };
+  assert.equal(rejectUnsafeRequest(base), null);
+  assert.equal(rejectUnsafeRequest({ ...base, headers: { host: "127.0.0.1:1", origin: "http://127.0.0.1:1" } }), null);
+  assert.equal(rejectUnsafeRequest({ ...base, headers: { host: "10.0.0.1:1" } }).status, 403);
+  assert.equal(rejectUnsafeRequest({ ...base, headers: { host: "localhost:1", origin: "http://localhost:2" } }).status, 403);
+  assert.equal(rejectUnsafeRequest({ method: "POST", headers: { host: "127.0.0.1:1" } }).status, 415);
+});
+
+test("status runs the same detect and doctor a terminal would", async () => {
+  const response = await send("/api/status");
+  assert.equal(response.status, 200);
+  assert.equal(response.body.detect.ok, true);
+  assert.equal(typeof response.body.detect.paths.configPath, "string");
+  assert.ok(Array.isArray(response.body.doctor.checks), "doctor reports its checks");
+});
+
+test("an uploaded ChatGPT export reaches Honcho, and re-uploading it adds nothing", async () => {
+  honchoRequests = [];
+  const exported = JSON.stringify([
+    {
+      conversation_id: "conv-ui",
+      title: "업로드 테스트",
+      create_time: 1_700_000_000,
+      current_node: "a1",
+      mapping: {
+        root: { id: "root", parent: null, children: [], message: null },
+        u1: { id: "u1", parent: "root", children: [], message: { id: "u1", author: { role: "user" }, create_time: 1_700_000_000, content: { content_type: "text", parts: ["웹에서 물어본 질문"] } } },
+        a1: { id: "a1", parent: "u1", children: [], message: { id: "a1", author: { role: "assistant" }, create_time: 1_700_000_001, content: { content_type: "text", parts: ["웹에서 받은 답"] } } },
+      },
+    },
+  ]);
+
+  const first = await send("/api/import/chatgpt", { method: "POST", raw: exported });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.ok, true, JSON.stringify(first.body));
+  assert.equal(first.body.conversations, 1);
+  assert.equal(first.body.imported_sessions, 1);
+  assert.equal(first.body.new_messages, 2);
+  assert.equal(first.body.uploaded_bytes, Buffer.byteLength(exported));
+
+  const write = honchoRequests.find((entry) => entry.url?.endsWith("/messages"));
+  assert.deepEqual(write.body.messages.map((message) => message.content), ["웹에서 물어본 질문", "웹에서 받은 답"]);
+
+  const writesBefore = honchoRequests.filter((entry) => entry.url?.endsWith("/messages")).length;
+  const second = await send("/api/import/chatgpt", { method: "POST", raw: exported });
+  assert.equal(second.body.new_messages, 0);
+  assert.equal(honchoRequests.filter((entry) => entry.url?.endsWith("/messages")).length, writesBefore);
+});
+
+test("an empty or unreadable upload is reported instead of silently succeeding", async () => {
+  const empty = await send("/api/import/chatgpt", { method: "POST", raw: "", headers: { "content-type": "application/json", "content-length": "0" } });
+  assert.equal(empty.body.ok, false);
+
+  const garbage = await send("/api/import/chatgpt", { method: "POST", raw: "{not json" });
+  assert.equal(garbage.body.ok, false);
+  assert.match(String(garbage.body.error), /invalid JSON|not a ChatGPT export/);
+});
+
+test("the UI never leaves an uploaded export behind", async () => {
+  const before = (await fsp.readdir(os.tmpdir())).filter((name) => name.startsWith("honcho-bridge-upload-"));
+  await send("/api/import/chatgpt", { method: "POST", raw: JSON.stringify([]) });
+  const after = (await fsp.readdir(os.tmpdir())).filter((name) => name.startsWith("honcho-bridge-upload-"));
+  assert.deepEqual(after, before, "the spooled copy of someone's conversations is removed");
+});
+
+test("the UI serves its pages from an installed runtime, where everything is one directory", async (t) => {
+  const installed = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-runtime-"));
+  t.after(() => fsp.rm(installed, { recursive: true, force: true }));
+  // `installRuntime` flattens scripts/ into one directory and copies ui/ inside it.
+  await fsp.cp(path.join(ROOT, "scripts"), installed, { recursive: true });
+  await fsp.cp(path.join(ROOT, "ui"), path.join(installed, "ui"), { recursive: true });
+
+  const { createUiServer: createInstalled } = await import(`file://${path.join(installed, "ui.mjs")}`);
+  const installedServer = createInstalled();
+  const installedPort = await availablePort();
+  await new Promise((resolve, reject) => { installedServer.once("error", reject); installedServer.listen(installedPort, "127.0.0.1", resolve); });
+  t.after(() => new Promise((resolve) => installedServer.close(() => resolve())));
+
+  const page = await new Promise((resolve, reject) => {
+    const request = http.request({ hostname: "127.0.0.1", port: installedPort, path: "/", method: "GET" }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({ status: response.statusCode, text: Buffer.concat(chunks).toString("utf8") }));
+    });
+    request.on("error", reject);
+    request.end();
+  });
+  assert.equal(page.status, 200);
+  assert.match(page.text, /기억 설치/);
+});
+
+test("the setup form's fields reach the CLI under the names it actually reads", async () => {
+  // `parseOptions` ignores an unknown flag in silence, so a wrong name here would
+  // look like a working form that quietly configures nothing.
+  const response = await send("/api/setup/plan", {
+    method: "POST",
+    body: { userPeer: "ui-probe", workspace: "memory-ui", honchoUrl: "http://127.0.0.1:8123", agents: "codex", nonsense: "dropped" },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.config.user.peerId, "ui-probe");
+  assert.equal(response.body.config.honcho.workspaceId, "memory-ui");
+  assert.equal(response.body.config.honcho.baseUrl, "http://127.0.0.1:8123");
+  assert.deepEqual(response.body.config.agents, { codex: true, claude: false });
+  assert.deepEqual(response.body.issues, [], JSON.stringify(response.body.issues));
+});
+
+test("the form's field names and the accepted option names are the same set", async () => {
+  const markup = await fsp.readFile(path.join(ROOT, "ui", "index.html"), "utf8");
+  const setupForm = markup.slice(markup.indexOf('<form id="setup-form"'));
+  const fields = [...setupForm.slice(0, setupForm.indexOf("</form>")).matchAll(/<input[^>]*name="([^"]+)"/g)]
+    .map((match) => match[1]);
+  assert.ok(fields.length >= 4, "the setup form's fields were not found");
+  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  const accepted = server.match(/const SETUP_OPTIONS = new Set\(\[([\s\S]*?)\]\)/)[1]
+    .match(/"([^"]+)"/g)
+    .map((quoted) => quoted.slice(1, -1));
+  for (const field of fields) {
+    assert.ok(accepted.includes(field), `the form sends "${field}", which the server drops`);
+  }
+});
+
+test("the proxy source location and the three enable flags are editable from the UI", async (t) => {
+  // A fresh bundle ships llmProxyRoot blank with every proxy off, so without this
+  // the install and start buttons would only ever prepare a host that manages nothing.
+  const appHome = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-profile-"));
+  t.after(() => fsp.rm(appHome, { recursive: true, force: true }));
+  const profilePath = path.join(appHome, "server", "host-profile.personal.json");
+  await fsp.mkdir(path.dirname(profilePath), { recursive: true });
+  const original = {
+    format: 1,
+    profile: "personal",
+    llmProxyRoot: "",
+    codexProxy: { enabled: false, baseUrl: "http://127.0.0.1:11435", defaultModel: "gpt-5.6-sol" },
+    claudeProxy: { enabled: false, baseUrl: "http://127.0.0.1:11446" },
+    router: { enabled: false, baseUrl: "http://127.0.0.1:11400" },
+    ollama: { enabled: true, model: "qwen3-embedding-honcho-8192", dimensions: 1536 },
+  };
+  await fsp.writeFile(profilePath, JSON.stringify(original));
+
+  const proxyRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "llm-proxy-"));
+  t.after(() => fsp.rm(proxyRoot, { recursive: true, force: true }));
+
+  const previousHome = process.env.HONCHO_AGENT_BRIDGE_HOME;
+  process.env.HONCHO_AGENT_BRIDGE_HOME = appHome;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HONCHO_AGENT_BRIDGE_HOME;
+    else process.env.HONCHO_AGENT_BRIDGE_HOME = previousHome;
+  });
+
+  const scoped = createUiServer();
+  const scopedPort = await availablePort();
+  await new Promise((resolve, reject) => { scoped.once("error", reject); scoped.listen(scopedPort, "127.0.0.1", resolve); });
+  t.after(() => new Promise((resolve) => scoped.close(() => resolve())));
+
+  const call = (body) => new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const request = http.request({
+      hostname: "127.0.0.1", port: scopedPort, path: "/api/proxies/config", method: "POST",
+      headers: { host: `127.0.0.1:${scopedPort}`, "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
+    });
+    request.on("error", reject);
+    request.end(payload);
+  });
+
+  const read = await call({});
+  assert.equal(read.ok, true, JSON.stringify(read));
+  assert.equal(read.llmProxyRoot, "");
+  assert.equal(read.proxies.codex.enabled, false);
+
+  const refusedEnable = await call({ proxies: { codex: { enabled: true } } });
+  assert.equal(refusedEnable.ok, false, "enabling a proxy with nowhere to find it is refused");
+
+  const refusedRoot = await call({ llmProxyRoot: path.join(proxyRoot, "does-not-exist") });
+  assert.equal(refusedRoot.ok, false);
+  assert.match(refusedRoot.error, /not a directory/);
+
+  const saved = await call({ llmProxyRoot: proxyRoot, proxies: { codex: { enabled: true }, router: { enabled: true } } });
+  assert.equal(saved.ok, true, JSON.stringify(saved));
+  assert.equal(saved.llmProxyRoot, proxyRoot);
+  assert.equal(saved.proxies.codex.enabled, true);
+  assert.equal(saved.proxies.router.enabled, true);
+  assert.equal(saved.proxies.claude.enabled, false, "a flag the form did not send is left alone");
+
+  const onDisk = JSON.parse(await fsp.readFile(profilePath, "utf8"));
+  assert.deepEqual(onDisk.ollama, original.ollama, "the rest of the profile is untouched");
+  assert.equal(onDisk.codexProxy.defaultModel, "gpt-5.6-sol", "fields this UI does not own survive");
+  assert.equal((await fsp.readdir(path.dirname(profilePath))).length, 1, "no temp file is left behind");
+});
+
+test("files the UI writes are restricted before any bytes reach them", async (t) => {
+  // Windows ignores a POSIX creation mode, so `mode: 0o600` on its own protects
+  // nothing there. Both files this UI writes carry someone's private data - a whole
+  // chat history, and the host profile - so both go through the installer's own
+  // writer rather than a bare fs call.
+  const source = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  assert.match(source, /securePrivateFile/, "the spooled export is restricted");
+  assert.match(source, /writePrivateFileAtomic/, "the host profile uses the atomic private writer");
+  assert.equal(
+    /fs\.rename\(/.test(source), false,
+    "a bare rename would publish the file before its ACL is applied",
+  );
+
+  const spooled = JSON.stringify([]);
+  const before = (await fsp.readdir(os.tmpdir())).filter((name) => name.startsWith("honcho-bridge-upload-"));
+  assert.deepEqual(before, [], "no earlier upload is still around");
+
+  // On POSIX the restriction is observable directly.
+  const probe = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-bridge-modeprobe-"));
+  t.after(() => fsp.rm(probe, { recursive: true, force: true }));
+  const target = path.join(probe, "conversations.json");
+  await fsp.writeFile(target, spooled, { mode: 0o600, flag: "wx" });
+  if (process.platform !== "win32") {
+    const mode = (await fsp.stat(target)).mode & 0o777;
+    assert.equal(mode, 0o600, "owner-only");
+  }
+});
+
+test("the proxy buttons drive the host lifecycle, not the Docker stack", async () => {
+  // Starting proxies must not also bring Docker up, and must go through the same
+  // `host start` a terminal would use - so the supervisor it launches is detached and
+  // outlives this UI process.
+  const source = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  const routes = source.match(/const PROXY_ROUTES = \{([\s\S]*?)\n\};/)[1];
+  assert.match(routes, /"host", "status"/);
+  assert.match(routes, /"host", "prepare"/);
+  assert.match(routes, /"host", "start"/);
+  assert.match(routes, /"host", "stop"/);
+  assert.equal(/"server",/.test(routes), false, "a proxy button must not start the whole stack");
+
+  const cli = await fsp.readFile(path.join(ROOT, "scripts", "cli.mjs"), "utf8");
+  for (const subcommand of ["plan", "prepare", "start", "status", "stop"]) {
+    assert.match(cli, new RegExp(`subcommand === "${subcommand}"`), `host ${subcommand} is dispatched`);
+  }
+  assert.match(cli, /command === "host"/);
+});

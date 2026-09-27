@@ -16,10 +16,11 @@ import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { VERSION } from "./version.mjs";
 import { serverPlan, serverPrepare, serverStart, serverStatus, serverStop, serverVerify } from "./server-manager.mjs";
+import { hostPlan, hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
-const CURRENT_HOOK_MARKER = "--managed-by agent-memory";
+const CURRENT_HOOK_MARKER = "--managed-by honcho-agent-bridge";
 const LEGACY_HOOK_MARKERS = ["codex-honcho-sync", "honcho-turn-gate"];
 
 function parseOptions(items) {
@@ -158,7 +159,7 @@ async function claudePluginStatus() {
   if (process.env.CLAUDE_PLUGIN_ROOT) return { installed: true, enabled: true, source: "plugin-root" };
   const document = await readJson(path.join(userHome(), ".claude", "plugins", "installed_plugins.json"), {});
   const names = Object.keys(document?.plugins || {}).filter(
-    (name) => name === "agent-memory" || name.startsWith("agent-memory@"),
+    (name) => name === "honcho-agent-bridge" || name.startsWith("honcho-agent-bridge@"),
   );
   const settings = await readJson(path.join(userHome(), ".claude", "settings.json"), {});
   const enabledPlugins = settings?.enabledPlugins || {};
@@ -177,7 +178,7 @@ async function codexPluginStatus() {
   try {
     text = await fsp.readFile(configPath, "utf8");
   } catch {}
-  const header = text.match(/^\[plugins\."(agent-memory(?:@[^"]+)?)"\]\s*$/m);
+  const header = text.match(/^\[plugins\."(honcho-agent-bridge(?:@[^"]+)?)"\]\s*$/m);
   const remainder = header ? text.slice((header.index || 0) + header[0].length) : "";
   const nextSection = remainder.match(/^\[/m);
   const body = nextSection ? remainder.slice(0, nextSection.index) : remainder;
@@ -272,7 +273,7 @@ async function setupPlan(options = {}) {
   if (selectedAgents.length === 0) issues.push("at least one detected agent must be selected");
   for (const provider of ["codex", "claude"]) {
     if (agents[provider] && !detected.agents[provider].plugin?.enabled) {
-      warnings.push(`${provider} collection is enabled, but the Agent Memory plugin was not detected as enabled in ${provider}`);
+      warnings.push(`${provider} collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in ${provider}`);
     }
   }
   return {
@@ -367,7 +368,7 @@ function documentsEqual(left, right) {
 
 function backupName(filePath) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `${filePath}.agent-memory-backup-${stamp}`;
+  return `${filePath}.honcho-agent-bridge-backup-${stamp}`;
 }
 
 async function writeJsonAtomic(filePath, value, { backup = false, privateFile = false } = {}) {
@@ -400,6 +401,10 @@ async function installRuntime(target) {
     await fsp.rm(temporary, { recursive: true, force: true });
     await fsp.rm(previousBackup, { recursive: true, force: true });
     await fsp.cp(SCRIPT_DIR, temporary, { recursive: true });
+    // The setup UI's pages live beside scripts/, not inside it, so they need their
+    // own copy; ui.mjs looks for them next to itself once installed.
+    const uiSource = path.join(path.dirname(SCRIPT_DIR), "ui");
+    if (await pathExists(uiSource)) await fsp.cp(uiSource, path.join(temporary, "ui"), { recursive: true });
     if (await pathExists(previous)) {
       await fsp.rename(previous, previousBackup);
       backedUpPrevious = true;
@@ -478,7 +483,7 @@ async function withSetupLock(appHome, fn) {
     staleMs: 600_000,
     reclaimDeadImmediately: true,
   });
-  if (!lock) throw new Error("Agent Memory setup is already running");
+  if (!lock) throw new Error("Honcho Agent Bridge setup is already running");
   try {
     return await fn();
   } finally {
@@ -625,7 +630,7 @@ async function probeMcpServer(serverPath, timeoutMs = 2500) {
       jsonrpc: "2.0",
       id: 1,
       method: "initialize",
-      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "agent-memory-doctor", version: VERSION } },
+      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "honcho-agent-bridge-doctor", version: VERSION } },
     })}\n`);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
@@ -644,6 +649,7 @@ async function doctor() {
     "queue.mjs",
     "collector.mjs",
     "mcp-server.mjs",
+    "ui.mjs",
     "file-lock.mjs",
     "version.mjs",
   ];
@@ -677,8 +683,8 @@ async function doctor() {
           ok: plugin.installed && plugin.enabled,
           mode: "bundled-plugin",
           note: plugin.installed && plugin.enabled
-            ? "The hook is loaded by the installed Agent Memory Claude plugin."
-            : "Install or enable Agent Memory in Claude Code so its bundled hook can load.",
+            ? "The hook is loaded by the installed Honcho Agent Bridge Claude plugin."
+            : "Install or enable Honcho Agent Bridge in Claude Code so its bundled hook can load.",
         });
       } else {
         const target = hostConfigPaths()[provider];
@@ -724,6 +730,16 @@ async function main() {
       liveCompletion: options.liveCompletion === true,
     });
   }
+  if (command === "host") {
+    const subcommand = args.shift() || "status";
+    const options = parseOptions(args);
+    const hostOptions = { profile: optionString(options.profile, "personal") };
+    if (subcommand === "plan") return hostPlan(hostOptions);
+    if (subcommand === "prepare") return hostPrepare(hostOptions);
+    if (subcommand === "start") return hostStart(hostOptions);
+    if (subcommand === "status") return hostStatus(hostOptions);
+    if (subcommand === "stop") return hostStop(hostOptions);
+  }
   if (command === "setup") {
     const subcommand = args.shift() || "plan";
     const options = parseOptions(args);
@@ -741,6 +757,11 @@ async function main() {
       "server status [--profile portable|personal]",
       "server stop [--profile portable|personal]",
       "server verify [--profile personal] [--live-completion]",
+      "host plan [--profile personal]",
+      "host prepare [--profile personal]",
+      "host start [--profile personal]",
+      "host status [--profile personal]",
+      "host stop [--profile personal]",
       "setup plan [options]",
       "setup apply [options]",
       "doctor",

@@ -12,7 +12,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const QUEUE = path.join(ROOT, "scripts", "queue.mjs");
 
 test("queue never reclaims an old lock while its owner process is alive", async (t) => {
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-queue-lock-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-queue-lock-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const spool = path.join(directory, "spool");
   const lockPath = path.join(spool, "drain.lock");
@@ -37,7 +37,7 @@ test("queue never reclaims an old lock while its owner process is alive", async 
 });
 
 test("only one queue process can reclaim and enter through the same dead stale lock", async (t) => {
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-queue-reclaim-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-queue-reclaim-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const spool = path.join(directory, "spool");
   const pending = path.join(spool, "pending");
@@ -83,7 +83,7 @@ console.log(JSON.stringify({ ok: true }));
 });
 
 test("queue recovers an orphaned reclaim guard", async (t) => {
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-orphan-guard-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-orphan-guard-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const spool = path.join(directory, "spool");
   const lockPath = path.join(spool, "drain.lock");
@@ -108,7 +108,7 @@ test("queue recovers an orphaned reclaim guard", async (t) => {
 });
 
 test("queue never expires a reclaim guard whose owner is still alive", async (t) => {
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-live-guard-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-live-guard-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const spool = path.join(directory, "spool");
   const lockPath = path.join(spool, "drain.lock");

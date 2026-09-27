@@ -32,7 +32,7 @@ function startApi(existingMessages = []) {
 test("Claude collector maps peers, stores source IDs, and remains idempotent", async (t) => {
   const api = await startApi();
   t.after(() => api.server.close());
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-collector-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-collector-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const transcript = path.join(directory, "claude.jsonl");
   const state = path.join(directory, "state.json");
@@ -109,7 +109,7 @@ test("collector fails closed when initial state reconciliation cannot reach Honc
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-fail-closed-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-fail-closed-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const transcript = path.join(directory, "claude.jsonl");
   await fsp.writeFile(
@@ -164,7 +164,7 @@ test("collector reconciles a partially committed batch before retrying", async (
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
 
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-partial-retry-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-partial-retry-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const transcript = path.join(directory, "claude.jsonl");
   const state = path.join(directory, "state.json");
@@ -213,7 +213,7 @@ test("collector recovery compares stored source metadata instead of guessing fro
   ];
   const api = await startApi(storedMessages);
   t.after(() => api.server.close());
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-recovery-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-recovery-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const transcript = path.join(directory, "claude.jsonl");
   const state = path.join(directory, "state.json");
@@ -248,7 +248,7 @@ test("collector recovery compares stored source metadata instead of guessing fro
 test("Codex subagent prompts are stored as automation rather than direct user memory", async (t) => {
   const api = await startApi();
   t.after(() => api.server.close());
-  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-subagent-"));
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-subagent-"));
   t.after(() => fsp.rm(directory, { recursive: true, force: true }));
   const transcript = path.join(directory, "codex.jsonl");
   await fsp.writeFile(

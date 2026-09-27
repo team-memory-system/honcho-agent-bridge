@@ -1,5 +1,5 @@
 {
-  "name": "agent-memory",
+  "name": "honcho-agent-bridge",
   "version": "0.2.0",
   "description": "Installable self-hosted personal memory shared by Codex and Claude Code.",
   "author": {

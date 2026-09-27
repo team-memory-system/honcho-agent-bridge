@@ -8,21 +8,73 @@ import { securePrivateFile } from "./private-file-permissions.mjs";
 
 const execFileAsync = promisify(execFile);
 const FORMAT_VERSION = 1;
-const LABEL = "com.agent-memory.host";
+
+/**
+ * The Node services that turn a subscription account into an OpenAI-shaped API,
+ * plus the router that chooses between them. All three live in the llm-proxy
+ * repository, one directory each, and are started the same way: `node server.mjs`
+ * with HOST and PORT in the environment.
+ *
+ * `codex` keeps the legacy `codexProxy` profile key, because that is the only one
+ * that has ever been written to an installed host profile.
+ */
+export const PROXY_SERVICES = Object.freeze([
+  Object.freeze({
+    name: "codex",
+    profileKey: "codexProxy",
+    subdirectory: "codex-openai-proxy",
+    defaultPort: 11435,
+    secretEnv: "CODEX_PROXY_SHARED_SECRET",
+    // Only this one has dependencies, so only this one can be waiting on an install.
+    dependenciesSubpath: path.join("node_modules", "@mariozechner", "pi-ai"),
+  }),
+  Object.freeze({
+    name: "claude",
+    profileKey: "claudeProxy",
+    subdirectory: "claude-print-proxy",
+    defaultPort: 11446,
+    secretEnv: "CLAUDE_PROXY_SHARED_SECRET",
+    dependenciesSubpath: "",
+  }),
+  Object.freeze({
+    name: "router",
+    profileKey: "router",
+    subdirectory: "router",
+    defaultPort: 11400,
+    secretEnv: "",
+    dependenciesSubpath: "",
+  }),
+]);
+
+
+/**
+ * Each proxy's shared secret, read from the installed environment under its own
+ * name. `LLM_VLLM_API_KEY` stays the Codex fallback: that is the name Honcho uses
+ * for the key it presents to the proxy, and the only one older installs ever set.
+ */
+export function proxySecrets(environment = {}) {
+  const secrets = {};
+  for (const service of PROXY_SERVICES) {
+    if (!service.secretEnv) { secrets[service.name] = ""; continue; }
+    secrets[service.name] = String(environment[service.secretEnv] || "").trim()
+      || (service.name === "codex" ? String(environment.LLM_VLLM_API_KEY || "").trim() : "");
+  }
+  return secrets;
+}
 
 async function exists(target) {
   try { await fsp.access(target); return true; } catch { return false; }
 }
 
 function homeFor(env, fallback = os.homedir()) {
-  return path.resolve(env.AGENT_MEMORY_USER_HOME || env.HOME || env.USERPROFILE || fallback);
+  return path.resolve(env.HONCHO_AGENT_BRIDGE_USER_HOME || env.HOME || env.USERPROFILE || fallback);
 }
 
 function appHomeFor(platform, env, homeDir) {
-  if (env.AGENT_MEMORY_HOME) return path.resolve(env.AGENT_MEMORY_HOME);
-  if (platform === "win32") return path.resolve(env.LOCALAPPDATA || path.join(homeDir, "AppData", "Local"), "AgentMemory");
-  if (platform === "darwin") return path.join(homeDir, "Library", "Application Support", "AgentMemory");
-  return path.resolve(env.XDG_DATA_HOME || path.join(homeDir, ".local", "share"), "agent-memory");
+  if (env.HONCHO_AGENT_BRIDGE_HOME) return path.resolve(env.HONCHO_AGENT_BRIDGE_HOME);
+  if (platform === "win32") return path.resolve(env.LOCALAPPDATA || path.join(homeDir, "AppData", "Local"), "HonchoAgentBridge");
+  if (platform === "darwin") return path.join(homeDir, "Library", "Application Support", "HonchoAgentBridge");
+  return path.resolve(env.XDG_DATA_HOME || path.join(homeDir, ".local", "share"), "honcho-agent-bridge");
 }
 
 export function resolveHostPaths({
@@ -32,10 +84,10 @@ export function resolveHostPaths({
   homeDir = homeFor(env),
 } = {}) {
   const appHome = appHomeFor(platform, env, homeDir);
-  const serverDir = path.resolve(installedServerDir || env.AGENT_MEMORY_SERVER_DIR || path.join(appHome, "server"));
-  const runtimeDir = path.resolve(env.AGENT_MEMORY_HOST_RUNTIME_DIR || path.join(path.dirname(serverDir), "runtime", "host"));
+  const serverDir = path.resolve(installedServerDir || env.HONCHO_AGENT_BRIDGE_SERVER_DIR || path.join(appHome, "server"));
+  const runtimeDir = path.resolve(env.HONCHO_AGENT_BRIDGE_HOST_RUNTIME_DIR || path.join(path.dirname(serverDir), "runtime", "host"));
   const configFile = path.join(runtimeDir, "host-config.json");
-  const disabledFile = path.join(runtimeDir, "disabled");
+  // How a CLI that exits finds the supervisor it started. Not OS registration.
   const pidFile = path.join(runtimeDir, "supervisor.pid.json");
   const logDir = path.join(runtimeDir, "logs");
   return {
@@ -43,7 +95,6 @@ export function resolveHostPaths({
     serverDir,
     runtimeDir,
     configFile,
-    disabledFile,
     pidFile,
     logDir,
     supervisorFile: path.join(serverDir, "host", "supervisor.mjs"),
@@ -122,6 +173,70 @@ function keepAliveOption(value) {
 }
 
 /**
+ * Where a proxy's source lives. An installed profile has to say: guessing a path
+ * under the user's home was only ever right on the machine this was written on.
+ */
+function proxySourceDir({ service, serviceInput, profileConfig }) {
+  if (serviceInput.sourceDir) return path.resolve(serviceInput.sourceDir);
+  if (profileConfig.llmProxyRoot) {
+    return path.resolve(profileConfig.llmProxyRoot, service.subdirectory);
+  }
+  return "";
+}
+
+function deriveProxyServices({ environment, profileConfig, homeDir }) {
+  const derived = {};
+  for (const service of PROXY_SERVICES) {
+    const serviceInput = profileConfig[service.profileKey] || {};
+    const fallbackUrl = `http://127.0.0.1:${service.defaultPort}`;
+    const rawUrl = serviceInput.baseUrl
+      || (service.name === "codex"
+        ? firstEnvironment(environment, [
+          "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL",
+          "SUMMARY_MODEL_CONFIG__OVERRIDES__BASE_URL",
+          "LLM_VLLM_BASE_URL",
+        ])
+        : "");
+    const enabled = Boolean(serviceInput.enabled ?? false);
+    if (enabled && rawUrl && !isLocalEndpoint(rawUrl)) {
+      throw new Error(`Managed ${service.name} proxy must use a loopback endpoint`);
+    }
+    const baseUrl = localServiceUrl(rawUrl || fallbackUrl, fallbackUrl);
+    const sourceDir = proxySourceDir({ service, serviceInput, profileConfig });
+    if (enabled && !sourceDir) {
+      throw new Error(
+        `Host profile enables the ${service.name} proxy without a source directory: set ${service.profileKey}.sourceDir or llmProxyRoot`,
+      );
+    }
+    derived[service.name] = {
+      name: service.name,
+      enabled,
+      baseUrl,
+      port: numberOption(serviceInput.port || new URL(baseUrl).port || service.defaultPort, service.defaultPort, { max: 65_535 }),
+      secretEnv: service.secretEnv,
+      sourceDir,
+      entrypoint: sourceDir ? path.join(sourceDir, "server.mjs") : "",
+      packageFile: sourceDir ? path.join(sourceDir, "package.json") : "",
+      dependenciesPath: sourceDir && service.dependenciesSubpath
+        ? path.join(sourceDir, service.dependenciesSubpath)
+        : "",
+    };
+    if (service.name === "codex") {
+      derived.codex.defaultModel = validModel(serviceInput.defaultModel || environment.DERIVER_MODEL_CONFIG__MODEL, "gpt-5.6-sol");
+      derived.codex.authPath = path.resolve(serviceInput.authPath || environment.CODEX_AUTH_PATH || path.join(homeDir, ".codex", "auth.json"));
+    }
+    if (service.name === "claude") {
+      derived.claude.defaultModel = validModel(serviceInput.defaultModel, "claude-opus-5-5");
+      derived.claude.claudeBin = String(serviceInput.claudeBin || "claude");
+    }
+    if (service.name === "router") {
+      derived.router.configPath = serviceInput.configPath ? path.resolve(serviceInput.configPath) : "";
+    }
+  }
+  return derived;
+}
+
+/**
  * Pure topology derivation. Only model names, local endpoints, ports, and paths
  * survive this boundary; .env credentials are intentionally never copied.
  */
@@ -133,40 +248,24 @@ export function deriveHostTopology({
   homeDir = os.homedir(),
 } = {}) {
   assertNoSecretFields(profileConfig);
-  const proxyInput = profileConfig.codexProxy || {};
   const ollamaInput = profileConfig.ollama || {};
-  const rawProxyUrl = proxyInput.baseUrl || firstEnvironment(environment, [
-    "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL",
-    "SUMMARY_MODEL_CONFIG__OVERRIDES__BASE_URL",
-    "LLM_VLLM_BASE_URL",
-  ]);
   const rawOllamaUrl = ollamaInput.baseUrl || firstEnvironment(environment, [
     "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL",
     "LLM_OPENAI_COMPATIBLE_BASE_URL",
   ]);
-  const proxyEnabled = proxyInput.enabled ?? (Boolean(rawProxyUrl) && isLocalEndpoint(rawProxyUrl));
   const ollamaEnabled = ollamaInput.enabled ?? (Boolean(rawOllamaUrl) && isLocalEndpoint(rawOllamaUrl));
-  if (proxyEnabled && rawProxyUrl && !isLocalEndpoint(rawProxyUrl)) throw new Error("Managed Codex proxy must use a loopback endpoint");
   if (ollamaEnabled && rawOllamaUrl && !isLocalEndpoint(rawOllamaUrl)) throw new Error("Managed Ollama must use a loopback endpoint");
-  const proxyUrl = localServiceUrl(rawProxyUrl || "http://127.0.0.1:11435", "http://127.0.0.1:11435");
   const ollamaUrl = localServiceUrl(rawOllamaUrl || "http://127.0.0.1:11434", "http://127.0.0.1:11434");
-  const proxySourceDir = path.join(paths.serverDir, "honcho", "codex-openai-proxy");
+  const proxies = deriveProxyServices({ environment, profileConfig, homeDir });
   const dimensions = numberOption(ollamaInput.dimensions || environment.EMBEDDING_VECTOR_DIMENSIONS, 1536, { min: 1, max: 65_536 });
   const contextLength = numberOption(ollamaInput.contextLength || environment.EMBEDDING_MAX_INPUT_TOKENS, 8192, { min: 256, max: 1_000_000 });
   return {
     format: FORMAT_VERSION,
     platform,
-    proxy: {
-      enabled: Boolean(proxyEnabled),
-      baseUrl: proxyUrl,
-      port: numberOption(proxyInput.port || new URL(proxyUrl).port || 11435, 11435, { max: 65_535 }),
-      defaultModel: validModel(proxyInput.defaultModel || environment.DERIVER_MODEL_CONFIG__MODEL, "gpt-5.6-sol"),
-      authPath: path.resolve(proxyInput.authPath || environment.CODEX_AUTH_PATH || path.join(homeDir, ".codex", "auth.json")),
-      sourceDir: proxySourceDir,
-      entrypoint: path.join(proxySourceDir, "server.mjs"),
-      packageFile: path.join(proxySourceDir, "package.json"),
-      dependenciesPath: path.join(proxySourceDir, "node_modules", "@mariozechner", "pi-ai"),
-    },
+    proxies,
+    // Everything written before the proxies were generalized reads `proxy` and
+    // means the Codex one.
+    proxy: proxies.codex,
     ollama: {
       enabled: Boolean(ollamaEnabled),
       baseUrl: ollamaUrl,
@@ -181,20 +280,11 @@ export function deriveHostTopology({
     },
     state: {
       configFile: paths.configFile,
-      disabledFile: paths.disabledFile,
       pidFile: paths.pidFile,
       logDir: paths.logDir,
     },
     supervisorFile: paths.supervisorFile,
   };
-}
-
-function xml(value) {
-  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
-}
-
-function systemdArg(value) {
-  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
 }
 
 function cmdArg(value) {
@@ -210,73 +300,6 @@ export function windowsBatchInvocation(command, args, env = process.env) {
     command: shell,
     args: [`/d /s /v:off /c "${commandLine}"`],
     windowsVerbatimArguments: true,
-  };
-}
-
-function shellArg(value) {
-  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
-}
-
-export function startupAdapter({ kind, nodePath = process.execPath, topology, paths }) {
-  const args = [topology.supervisorFile, "--config", topology.state.configFile];
-  if (kind === "launchagent") {
-    return {
-      kind,
-      label: LABEL,
-      path: path.join(paths.homeDir, "Library", "LaunchAgents", `${LABEL}.plist`),
-      mode: 0o644,
-      content: `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key><string>${LABEL}</string>\n  <key>ProgramArguments</key>\n  <array><string>${xml(nodePath)}</string><string>${xml(args[0])}</string><string>--config</string><string>${xml(args[2])}</string></array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>10</integer>\n  <key>StandardOutPath</key><string>${xml(path.join(topology.state.logDir, "host.log"))}</string>\n  <key>StandardErrorPath</key><string>${xml(path.join(topology.state.logDir, "host.error.log"))}</string>\n</dict>\n</plist>\n`,
-    };
-  }
-  if (kind === "windows-task") {
-    const launcherPath = path.join(paths.runtimeDir, "start-host.cmd");
-    const taskArguments = `/d /s /v:off /c "${cmdArg(launcherPath)}"`;
-    return {
-      kind,
-      label: "AgentMemoryHost",
-      path: path.join(paths.runtimeDir, "AgentMemoryHost.task.xml"),
-      mode: 0o600,
-      encoding: "utf16le-bom",
-      launcherPath,
-      launcherMode: 0o600,
-      launcherContent: `@echo off\r\nif exist ${cmdArg(topology.state.disabledFile)} exit /b 0\r\n${cmdArg(nodePath)} ${cmdArg(args[0])} --config ${cmdArg(args[2])} >> ${cmdArg(path.join(topology.state.logDir, "host.log"))} 2>&1\r\n`,
-      content: [
-        '<?xml version="1.0" encoding="UTF-16"?>',
-        '<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
-        "  <RegistrationInfo><Description>Agent Memory host services</Description></RegistrationInfo>",
-        "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>",
-        '  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>',
-        "  <Settings>",
-        "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
-        "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
-        "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
-        "    <StartWhenAvailable>true</StartWhenAvailable>",
-        "    <RestartOnFailure><Interval>PT1M</Interval><Count>255</Count></RestartOnFailure>",
-        "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
-        "    <Enabled>true</Enabled>",
-        "  </Settings>",
-        `  <Actions Context="Author"><Exec><Command>cmd.exe</Command><Arguments>${xml(taskArguments)}</Arguments><WorkingDirectory>${xml(paths.runtimeDir)}</WorkingDirectory></Exec></Actions>`,
-        "</Task>",
-        "",
-      ].join("\r\n"),
-    };
-  }
-  if (kind === "systemd-user") {
-    const configHome = paths.env.XDG_CONFIG_HOME || path.join(paths.homeDir, ".config");
-    return {
-      kind,
-      label: "agent-memory-host.service",
-      path: path.join(configHome, "systemd", "user", "agent-memory-host.service"),
-      mode: 0o644,
-      content: `[Unit]\nDescription=Agent Memory host services\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=${systemdArg(nodePath)} ${systemdArg(args[0])} --config ${systemdArg(args[2])}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n`,
-    };
-  }
-  return {
-    kind: "direct-fallback",
-    label: "agent-memory-host",
-    path: path.join(paths.runtimeDir, "start-host.sh"),
-    mode: 0o700,
-    content: `#!/bin/sh\n[ -e ${shellArg(topology.state.disabledFile)} ] && exit 0\nwhile [ ! -e ${shellArg(topology.state.disabledFile)} ]; do\n  ${shellArg(nodePath)} ${shellArg(args[0])} --config ${shellArg(args[2])} >>${shellArg(path.join(topology.state.logDir, "host.log"))} 2>&1\n  status=$?\n  [ "$status" -eq 0 ] && exit 0\n  sleep 10\ndone\n`,
   };
 }
 
@@ -373,13 +396,6 @@ async function readInputs({ profile, profilePath, paths }) {
   return { environmentPath, environment, profilePath: candidate, profileConfig, profileExists: await exists(candidate) };
 }
 
-async function chooseAdapter(platform, runner, env) {
-  if (platform === "darwin") return "launchagent";
-  if (platform === "win32") return "windows-task";
-  const systemd = await runWith(runner, "systemctl", ["--user", "show-environment"], { env, timeout: 5_000 });
-  return systemd.ok ? "systemd-user" : "direct-fallback";
-}
-
 function publicTopology(topology) {
   return {
     proxy: {
@@ -389,6 +405,12 @@ function publicTopology(topology) {
       defaultModel: topology.proxy.defaultModel,
       authPath: topology.proxy.authPath,
     },
+    proxies: Object.fromEntries(
+      Object.entries(topology.proxies).map(([name, service]) => [
+        name,
+        { enabled: service.enabled, baseUrl: service.baseUrl, port: service.port, sourceDir: service.sourceDir },
+      ]),
+    ),
     ollama: {
       enabled: topology.ollama.enabled,
       baseUrl: topology.ollama.baseUrl,
@@ -428,8 +450,6 @@ export async function hostPlan({
     return { ok: false, ready: false, profile, paths: resolved, issues: [sanitizeError(error)], warnings, operations: [] };
   }
 
-  const adapterKind = await chooseAdapter(platform, run, env);
-  const adapter = startupAdapter({ kind: adapterKind, nodePath: process.execPath, topology, paths });
   const auth = topology.proxy.enabled ? await inspectAuth(topology.proxy.authPath) : { exists: false, valid: false };
   const npmName = platform === "win32" ? "npm.cmd" : "npm";
   const pnpmName = platform === "win32" ? "pnpm.cmd" : "pnpm";
@@ -466,6 +486,29 @@ export async function hostPlan({
     if (!inputs.environment.LLM_VLLM_API_KEY) issues.push("The installed server environment has no private Codex proxy shared secret");
   }
 
+  // The Claude proxy and the router have no dependencies to install, so their only
+  // precondition is that the source the profile points at is actually there.
+  const proxies = {};
+  for (const [name, service] of Object.entries(topology.proxies)) {
+    const source = name === "codex"
+      ? proxySource
+      : {
+        package: service.packageFile ? await exists(service.packageFile) : false,
+        entrypoint: service.entrypoint ? await exists(service.entrypoint) : false,
+        dependenciesReady: true,
+      };
+    proxies[name] = {
+      enabled: service.enabled,
+      port: service.port,
+      baseUrl: service.baseUrl,
+      sourceDir: service.sourceDir,
+      ...source,
+    };
+    if (name !== "codex" && service.enabled && (!source.package || !source.entrypoint)) {
+      issues.push(`The ${name} proxy source the host profile points at is incomplete: ${service.sourceDir}`);
+    }
+  }
+
   let ollama = { installed: false, running: false, version: "", models: [], baseModelPresent: false, aliasPresent: false, aliasMatches: false };
   if (topology.ollama.enabled) {
     const cli = ollamaExecutable
@@ -496,7 +539,6 @@ export async function hostPlan({
     }
     if (ollama.installed && !ollama.running) warnings.push("Ollama is installed but not running; prepare will try to start its local service");
   }
-  if (adapterKind === "direct-fallback") warnings.push("A systemd user session is unavailable; a managed direct-start fallback will be used");
   if (topology.proxy.enabled && !proxySource.dependenciesReady && dependencyMode === "npm-install-unlocked") {
     warnings.push("The proxy bundle has no supported lockfile; dependency installation will be non-reproducible");
   }
@@ -506,7 +548,7 @@ export async function hostPlan({
   if (topology.proxy.enabled && !proxySource.dependenciesReady) operations.push({ type: "install-proxy-dependencies", mode: dependencyMode, directory: topology.proxy.sourceDir });
   if (topology.ollama.enabled && !ollama.baseModelPresent) operations.push({ type: "ollama-pull", model: topology.ollama.baseModel });
   if (topology.ollama.enabled && (!ollama.aliasPresent || !ollama.aliasMatches)) operations.push({ type: "ollama-create", model: topology.ollama.model });
-  operations.push({ type: "write-host-config", target: paths.configFile }, { type: "write-startup-adapter", adapter: adapterKind, target: adapter.path });
+  operations.push({ type: "write-host-config", target: paths.configFile });
   const result = {
     ok: issues.length === 0,
     ready: issues.length === 0,
@@ -517,15 +559,19 @@ export async function hostPlan({
     topology: publicTopology(topology),
     auth,
     proxy: { ...proxySource, npmAvailable: npm.ok, pnpmAvailable: pnpm.ok, sharedSecretConfigured: Boolean(inputs.environment.LLM_VLLM_API_KEY) },
+    proxies,
     ollama,
     executables: { node: path.resolve(process.execPath), npm: npmExecutable || null, pnpm: pnpmExecutable || null, ollama: ollamaExecutable || null },
-    startup: { kind: adapterKind, path: adapter.path, label: adapter.label },
     issues,
     warnings,
     operations,
   };
   Object.defineProperty(result, "_internal", {
-    value: { topology, adapter, sharedSecret: inputs.environment.LLM_VLLM_API_KEY || "" },
+    value: {
+      topology,
+      sharedSecret: inputs.environment.LLM_VLLM_API_KEY || "",
+      secrets: proxySecrets(inputs.environment),
+    },
     enumerable: false,
   });
   return result;
@@ -537,11 +583,6 @@ async function writeAtomic(target, content, mode) {
   await fsp.writeFile(temporary, content, { mode });
   await fsp.rename(temporary, target);
   await fsp.chmod(target, mode).catch(() => {});
-}
-
-export function encodeStartupContent(content, encoding) {
-  if (encoding !== "utf16le-bom") return content;
-  return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(String(content), "utf16le")]);
 }
 
 async function writePrivateAtomic(target, content, mode, privateFileOptions) {
@@ -572,7 +613,7 @@ function spawnDetached(spawnImpl, command, args, options) {
   return child;
 }
 
-/** Install proxy dependencies, prepare the Qwen alias, and write host adapters. */
+/** Install proxy dependencies, prepare the Qwen alias, and write the host config. */
 export async function hostPrepare(options = {}) {
   const run = options.run || defaultRun;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
@@ -583,7 +624,7 @@ export async function hostPrepare(options = {}) {
     // readiness issues must remain non-mutating.
     return { ...plan, _internal: undefined };
   }
-  const { topology, adapter, sharedSecret } = plan._internal;
+  const { topology, sharedSecret, secrets } = plan._internal;
   const actions = [];
   await fsp.mkdir(topology.state.logDir, { recursive: true });
 
@@ -642,32 +683,30 @@ export async function hostPrepare(options = {}) {
     format: FORMAT_VERSION,
     generatedAt: new Date().toISOString(),
     profile: plan.profile,
+    proxies: Object.fromEntries(
+      Object.entries(topology.proxies).map(([name, service]) => [
+        name,
+        { ...service, sharedSecret: secrets[name] || "" },
+      ]),
+    ),
+    // Kept so a supervisor from an older bundle still finds the Codex proxy.
     proxy: { ...topology.proxy, sharedSecret },
     ollama: topology.ollama,
     state: topology.state,
     supervisorFile: topology.supervisorFile,
-    startup: {
-      kind: adapter.kind,
-      path: adapter.path,
-      label: adapter.label,
-      launcherPath: adapter.launcherPath || null,
-    },
   };
   await writePrivateAtomic(topology.state.configFile, `${JSON.stringify(runtimeConfig, null, 2)}\n`, 0o600, {
     platform: options.platform || process.platform,
     run,
     env: options.env || process.env,
   });
-  await writeAtomic(adapter.path, encodeStartupContent(adapter.content, adapter.encoding), adapter.mode);
-  if (adapter.launcherPath) await writeAtomic(adapter.launcherPath, adapter.launcherContent, adapter.launcherMode);
-  actions.push({ type: "write-host-config", changed: true }, { type: "write-startup-adapter", kind: adapter.kind, changed: true });
+  actions.push({ type: "write-host-config", changed: true });
   return {
     ok: true,
     ready: true,
     profile: plan.profile,
     paths: plan.paths,
     topology: publicTopology(topology),
-    startup: { kind: adapter.kind, path: adapter.path, label: adapter.label },
     configFile: topology.state.configFile,
     actions,
     warnings: plan.warnings,
@@ -682,58 +721,6 @@ async function readRuntimeConfig(paths) {
   } catch { return null; }
 }
 
-async function activateStartup(config, { run, spawnImpl, platform, env, taskStartupGraceMs }) {
-  const startup = config.startup;
-  if (startup.kind === "launchagent") {
-    const domain = `gui/${typeof process.getuid === "function" ? process.getuid() : env.UID}`;
-    await runWith(run, "launchctl", ["bootout", domain, startup.path], { env, timeout: 10_000 });
-    const loaded = await runWith(run, "launchctl", ["bootstrap", domain, startup.path], { env, timeout: 10_000 });
-    if (!loaded.ok) return { ok: false, error: "LaunchAgent could not be loaded" };
-    await runWith(run, "launchctl", ["kickstart", "-k", `${domain}/${startup.label}`], { env, timeout: 10_000 });
-    return { ok: true, mode: startup.kind };
-  }
-  if (startup.kind === "systemd-user") {
-    const reload = await runWith(run, "systemctl", ["--user", "daemon-reload"], { env, timeout: 10_000 });
-    const enabled = reload.ok && await runWith(run, "systemctl", ["--user", "enable", "--now", startup.label], { env, timeout: 20_000 });
-    if (!enabled?.ok) return { ok: false, error: "systemd user service could not be enabled" };
-    return { ok: true, mode: startup.kind };
-  }
-  if (startup.kind === "windows-task") {
-    const created = await runWith(run, "schtasks.exe", ["/Create", "/TN", startup.label, "/XML", startup.path, "/F"], { env, timeout: 20_000 });
-    if (!created.ok) return { ok: false, error: "Windows user task could not be registered" };
-    const launched = await runWith(run, "schtasks.exe", ["/Run", "/TN", startup.label], { env, timeout: 10_000 });
-    if (launched.ok) {
-      const deadline = Date.now() + taskStartupGraceMs;
-      do {
-        const pid = await pidState(config.state.pidFile);
-        if (pid.running) return { ok: true, mode: startup.kind, scheduledLaunchRequested: true };
-        if (Date.now() >= deadline) break;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      } while (true);
-    }
-    try {
-      const launcherPath = startup.launcherPath || path.join(path.dirname(startup.path), "start-host.cmd");
-      const invocation = windowsBatchInvocation(launcherPath, [], env);
-      spawnDetached(spawnImpl, invocation.command, invocation.args, {
-        env,
-        cwd: path.dirname(config.state.configFile),
-        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-      });
-      return {
-        ok: true,
-        mode: "windows-task-direct-fallback",
-        scheduledLaunchRequested: launched.ok,
-      };
-    } catch {
-      return { ok: false, error: "Windows user task and direct host supervisor launch both failed" };
-    }
-  }
-  try {
-    spawnDetached(spawnImpl, startup.path, [], { env, cwd: path.dirname(config.state.configFile) });
-    return { ok: true, mode: "direct-fallback" };
-  } catch { return { ok: false, error: `Direct host supervisor start failed on ${platform}` }; }
-}
-
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -742,29 +729,41 @@ function processAlive(pid) {
 async function pidState(pidFile) {
   try {
     const record = JSON.parse(await fsp.readFile(pidFile, "utf8"));
-    const heartbeatAgeMs = Date.now() - new Date(record.heartbeatAt || record.startedAt || 0).getTime();
-    return { record, running: processAlive(record.pid), heartbeatAgeMs };
-  } catch { return { record: null, running: false, heartbeatAgeMs: null }; }
+    return { record, running: processAlive(record.pid) };
+  } catch { return { record: null, running: false }; }
 }
 
-/** Prepare and start the personal host supervisor through the native user adapter. */
+/**
+ * Prepare and start the personal host supervisor.
+ *
+ * The supervisor is started directly, detached from whoever asked for it, and found
+ * again through its PID file. Nothing is registered with launchd, the Windows task
+ * scheduler or systemd: the app starts the proxies, and they outlive the terminal or
+ * the UI process that pressed the button. The cost is deliberate - nothing restarts
+ * them after a reboot until the app runs again.
+ */
 export async function hostStart(options = {}) {
   const prepared = options.skipPrepare
-    ? { ok: true, ready: true, startup: null }
+    ? { ok: true, ready: true }
     : await hostPrepare(options);
   if (!prepared.ready) return prepared;
   const paths = resolveHostPaths(options);
   const config = await readRuntimeConfig(paths);
   if (!config) return { ok: false, ready: false, issues: ["Host runtime config was not generated"] };
-  await fsp.rm(config.state.disabledFile, { force: true });
-  const activation = await activateStartup(config, {
-    run: options.run || defaultRun,
-    spawnImpl: options.spawnImpl || nodeSpawn,
-    platform: options.platform || process.platform,
-    env: options.env || process.env,
-    taskStartupGraceMs: options.taskStartupGraceMs ?? 3_000,
-  });
-  if (!activation.ok) return { ok: false, ready: false, issues: [activation.error], startup: prepared.startup };
+  const spawnImpl = options.spawnImpl || nodeSpawn;
+  const existing = await pidState(config.state.pidFile);
+  let started = false;
+  if (!existing.running) {
+    await fsp.mkdir(config.state.logDir, { recursive: true });
+    try {
+      spawnDetached(spawnImpl, options.nodePath || process.execPath,
+        [config.supervisorFile, "--config", config.state.configFile],
+        { cwd: paths.runtimeDir, env: options.env || process.env });
+      started = true;
+    } catch (error) {
+      return { ok: false, ready: false, issues: [sanitizeError(error, "the host supervisor could not be started")] };
+    }
+  }
   const deadline = Date.now() + (options.startTimeoutMs ?? 180_000);
   const pollMs = options.statusPollMs ?? 500;
   let status = await hostStatus(options);
@@ -772,58 +771,60 @@ export async function hostStart(options = {}) {
     await new Promise((resolve) => setTimeout(resolve, pollMs));
     status = await hostStatus(options);
   }
-  return { ...status, prepared: true, activation, timedOut: !status.ok };
+  return { ...status, prepared: true, started, alreadyRunning: existing.running, timedOut: !status.ok };
 }
 
 /** Report only booleans and non-secret topology; response bodies are discarded. */
 export async function hostStatus(options = {}) {
   const paths = resolveHostPaths(options);
   const config = await readRuntimeConfig(paths);
-  if (!config) return { ok: false, installed: false, running: false, disabled: await exists(paths.disabledFile), paths };
-  const disabled = await exists(config.state.disabledFile);
+  if (!config) return { ok: false, installed: false, running: false, paths };
   const pid = await pidState(config.state.pidFile);
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const proxyHealth = config.proxy.enabled ? await probeJson(fetchImpl, `${config.proxy.baseUrl}/health`) : { ok: true, status: null };
+  // Every managed proxy answers /health on its own port; a disabled one is not a
+  // failure, so it reports ok without being probed.
+  const proxyServices = config.proxies && typeof config.proxies === "object" ? config.proxies : { codex: config.proxy };
+  const proxyHealthByName = {};
+  for (const [name, service] of Object.entries(proxyServices)) {
+    const health = service?.enabled
+      ? (name === "codex" ? proxyHealth : await probeJson(fetchImpl, `${service.baseUrl}/health`))
+      : { ok: true, status: null };
+    proxyHealthByName[name] = {
+      enabled: Boolean(service?.enabled),
+      healthy: health.ok,
+      status: health.status,
+      port: service?.port ?? null,
+      model: service?.defaultModel ?? null,
+    };
+  }
+  const allProxiesHealthy = Object.values(proxyHealthByName).every((entry) => entry.healthy);
   const ollamaHealth = config.ollama.enabled ? await probeJson(fetchImpl, `${config.ollama.baseUrl}/api/version`) : { ok: true, status: null };
   let resident = !config.ollama.enabled;
   if (config.ollama.enabled && ollamaHealth.ok) {
     const ps = await probeJson(fetchImpl, `${config.ollama.baseUrl}/api/ps`);
     resident = Boolean(ps.ok && Array.isArray(ps.data?.models) && ps.data.models.some((item) => hasModel([item.name || item.model], config.ollama.model)));
   }
-  const adapterPresent = await exists(config.startup.path);
-  const running = pid.running && pid.heartbeatAgeMs < 60_000;
+  const running = pid.running;
   return {
-    ok: !disabled && running && proxyHealth.ok && ollamaHealth.ok && resident,
+    ok: running && allProxiesHealthy && ollamaHealth.ok && resident,
     installed: true,
     running,
-    disabled,
-    supervisor: { pid: pid.record?.pid || null, processAlive: pid.running, heartbeatAgeMs: pid.heartbeatAgeMs },
+    supervisor: { pid: pid.record?.pid || null, processAlive: pid.running },
     proxy: { enabled: config.proxy.enabled, healthy: proxyHealth.ok, status: proxyHealth.status, port: config.proxy.port, model: config.proxy.defaultModel },
+    proxies: proxyHealthByName,
     ollama: { enabled: config.ollama.enabled, healthy: ollamaHealth.ok, status: ollamaHealth.status, model: config.ollama.model, resident },
-    startup: { kind: config.startup.kind, installed: adapterPresent, path: config.startup.path },
     paths,
   };
 }
 
-async function deactivateStartup(config, run, env) {
-  if (config.startup.kind === "launchagent") {
-    const domain = `gui/${typeof process.getuid === "function" ? process.getuid() : env.UID}`;
-    await runWith(run, "launchctl", ["bootout", domain, config.startup.path], { env, timeout: 10_000 });
-  } else if (config.startup.kind === "systemd-user") {
-    await runWith(run, "systemctl", ["--user", "disable", "--now", config.startup.label], { env, timeout: 20_000 });
-  } else if (config.startup.kind === "windows-task") {
-    await runWith(run, "schtasks.exe", ["/End", "/TN", config.startup.label], { env, timeout: 10_000 });
-  }
-}
-
-/** Disable auto-restart, stop the supervisor, and unload only its embedding model. */
+/** Stop the supervisor and unload only its embedding model. */
 export async function hostStop(options = {}) {
   const paths = resolveHostPaths(options);
   const config = await readRuntimeConfig(paths);
-  const initialPid = config ? await pidState(config.state.pidFile) : { record: null, running: false, heartbeatAgeMs: null };
+  const initialPid = config ? await pidState(config.state.pidFile) : { record: null, running: false };
   await fsp.mkdir(paths.runtimeDir, { recursive: true });
-  await writeAtomic(paths.disabledFile, `${JSON.stringify({ disabledAt: new Date().toISOString() })}\n`, 0o600);
-  if (!config) return { ok: true, stopped: false, disabled: true, reason: "host runtime is not installed" };
+  if (!config) return { ok: true, stopped: false, reason: "host runtime is not installed" };
   const run = options.run || defaultRun;
   const env = options.env || process.env;
   const isProcessAlive = options.isProcessAlive || processAlive;
@@ -836,10 +837,9 @@ export async function hostStop(options = {}) {
   while (originalRunning && isProcessAlive(originalPid) && Date.now() < gracefulDeadline) {
     await wait(options.stopPollMs ?? 150);
   }
-  await deactivateStartup(config, run, env);
   let signaled = false;
   let signalFailed = false;
-  if (originalRunning && isProcessAlive(originalPid) && identityMatches && initialPid.heartbeatAgeMs < 60_000) {
+  if (originalRunning && isProcessAlive(originalPid) && identityMatches) {
     try {
       if ((options.platform || process.platform) === "win32") {
         const killed = await runWith(run, "taskkill", ["/PID", String(originalPid), "/T", "/F"], { env, timeout: 10_000 });
@@ -862,9 +862,7 @@ export async function hostStop(options = {}) {
   return {
     ok: stopped,
     stopped,
-    disabled: true,
     signaled,
-    preservedAdapter: true,
     preservedConfig: true,
     warning: originalRunning && !identityMatches
       ? "A stale PID was not signaled because its ownership could not be verified"

@@ -21,7 +21,7 @@ test("Codex, Claude, package, and marketplace metadata stay aligned", async () =
     json(".mcp.json"),
     json(".mcp.claude.json"),
   ]);
-  assert.equal(codex.name, "agent-memory");
+  assert.equal(codex.name, "honcho-agent-bridge");
   assert.equal(claude.name, codex.name);
   assert.equal(pkg.name, codex.name);
   assert.equal(marketplace.name, codex.name);
@@ -30,6 +30,6 @@ test("Codex, Claude, package, and marketplace metadata stay aligned", async () =
   assert.deepEqual([codex.version, claude.version, pkg.version], [VERSION, VERSION, VERSION]);
   assert.equal(codex.mcpServers, "./.mcp.json");
   assert.equal(claude.mcpServers, "./.mcp.claude.json");
-  assert.ok(codexMcp.mcpServers["agent-memory-honcho"]);
-  assert.ok(claudeMcp.mcpServers["agent-memory-honcho"]);
+  assert.ok(codexMcp.mcpServers["honcho-agent-bridge"]);
+  assert.ok(claudeMcp.mcpServers["honcho-agent-bridge"]);
 });

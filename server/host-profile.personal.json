@@ -1,7 +1,7 @@
 {
   "format": 1,
   "codexProxy": {
-    "enabled": true,
+    "enabled": false,
     "baseUrl": "http://127.0.0.1:11435",
     "defaultModel": "gpt-5.6-sol"
   },

@@ -10,14 +10,12 @@ import { promisify } from "node:util";
 
 import {
   deriveHostTopology,
-  encodeStartupContent,
   hostPlan,
   hostPrepare,
   hostStart,
   hostStop,
   parseDotEnv,
   resolveHostPaths,
-  startupAdapter,
   windowsBatchInvocation,
 } from "../scripts/host-manager.mjs";
 
@@ -46,7 +44,7 @@ async function waitUntil(predicate, timeoutMs = 6_000) {
 
 function topologyFixture(root, platform = "darwin") {
   const homeDir = path.join(root, "user");
-  const env = { HOME: homeDir, AGENT_MEMORY_HOME: path.join(root, "app") };
+  const env = { HOME: homeDir, HONCHO_AGENT_BRIDGE_HOME: path.join(root, "app") };
   const resolved = resolveHostPaths({ platform, env, homeDir });
   const paths = { ...resolved, homeDir, env };
   const topology = deriveHostTopology({
@@ -75,11 +73,12 @@ EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-honcho-8192
 EMBEDDING_MAX_INPUT_TOKENS=8192
 EMBEDDING_VECTOR_DIMENSIONS=1536
 `);
-  const root = path.join(os.tmpdir(), "agent-memory-topology");
+  const root = path.join(os.tmpdir(), "honcho-agent-bridge-topology");
   const homeDir = path.join(root, "home");
   const paths = { ...resolveHostPaths({ installedServerDir: path.join(root, "server"), platform: "darwin", env: {}, homeDir }), homeDir, env: {} };
   const topology = deriveHostTopology({ environment, paths, platform: "darwin", homeDir });
 
+  assert.equal(topology.proxy.enabled, false);
   assert.equal(topology.proxy.baseUrl, "http://127.0.0.1:11435");
   assert.equal(topology.proxy.defaultModel, "gpt-5.6-sol");
   assert.equal(topology.ollama.baseUrl, "http://127.0.0.1:11434");
@@ -90,12 +89,13 @@ EMBEDDING_VECTOR_DIMENSIONS=1536
 });
 
 test("non-secret host profile overrides topology and rejects secret-bearing fields", () => {
-  const root = path.join(os.tmpdir(), "agent-memory-profile");
+  const root = path.join(os.tmpdir(), "honcho-agent-bridge-profile");
   const homeDir = path.join(root, "home");
   const paths = { ...resolveHostPaths({ installedServerDir: path.join(root, "server"), platform: "linux", env: {}, homeDir }), homeDir, env: {} };
   const topology = deriveHostTopology({
     environment: {},
     profileConfig: {
+      llmProxyRoot: path.join(root, "llm-proxy"),
       codexProxy: { enabled: true, baseUrl: "http://127.0.0.1:22135", defaultModel: "gpt-5.6-sol" },
       ollama: { enabled: true, baseUrl: "http://127.0.0.1:22134", model: "qwen3-embedding-honcho-8192", contextLength: 8192 },
     },
@@ -105,6 +105,16 @@ test("non-secret host profile overrides topology and rejects secret-bearing fiel
   });
   assert.equal(topology.proxy.port, 22135);
   assert.equal(topology.ollama.baseUrl, "http://127.0.0.1:22134");
+  assert.equal(topology.proxy.sourceDir, path.join(root, "llm-proxy", "codex-openai-proxy"), "llmProxyRoot places every proxy");
+  assert.equal(topology.proxies.codex, topology.proxy, "the legacy name still points at the Codex proxy");
+  assert.deepEqual(Object.keys(topology.proxies).sort(), ["claude", "codex", "router"]);
+  assert.equal(topology.proxies.claude.enabled, false, "a proxy the profile does not mention stays off");
+  assert.equal(topology.proxies.router.port, 11400);
+  assert.throws(
+    () => deriveHostTopology({ environment: {}, profileConfig: { codexProxy: { enabled: true } }, paths, homeDir }),
+    /without a source directory/,
+    "an enabled proxy no longer guesses a path under the user's home",
+  );
   assert.throws(
     () => deriveHostTopology({ environment: {}, profileConfig: { codexProxy: { apiKey: "must-not-live-here" } }, paths, homeDir }),
     /must not contain secret field/,
@@ -117,38 +127,6 @@ test("non-secret host profile overrides topology and rejects secret-bearing fiel
     () => deriveHostTopology({ environment: {}, profileConfig: { ollama: { keepAlive: "forever" } }, paths, homeDir }),
     /keep-alive setting/,
   );
-});
-
-test("native startup adapters supervise restart without embedding secrets", () => {
-  const root = path.join(os.tmpdir(), "agent-memory-adapters");
-  const fixture = topologyFixture(root);
-  const launchd = startupAdapter({ kind: "launchagent", nodePath: "/absolute/node", topology: fixture.topology, paths: fixture.paths });
-  assert.match(launchd.content, /<key>KeepAlive<\/key><dict><key>SuccessfulExit<\/key><false\/><\/dict>/);
-  assert.match(launchd.content, /<string>\/absolute\/node<\/string>/);
-
-  const windows = startupAdapter({ kind: "windows-task", nodePath: "C:\\Program Files\\nodejs\\node.exe", topology: fixture.topology, paths: { ...fixture.paths, homeDir: "C:\\Users\\Test", runtimeDir: "C:\\Agent Memory\\기억 runtime\\host" } });
-  assert.match(windows.content, /<RestartOnFailure>/);
-  assert.match(windows.content, /encoding="UTF-16"/);
-  assert.match(windows.content, /<Interval>PT1M<\/Interval>/);
-  assert.match(windows.content, /<Count>255<\/Count>/);
-  assert.equal(windows.encoding, "utf16le-bom");
-  assert.equal(windows.content.includes(`/v:off /c &quot;&quot;${windows.launcherPath}&quot;&quot;`), true);
-  assert.match(windows.launcherContent, /2>&1/);
-  assert.doesNotMatch(windows.launcherContent, /start "Agent Memory Host"/);
-  const encodedWindowsTask = encodeStartupContent(windows.content, windows.encoding);
-  assert.equal(Buffer.isBuffer(encodedWindowsTask), true);
-  assert.deepEqual([...encodedWindowsTask.subarray(0, 2)], [0xff, 0xfe]);
-  assert.equal(encodedWindowsTask.subarray(2).toString("utf16le"), windows.content);
-
-  const systemd = startupAdapter({ kind: "systemd-user", nodePath: "/usr/bin/node", topology: fixture.topology, paths: fixture.paths });
-  assert.match(systemd.content, /Restart=on-failure/);
-  assert.match(systemd.content, /ExecStart="\/usr\/bin\/node"/);
-
-  const fallback = startupAdapter({ kind: "direct-fallback", nodePath: "/usr/bin/node", topology: fixture.topology, paths: fixture.paths });
-  assert.match(fallback.content, /^#!\/bin\/sh/);
-  assert.match(fallback.content, /while \[ ! -e/);
-  assert.match(fallback.content, /sleep 10/);
-  for (const adapter of [launchd, windows, systemd, fallback]) assert.equal(JSON.stringify(adapter).includes("private-secret"), false);
 });
 
 test("Windows batch commands use cmd.exe without Node shell interpolation", () => {
@@ -167,16 +145,20 @@ test("Windows batch commands use cmd.exe without Node shell interpolation", () =
 });
 
 test("personal prepare uses frozen proxy dependencies, creates Qwen alias once, and keeps secrets out of results", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-host-prepare-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-host-prepare-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const homeDir = path.join(root, "user");
   const appHome = path.join(root, "app");
   const serverDir = path.join(appHome, "server");
-  const proxyDir = path.join(serverDir, "honcho", "codex-openai-proxy");
+  const proxyDir = path.join(homeDir, "dev", "llm-proxy", "codex-openai-proxy");
   const hostDir = path.join(serverDir, "host");
   await fsp.mkdir(path.join(homeDir, ".codex"), { recursive: true });
   await fsp.mkdir(proxyDir, { recursive: true });
   await fsp.mkdir(hostDir, { recursive: true });
+  await fsp.writeFile(
+    path.join(serverDir, "host-profile.personal.json"),
+    JSON.stringify({ llmProxyRoot: path.join(homeDir, "dev", "llm-proxy"), codexProxy: { enabled: true } }),
+  );
   const sharedSecret = "private-shared-value-never-print";
   await fsp.writeFile(path.join(homeDir, ".codex", "auth.json"), JSON.stringify({ tokens: { access_token: "access-value", refresh_token: "refresh-value" } }));
   await fsp.writeFile(path.join(serverDir, ".env"), `
@@ -230,7 +212,7 @@ EMBEDDING_VECTOR_DIMENSIONS=1536
     profile: "personal",
     installedServerDir: serverDir,
     platform: "darwin",
-    env: { HOME: homeDir, AGENT_MEMORY_HOME: appHome },
+    env: { HOME: homeDir, HONCHO_AGENT_BRIDGE_HOME: appHome },
     homeDir,
     run,
     fetchImpl,
@@ -263,24 +245,24 @@ EMBEDDING_VECTOR_DIMENSIONS=1536
 
   const stopped = await hostStop(options);
   assert.equal(stopped.ok, true);
-  await fsp.access(path.join(appHome, "runtime", "host", "disabled"));
+  assert.equal(stopped.preservedConfig, true, "stopping keeps the host config so a restart needs no re-prepare");
+  await fsp.access(prepared.configFile);
+  // Nothing is registered with the OS any more, so there is no adapter file to find.
+  await assert.rejects(fsp.access(path.join(appHome, "runtime", "host", "start-host.sh")));
 });
 
 test("host start waits for proxy, Ollama, and model residency instead of accepting PID alone", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-host-start-wait-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-host-start-wait-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const homeDir = path.join(root, "user");
   const appHome = path.join(root, "app");
   const serverDir = path.join(appHome, "server");
-  const env = { HOME: homeDir, AGENT_MEMORY_HOME: appHome };
+  const env = { HOME: homeDir, HONCHO_AGENT_BRIDGE_HOME: appHome };
   const paths = resolveHostPaths({ installedServerDir: serverDir, platform: "linux", env, homeDir });
-  const adapterPath = path.join(paths.runtimeDir, "start-host.sh");
   await fsp.mkdir(paths.runtimeDir, { recursive: true });
-  await fsp.writeFile(adapterPath, "#!/bin/sh\n");
   await fsp.writeFile(paths.pidFile, JSON.stringify({
     pid: process.pid,
     startedAt: new Date().toISOString(),
-    heartbeatAt: new Date().toISOString(),
     configFile: paths.configFile,
     supervisorFile: paths.supervisorFile,
   }));
@@ -289,9 +271,8 @@ test("host start waits for proxy, Ollama, and model residency instead of accepti
     profile: "personal",
     proxy: { enabled: true, baseUrl: "http://127.0.0.1:11435", port: 11435, defaultModel: "gpt-5.6-sol", sharedSecret: "private" },
     ollama: { enabled: true, baseUrl: "http://127.0.0.1:11434", model: "qwen3-embedding-honcho-8192" },
-    state: { configFile: paths.configFile, disabledFile: paths.disabledFile, pidFile: paths.pidFile, logDir: paths.logDir },
+    state: { configFile: paths.configFile, pidFile: paths.pidFile, logDir: paths.logDir },
     supervisorFile: paths.supervisorFile,
-    startup: { kind: "direct-fallback", path: adapterPath, label: "agent-memory-host" },
   }));
   let psCalls = 0;
   const fetchImpl = async (url) => {
@@ -319,12 +300,12 @@ test("host start waits for proxy, Ollama, and model residency instead of accepti
 });
 
 async function windowsStopFixture(t) {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-host-stop-"));
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-host-stop-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const homeDir = path.join(root, "user");
   const appHome = path.join(root, "app");
   const serverDir = path.join(appHome, "server");
-  const env = { HOME: homeDir, AGENT_MEMORY_HOME: appHome };
+  const env = { HOME: homeDir, HONCHO_AGENT_BRIDGE_HOME: appHome };
   const paths = resolveHostPaths({ installedServerDir: serverDir, platform: "win32", env, homeDir });
   await fsp.mkdir(paths.runtimeDir, { recursive: true });
   await fsp.writeFile(paths.configFile, JSON.stringify({
@@ -332,14 +313,12 @@ async function windowsStopFixture(t) {
     profile: "personal",
     proxy: { enabled: false, baseUrl: "http://127.0.0.1:11435" },
     ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434", executable: "ollama", model: "unused" },
-    state: { configFile: paths.configFile, disabledFile: paths.disabledFile, pidFile: paths.pidFile, logDir: paths.logDir },
+    state: { configFile: paths.configFile, pidFile: paths.pidFile, logDir: paths.logDir },
     supervisorFile: paths.supervisorFile,
-    startup: { kind: "windows-task", path: path.join(paths.runtimeDir, "task.xml"), label: "AgentMemoryHost" },
   }));
   await fsp.writeFile(paths.pidFile, JSON.stringify({
     pid: 4242,
     startedAt: new Date().toISOString(),
-    heartbeatAt: new Date().toISOString(),
     configFile: paths.configFile,
     supervisorFile: paths.supervisorFile,
   }));
@@ -402,73 +381,22 @@ test("Windows host stop tracks the original process after its PID file disappear
   assert.ok(calls.some((item) => item.command === "taskkill" && item.args.includes("4242")));
 });
 
-test("Windows start keeps the logon task and directly launches when no interactive token is available", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-windows-task-fallback-"));
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  const homeDir = path.join(root, "user");
-  const appHome = path.join(root, "Agent Memory");
-  const serverDir = path.join(appHome, "server");
-  const env = {
-    HOME: homeDir,
-    AGENT_MEMORY_HOME: appHome,
-    ComSpec: "C:\\Windows\\System32\\cmd.exe",
-  };
-  const paths = resolveHostPaths({ installedServerDir: serverDir, platform: "win32", env, homeDir });
-  const taskPath = path.join(paths.runtimeDir, "AgentMemoryHost.task.xml");
-  const launcherPath = path.join(paths.runtimeDir, "start-host.cmd");
-  await fsp.mkdir(paths.runtimeDir, { recursive: true });
-  await fsp.writeFile(taskPath, "task");
-  await fsp.writeFile(launcherPath, "@echo off\r\n");
-  await fsp.writeFile(paths.configFile, JSON.stringify({
-    format: 1,
-    profile: "personal",
-    proxy: { enabled: false, baseUrl: "http://127.0.0.1:11435" },
-    ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434" },
-    state: { configFile: paths.configFile, disabledFile: paths.disabledFile, pidFile: paths.pidFile, logDir: paths.logDir },
-    supervisorFile: paths.supervisorFile,
-    startup: { kind: "windows-task", path: taskPath, launcherPath, label: "AgentMemoryHost" },
-  }));
-  const calls = [];
-  const spawns = [];
-  const result = await hostStart({
-    profile: "personal",
-    installedServerDir: serverDir,
-    platform: "win32",
-    env,
-    homeDir,
-    skipPrepare: true,
-    taskStartupGraceMs: 0,
-    startTimeoutMs: 0,
-    run: async (command, args) => {
-      calls.push({ command, args });
-      return { ok: true };
-    },
-    spawnImpl: (command, args, options) => {
-      spawns.push({ command, args, options });
-      return { unref() {} };
-    },
-  });
-  assert.equal(result.ok, false);
-  assert.equal(result.activation.mode, "windows-task-direct-fallback");
-  assert.equal(result.activation.scheduledLaunchRequested, true);
-  assert.equal(calls.filter((item) => item.command === "schtasks.exe").length, 2);
-  assert.equal(spawns.length, 1);
-  assert.equal(spawns[0].command, env.ComSpec);
-  assert.equal(spawns[0].args[0].includes(`"${launcherPath}"`), true);
-  assert.equal(spawns[0].options.detached, true);
-  assert.equal(spawns[0].options.windowsVerbatimArguments, true);
-});
-
-test("supervisor exits cleanly on a disabled marker without printing its private secret", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-supervisor-disabled-"));
+test("supervisor refuses to start twice and never prints its private secret", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-supervisor-disabled-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const state = path.join(root, "state");
   await fsp.mkdir(state, { recursive: true });
   const configFile = path.join(state, "host-config.json");
-  const disabledFile = path.join(state, "disabled");
   const secret = "private-supervisor-secret";
   const supervisorFile = fileURLToPath(new URL("../server/host/supervisor.mjs", import.meta.url));
-  await fsp.writeFile(disabledFile, "disabled\n");
+  // A live PID file is what stops a second supervisor: the app can press start twice,
+  // or a terminal and the app can both press it, and only one set of proxies runs.
+  await fsp.writeFile(path.join(state, "pid.json"), JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    configFile,
+    supervisorFile,
+  }));
   await fsp.writeFile(configFile, JSON.stringify({
     format: 1,
     profile: "personal",
@@ -483,17 +411,19 @@ test("supervisor exits cleanly on a disabled marker without printing its private
       sharedSecret: secret,
     },
     ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434" },
-    state: { configFile, disabledFile, pidFile: path.join(state, "pid.json"), logDir: path.join(state, "logs") },
+    state: { configFile, pidFile: path.join(state, "pid.json"), logDir: path.join(state, "logs") },
     supervisorFile,
   }));
   const { stdout, stderr } = await execFileAsync(process.execPath, [supervisorFile, "--config", configFile], { timeout: 5_000 });
-  assert.match(stdout, /supervisor-disabled/);
+  assert.match(stdout, /supervisor-already-running/);
   assert.equal(`${stdout}${stderr}`.includes(secret), false);
-  await assert.rejects(fsp.access(path.join(state, "pid.json")));
+  // The running supervisor's own PID file is left exactly as it was.
+  const record = JSON.parse(await fsp.readFile(path.join(state, "pid.json"), "utf8"));
+  assert.equal(record.pid, process.pid);
 });
 
-test("supervisor restarts a failed proxy and then honors the disabled marker", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-memory-supervisor-restart-"));
+test("supervisor restarts a failed proxy and stops cleanly on SIGTERM", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-supervisor-restart-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const port = await freePort();
   const state = path.join(root, "state");
@@ -512,7 +442,6 @@ if (count === 1) process.exit(17);
 http.createServer((_request, response) => response.end("ok")).listen(Number(process.env.PORT), "127.0.0.1");
 `);
   const configFile = path.join(state, "host-config.json");
-  const disabledFile = path.join(state, "disabled");
   const pidFile = path.join(state, "pid.json");
   const secret = "private-restart-secret";
   const supervisorFile = fileURLToPath(new URL("../server/host/supervisor.mjs", import.meta.url));
@@ -530,7 +459,7 @@ http.createServer((_request, response) => response.end("ok")).listen(Number(proc
       sharedSecret: secret,
     },
     ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434" },
-    state: { configFile, disabledFile, pidFile, logDir: path.join(state, "logs") },
+    state: { configFile, pidFile, logDir: path.join(state, "logs") },
     supervisorFile,
   }));
   const child = spawn(process.execPath, [supervisorFile, "--config", configFile], { stdio: ["ignore", "pipe", "pipe"] });
@@ -544,7 +473,8 @@ http.createServer((_request, response) => response.end("ok")).listen(Number(proc
     try { return (await fetch(`http://127.0.0.1:${port}`)).ok; } catch { return false; }
   }), true);
   assert.equal((await readFileNumber(countFile)), 2);
-  await fsp.writeFile(disabledFile, "disabled\n");
+  // `hostStop` signals the process; there is no registration to disable first.
+  child.kill("SIGTERM");
   const exitCode = await new Promise((resolve) => {
     const timer = setTimeout(() => resolve("timeout"), 5_000);
     timer.unref();
@@ -558,3 +488,112 @@ http.createServer((_request, response) => response.end("ok")).listen(Number(proc
 async function readFileNumber(target) {
   return Number(await fsp.readFile(target, "utf8"));
 }
+
+
+test("host start launches the supervisor itself and registers nothing with the OS", async (t) => {
+  // The whole point of the change: no launchd, no schtasks, no systemd. The process
+  // is started detached so it outlives the terminal or the UI process that asked.
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-host-spawn-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const homeDir = path.join(root, "user");
+  const appHome = path.join(root, "app");
+  const serverDir = path.join(appHome, "server");
+  const env = { HOME: homeDir, HONCHO_AGENT_BRIDGE_HOME: appHome };
+  const paths = resolveHostPaths({ installedServerDir: serverDir, platform: "darwin", env, homeDir });
+  await fsp.mkdir(paths.runtimeDir, { recursive: true });
+  await fsp.writeFile(paths.configFile, JSON.stringify({
+    format: 1,
+    profile: "personal",
+    proxies: { codex: { enabled: false }, claude: { enabled: false }, router: { enabled: false } },
+    proxy: { enabled: false, baseUrl: "http://127.0.0.1:11435" },
+    ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434", model: "unused" },
+    state: { configFile: paths.configFile, pidFile: paths.pidFile, logDir: paths.logDir },
+    supervisorFile: paths.supervisorFile,
+  }));
+
+  const spawned = [];
+  const ran = [];
+  const options = {
+    profile: "personal",
+    installedServerDir: serverDir,
+    platform: "darwin",
+    env,
+    homeDir,
+    skipPrepare: true,
+    startTimeoutMs: 1_000,
+    statusPollMs: 10,
+    nodePath: "/absolute/node",
+    fetchImpl: async () => response({ status: "ok" }),
+    run: async (command, args) => { ran.push({ command, args }); return { ok: true, stdout: "", stderr: "" }; },
+    spawnImpl: (command, args, spawnOptions) => {
+      spawned.push({ command, args, spawnOptions });
+      return { unref() {} };
+    },
+  };
+
+  const started = await hostStart(options);
+  assert.equal(started.started, true);
+  assert.equal(started.alreadyRunning, false);
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].command, "/absolute/node");
+  assert.deepEqual(spawned[0].args, [paths.supervisorFile, "--config", paths.configFile]);
+  assert.equal(spawned[0].spawnOptions.detached, true, "it must outlive its parent");
+  assert.equal(spawned[0].spawnOptions.stdio, "ignore");
+  assert.deepEqual(ran, [], "no launchctl, schtasks or systemctl call");
+  assert.equal("startup" in started, false, "there is no startup adapter to report");
+
+  // With a live PID file it must not start a second set of proxies.
+  await fsp.writeFile(paths.pidFile, JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    configFile: paths.configFile,
+    supervisorFile: paths.supervisorFile,
+  }));
+  const again = await hostStart(options);
+  assert.equal(again.alreadyRunning, true);
+  assert.equal(again.started, false);
+  assert.equal(spawned.length, 1, "the running supervisor is reused");
+});
+
+test("host status reports liveness from the process, not from a heartbeat file", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-host-liveness-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const homeDir = path.join(root, "user");
+  const appHome = path.join(root, "app");
+  const serverDir = path.join(appHome, "server");
+  const env = { HOME: homeDir, HONCHO_AGENT_BRIDGE_HOME: appHome };
+  const paths = resolveHostPaths({ installedServerDir: serverDir, platform: "darwin", env, homeDir });
+  await fsp.mkdir(paths.runtimeDir, { recursive: true });
+  await fsp.writeFile(paths.configFile, JSON.stringify({
+    format: 1,
+    profile: "personal",
+    proxies: { codex: { enabled: false }, claude: { enabled: false }, router: { enabled: false } },
+    proxy: { enabled: false, baseUrl: "http://127.0.0.1:11435" },
+    ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434", model: "unused" },
+    state: { configFile: paths.configFile, pidFile: paths.pidFile, logDir: paths.logDir },
+    supervisorFile: paths.supervisorFile,
+  }));
+  // An old record with no heartbeat field at all: liveness is the PID being alive.
+  await fsp.writeFile(paths.pidFile, JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date(0).toISOString(),
+    configFile: paths.configFile,
+    supervisorFile: paths.supervisorFile,
+  }));
+
+  const { hostStatus } = await import("../scripts/host-manager.mjs");
+  const status = await hostStatus({
+    profile: "personal",
+    installedServerDir: serverDir,
+    platform: "darwin",
+    env,
+    homeDir,
+    fetchImpl: async () => response({ status: "ok" }),
+  });
+  assert.equal(status.running, true, "a very old startedAt must not read as dead");
+  assert.equal(status.ok, true);
+  assert.equal("disabled" in status, false, "there is no disabled marker any more");
+  assert.equal("startup" in status, false);
+  assert.equal(status.supervisor.pid, process.pid);
+  assert.equal("heartbeatAgeMs" in status.supervisor, false);
+});
