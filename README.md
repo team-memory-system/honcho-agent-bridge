@@ -74,9 +74,11 @@ in `tests/ui.test.mjs`, and the absence of any OS-registration call in
 
 ### Licence
 
-No open-source licence is granted. `"license": "UNLICENSED"` in the plugin manifest
-is deliberate: the source is readable so teammates can install and audit it, not so
-it can be reused. `llm-proxy` and `honcho-selfhost` are AGPL-3.0 and separate.
+MIT. This repository contains no Honcho source: `scripts/build-distribution.mjs`
+copies the server into `server/honcho/` inside a release bundle at build time, and
+copies `HONCHO-LICENSE-AGPL-3.0.txt` next to it. A built bundle is therefore a
+combined work carrying AGPL-3.0 code; this repository on its own is not.
+`honcho-selfhost` and `llm-proxy` are AGPL-3.0 and separate.
 
 ---
 

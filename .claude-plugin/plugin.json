@@ -8,6 +8,6 @@
   "skills": "./skills/",
   "commands": ["./commands/memory-setup.md", "./commands/memory-doctor.md"],
   "mcpServers": "./.mcp.claude.json",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "keywords": ["memory", "honcho", "codex", "claude-code"]
 }
