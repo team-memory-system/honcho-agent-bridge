@@ -31,7 +31,7 @@ p { margin: 0 0 12px; }
   background: var(--card);
 }
 label { display: block; margin-bottom: 10px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-input[type="text"], input:not([type]), input[type="file"] {
+input[type="text"], input[type="password"], input[type="url"], input:not([type]), input[type="file"] {
   display: block; width: 100%; margin-top: 4px; padding: 8px 10px;
   border: 1px solid var(--line); border-radius: 8px;
   background: #0f1310; color: var(--text); font: inherit; text-transform: none; letter-spacing: normal;

@@ -1,13 +1,29 @@
 ---
 name: setup-memory
-description: Install, update, or diagnose the bundled self-hosted personal-memory runtime for Codex and Claude Code. Use when the user asks to set up memory, connect coding agents to Honcho, choose which detected agents receive hooks, inspect an installation plan, repair hooks, or run a memory health check.
+description: Connect to someone else's shared memory, or install, update, or diagnose the bundled self-hosted personal-memory runtime for Codex and Claude Code. Use when the user asks to set up memory, connect to a teammate's or colleague's memory, connect coding agents to Honcho, choose which detected agents receive hooks, inspect an installation plan, repair hooks, or run a memory health check.
 ---
 
 # Setup Memory
 
 Use the deterministic CLI bundled at `<plugin-root>/scripts/cli.mjs`. Resolve `<plugin-root>` as the directory two levels above this `SKILL.md`. Never reconstruct its mutations manually when the CLI supports them.
 
-## Workflow
+## First: which path
+
+Ask one question before anything else: does the user only want to ask someone else's memory, or do they want their own memory as well? Prefer the host's structured question tool. Most teammates only ask. Skip the question when the request already says which.
+
+## Asking someone else's memory
+
+The memory's owner gives the user four values: the shared bridge address, a bridge token, and a Cloudflare service token ID and secret. The user enters them in the setup screen, not in chat.
+
+1. Run `node <plugin-root>/scripts/cli.mjs ui open`. It starts the local setup screen if it is not already running, opens it in the browser, and returns its `url`. Give the user that address as text as well, in case no browser window appeared.
+2. Tell the user to fill in section 2, "다른 사람의 기억에 연결", and press 연결. The screen saves the values only after it has reached the bridge with them, and shows the tools the bridge offers (normally just `chat`).
+3. Never ask the user to paste any of the four values into chat, and never pass them on a command line. The terminal equivalent is `bridge connect --url <address>` with the secrets in `HONCHO_MCP_BEARER_TOKEN`, `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`, set by the user in their own shell.
+4. When the user says it is done, run `node <plugin-root>/scripts/cli.mjs bridge test` and report `connected`, `url` and `tools`. On failure, report the `error` without guessing at values.
+5. Tell the user to restart the agent host so its tool list reloads: Claude Code may use `/reload-plugins`; Codex should start a new session.
+
+This path installs no hooks and needs no local Honcho server. `bridge disconnect` removes the four values.
+
+## Own memory workflow
 
 1. Run `node <plugin-root>/scripts/cli.mjs detect` and inspect the JSON.
    - If a configured Honcho server is already healthy, offer to connect to it and do not replace it.
@@ -48,7 +64,7 @@ node <plugin-root>/scripts/cli.mjs setup plan \
 - Preserve unrelated hooks and settings. The CLI removes only entries bearing its managed markers and creates timestamped backups before rewriting existing files.
 - Never display API tokens, bearer tokens, or secret environment values.
 - Never put the personal proxy secret on a command line. The opt-in live verification must read it from the installed private `.env` inside the process, discard the completion response body, and report only success/model.
-- Do not add company-memory sharing, automatic folder policies, or cross-device synchronization in this version.
+- Connecting to someone else's shared bridge is the only sharing this version supports. Do not add automatic folder policies or cross-device synchronization.
 - Do not claim Honcho was installed when `server start`, `server status`, or `doctor` reports it unreachable. For `personal`, success also requires a healthy Codex proxy, healthy Ollama, and the Qwen alias resident.
 - Use the same profile for the complete lifecycle. `server status --profile personal` covers Docker and host services; `server stop --profile personal` stops both while preserving configuration and Docker volumes.
 - `server stop` preserves Docker volumes. Never run `docker compose down -v` or otherwise delete memory data.

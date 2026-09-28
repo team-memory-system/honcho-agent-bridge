@@ -10,6 +10,7 @@ import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createUiServer, rejectUnsafeRequest } from "../scripts/ui.mjs";
+import { BRIDGE_TOKEN, startBridge } from "./fake-bridge.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let server;
@@ -346,4 +347,59 @@ test("the proxy buttons drive the host lifecycle, not the Docker stack", async (
     assert.match(cli, new RegExp(`subcommand === "${subcommand}"`), `host ${subcommand} is dispatched`);
   }
   assert.match(cli, /command === "host"/);
+});
+
+test("the connect form reaches the bridge, and saves only once the bridge has answered", async (t) => {
+  const bridge = await startBridge();
+  t.after(() => bridge.server.close());
+  const appHome = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-ui-connect-"));
+  t.after(() => fsp.rm(appHome, { recursive: true, force: true }));
+  const previous = {};
+  for (const name of ["HONCHO_AGENT_BRIDGE_HOME", "HONCHO_MCP_BEARER_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"]) {
+    previous[name] = process.env[name];
+  }
+  process.env.HONCHO_AGENT_BRIDGE_HOME = appHome;
+  // A stale value in the environment that started the UI must not stand in for a
+  // field the form left blank.
+  process.env.CF_ACCESS_CLIENT_ID = "inherited.access";
+  process.env.CF_ACCESS_CLIENT_SECRET = "inherited-secret";
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  const wrong = await send("/api/bridge/connect", { method: "POST", body: { url: bridge.url, token: "wrong" } });
+  assert.equal(wrong.body.ok, false);
+  await assert.rejects(fsp.access(path.join(appHome, "config.json")), "a refused token is not saved");
+
+  const right = await send("/api/bridge/connect", { method: "POST", body: { url: bridge.url, token: BRIDGE_TOKEN } });
+  assert.equal(right.body.ok, true, JSON.stringify(right.body));
+  assert.deepEqual(right.body.tools, ["chat"]);
+  assert.equal(right.text.includes(BRIDGE_TOKEN), false, "the token never comes back to the page");
+
+  const saved = JSON.parse(await fsp.readFile(path.join(appHome, "config.json"), "utf8"));
+  assert.equal(saved.honcho.mcpBridgeToken, BRIDGE_TOKEN);
+  assert.equal(saved.honcho.accessClientId, undefined, "the blank field stayed blank");
+
+  const status = await send("/api/bridge/status");
+  assert.equal(status.body.connected, true);
+  const disconnected = await send("/api/bridge/disconnect", { method: "POST", body: {} });
+  assert.equal(disconnected.body.connected, false);
+});
+
+test("the connect form's fields are the ones the server reads, and none rides the command line", async () => {
+  const markup = await fsp.readFile(path.join(ROOT, "ui", "index.html"), "utf8");
+  const form = markup.slice(markup.indexOf('<form id="bridge-form"'));
+  const fields = [...form.slice(0, form.indexOf("</form>")).matchAll(/<input[^>]*name="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(fields, ["url", "token", "accessClientId", "accessClientSecret"]);
+
+  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  const secrets = server.match(/const BRIDGE_SECRET_FIELDS = Object\.freeze\(\{([\s\S]*?)\}\)/)[1]
+    .match(/(\w+):/g)
+    .map((key) => key.slice(0, -1));
+  assert.deepEqual(secrets, ["token", "accessClientId", "accessClientSecret"]);
+  assert.match(server, /runCli\(\["bridge", "connect", "--url", url\], \{ timeout: 90_000, env \}\)/,
+    "only the address is an argument; the secrets go through the environment");
 });

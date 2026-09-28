@@ -23,6 +23,23 @@ const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
 const CURRENT_HOOK_MARKER = "--managed-by honcho-agent-bridge";
 const LEGACY_HOOK_MARKERS = ["codex-honcho-sync", "honcho-turn-gate"];
 
+// The config fields that point this machine's MCP server at someone else's shared
+// bridge. `setup` owns the rest of config.json and must carry these through.
+const RELAY_FIELDS = ["mcpBridgeUrl", "mcpBridgeToken", "accessClientId", "accessClientSecret"];
+
+// Where `bridge connect` reads its secrets. A command line is visible to every
+// process on the machine, so they never travel there. These are the same names
+// mcp-server.mjs falls back to.
+const BRIDGE_SECRET_ENV = Object.freeze({
+  mcpBridgeToken: "HONCHO_MCP_BEARER_TOKEN",
+  accessClientId: "CF_ACCESS_CLIENT_ID",
+  accessClientSecret: "CF_ACCESS_CLIENT_SECRET",
+});
+
+// A shared bridge sits behind Cloudflare, so its first answer can take far longer
+// than a local MCP server's.
+const BRIDGE_PROBE_TIMEOUT_MS = 30_000;
+
 function parseOptions(items) {
   const options = {};
   for (let index = 0; index < items.length; index += 1) {
@@ -151,8 +168,29 @@ async function inspectConfiguration() {
       config: null,
     };
   }
-  const valid = Boolean(document.user?.peerId && document.honcho?.baseUrl && document.honcho?.workspaceId && document.agents);
+  // Someone who only asks another person's memory has no collection settings at
+  // all; the bridge address is the whole of their configuration.
+  const valid = collectsConversations(document) || relaysToBridge(document);
   return { ok: valid, state: valid ? "valid" : "invalid-schema", path: configPath, config: valid ? document : null };
+}
+
+function collectsConversations(config) {
+  return Boolean(config?.user?.peerId && config?.honcho?.baseUrl && config?.honcho?.workspaceId && config?.agents);
+}
+
+function relaysToBridge(config) {
+  return Boolean(config?.honcho?.mcpBridgeUrl);
+}
+
+/** Only relays: no hooks, no local Honcho, no installed runtime to check. */
+function relayOnly(config) {
+  return relaysToBridge(config) && !Object.values(config?.agents || {}).some(Boolean);
+}
+
+function relayFields(config) {
+  return Object.fromEntries(
+    RELAY_FIELDS.filter((key) => config?.honcho?.[key]).map((key) => [key, config.honcho[key]]),
+  );
 }
 
 async function claudePluginStatus() {
@@ -243,6 +281,9 @@ async function setupPlan(options = {}) {
       baseUrl: optionString(options.honchoUrl, existing?.honcho?.baseUrl || "http://127.0.0.1:8001"),
       workspaceId: optionString(options.workspace, existing?.honcho?.workspaceId || "memory"),
       ...(existing?.honcho?.apiToken ? { apiToken: existing.honcho.apiToken } : {}),
+      // Written by `bridge connect`, not by this plan. Rebuilding the config without
+      // them would silently disconnect a shared bridge on every setup run.
+      ...relayFields(existing),
     },
     agents,
     sources: {
@@ -574,10 +615,10 @@ async function installedRuntimeVersion(runtimeDir) {
   }
 }
 
-async function probeMcpServer(serverPath, timeoutMs = 2500) {
+async function probeMcpServer(serverPath, timeoutMs = 2500, env = process.env) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [serverPath, "--provider", "doctor"], {
-      env: process.env,
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
     let settled = false;
@@ -613,10 +654,12 @@ async function probeMcpServer(serverPath, timeoutMs = 2500) {
         if (message.id === 2) {
           if (message.error) finish({ ok: false, error: message.error.message });
           else {
+            const tools = Array.isArray(message.result?.tools) ? message.result.tools : null;
             finish({
-              ok: Boolean(initialized && Array.isArray(message.result?.tools)),
+              ok: Boolean(initialized && tools),
               protocolVersion: initialized?.protocolVersion || "",
-              enabledToolCount: Array.isArray(message.result?.tools) ? message.result.tools.length : null,
+              enabledToolCount: tools ? tools.length : null,
+              toolNames: tools ? tools.map((entry) => entry?.name).filter(Boolean) : [],
             });
           }
         }
@@ -643,6 +686,13 @@ async function doctor() {
   const paths = installPaths(config);
   const checks = [];
   checks.push({ name: "configuration", ...configuration, config: undefined });
+  if (relayOnly(config)) {
+    // Nothing is collected here: the plugin's own MCP server relays to the bridge,
+    // so there is no runtime to install and no local Honcho to reach.
+    const probe = await probeBridge();
+    checks.push({ name: "shared-bridge", ...probe, url: publicUrl(config.honcho.mcpBridgeUrl) });
+    return { ok: checks.every((check) => check.ok), version: VERSION, checks };
+  }
   const requiredRuntimeFiles = [
     "main.mjs",
     "cli.mjs",
@@ -672,7 +722,12 @@ async function doctor() {
     checks.push({ name: "honcho-health", ...health, url: publicUrl(config.honcho.baseUrl) });
     checks.push({ name: "honcho-workspaces", ...(await probeWorkspaceAccess(config)), url: publicUrl(config.honcho.baseUrl) });
     const mcpPath = path.join(paths.runtimeDir, "mcp-server.mjs");
-    checks.push({ name: "mcp", ...(await probeMcpServer(mcpPath)), path: mcpPath });
+    if (relaysToBridge(config)) {
+      const probe = await probeMcpServer(mcpPath, BRIDGE_PROBE_TIMEOUT_MS, bridgeProbeEnvironment());
+      checks.push({ name: "shared-bridge", ...probe, path: mcpPath, url: publicUrl(config.honcho.mcpBridgeUrl) });
+    } else {
+      checks.push({ name: "mcp", ...(await probeMcpServer(mcpPath)), path: mcpPath });
+    }
     for (const [provider, enabled] of Object.entries(config.agents || {})) {
       if (!enabled) continue;
       const plugin = provider === "claude" ? await claudePluginStatus() : await codexPluginStatus();
@@ -694,6 +749,209 @@ async function doctor() {
     }
   }
   return { ok: checks.every((check) => check.ok), version: VERSION, checks };
+}
+
+// ------------------------------------------------------------- shared bridge
+//
+// Asking someone else's memory needs four values in config.json and nothing else:
+// no hooks, no local Honcho. `bridge connect` writes them, checks that the plugin's
+// own MCP server really reaches the bridge with them, and puts the file back if it
+// does not.
+
+function isLoopbackHostname(hostname) {
+  const value = String(hostname).toLowerCase().replace(/^\[|\]$/g, "");
+  return value === "localhost" || value === "::1" || /^127(\.\d{1,3}){3}$/.test(value);
+}
+
+function bridgeUrlIssues(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return ["the bridge address is not a valid URL"];
+  }
+  const issues = [];
+  if (!["http:", "https:"].includes(url.protocol)) issues.push("the bridge address must use https");
+  else if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    issues.push("the bridge address must use https unless it is on this machine, or its token travels in the clear");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    issues.push("the bridge address must not contain credentials, query parameters, or a fragment");
+  }
+  return issues;
+}
+
+/** What a caller may see about the connection: never a secret, only whether one is set. */
+function bridgeState(config) {
+  const honcho = config?.honcho || {};
+  return {
+    connected: Boolean(honcho.mcpBridgeUrl),
+    url: honcho.mcpBridgeUrl ? publicUrl(honcho.mcpBridgeUrl) : null,
+    hasBridgeCredential: Boolean(honcho.mcpBridgeToken),
+    hasAccessCredential: Boolean(honcho.accessClientId && honcho.accessClientSecret),
+  };
+}
+
+/** The probe must prove the saved file works, not that this process's environment does. */
+function bridgeProbeEnvironment() {
+  const env = { ...process.env };
+  for (const name of Object.values(BRIDGE_SECRET_ENV)) delete env[name];
+  return env;
+}
+
+function probeBridge() {
+  return probeMcpServer(path.join(SCRIPT_DIR, "mcp-server.mjs"), BRIDGE_PROBE_TIMEOUT_MS, bridgeProbeEnvironment());
+}
+
+async function bridgeStatus() {
+  const configuration = await inspectConfiguration();
+  return { ok: true, ...bridgeState(configuration.config) };
+}
+
+async function bridgeConnect(options = {}) {
+  const issues = [];
+  const onCommandLine = Object.keys(options).filter((key) => /token|secret|clientid/i.test(key));
+  if (onCommandLine.length) {
+    issues.push(`pass ${onCommandLine.join(", ")} through ${Object.values(BRIDGE_SECRET_ENV).join(", ")}, not the command line`);
+  }
+  const url = optionString(options.url, "");
+  if (url) issues.push(...bridgeUrlIssues(url));
+  else issues.push("--url is required");
+  const secrets = Object.fromEntries(
+    Object.entries(BRIDGE_SECRET_ENV).map(([field, name]) => [field, String(process.env[name] || "").trim()]),
+  );
+  if (!secrets.mcpBridgeToken) issues.push(`the bridge token is required in ${BRIDGE_SECRET_ENV.mcpBridgeToken}`);
+  if (Boolean(secrets.accessClientId) !== Boolean(secrets.accessClientSecret)) {
+    issues.push("the Cloudflare service token needs both its ID and its secret");
+  }
+  const configuration = await inspectConfiguration();
+  if (configuration.state !== "missing" && configuration.state !== "valid") {
+    issues.push(`refusing to rewrite ${configuration.path}: it is ${configuration.state}`);
+  }
+  if (issues.length) return { ok: false, saved: false, issues, ...bridgeState(configuration.config) };
+
+  const paths = installPaths(configuration.config);
+  return withSetupLock(paths.appHome, async () => {
+    const snapshot = await fileSnapshot(paths.configPath);
+    const base = configuration.config || { version: CONFIG_VERSION, agents: { codex: false, claude: false } };
+    const honcho = { ...(base.honcho || {}) };
+    for (const key of RELAY_FIELDS) delete honcho[key];
+    honcho.mcpBridgeUrl = url;
+    for (const [field, value] of Object.entries(secrets)) if (value) honcho[field] = value;
+    const next = { ...base, honcho };
+    await writeJsonAtomic(paths.configPath, next, { backup: snapshot.existed, privateFile: true });
+
+    const probe = await probeBridge();
+    if (!probe.ok) {
+      await restoreFileSnapshot(paths.configPath, snapshot, { privateFile: true });
+      return { ok: false, saved: false, error: probe.error || "the bridge did not answer", ...bridgeState(base) };
+    }
+    return { ok: true, saved: true, tools: probe.toolNames, ...bridgeState(next), restartRequired: true };
+  });
+}
+
+async function bridgeTest() {
+  const configuration = await inspectConfiguration();
+  const state = bridgeState(configuration.config);
+  if (!state.connected) return { ok: false, ...state, error: "no shared bridge is configured" };
+  const probe = await probeBridge();
+  return { ok: probe.ok, ...state, tools: probe.toolNames || [], ...(probe.ok ? {} : { error: probe.error }) };
+}
+
+async function bridgeDisconnect() {
+  const configuration = await inspectConfiguration();
+  if (configuration.state === "missing") return { ok: true, changed: false, ...bridgeState(null) };
+  if (configuration.state !== "valid") {
+    return { ok: false, issues: [`refusing to rewrite ${configuration.path}: it is ${configuration.state}`] };
+  }
+  if (!relaysToBridge(configuration.config)) return { ok: true, changed: false, ...bridgeState(configuration.config) };
+  const paths = installPaths(configuration.config);
+  return withSetupLock(paths.appHome, async () => {
+    const honcho = { ...configuration.config.honcho };
+    for (const key of RELAY_FIELDS) delete honcho[key];
+    const next = { ...configuration.config, honcho };
+    // A file that only ever held the bridge would be left with nothing valid in it,
+    // and the next connect would then refuse to touch it.
+    if (!collectsConversations(next)) {
+      await fsp.rm(paths.configPath, { force: true });
+      return { ok: true, changed: true, removedConfig: true, ...bridgeState(null), restartRequired: true };
+    }
+    await writeJsonAtomic(paths.configPath, next, { backup: true, privateFile: true });
+    return { ok: true, changed: true, ...bridgeState(next), restartRequired: true };
+  });
+}
+
+// ---------------------------------------------------------------- setup screen
+
+const UI_HOST = "127.0.0.1";
+// Present only in a page that has the shared-bridge section, so an older setup
+// screen still running from a previous install is not mistaken for this one.
+const UI_MARKER = 'id="bridge-form"';
+
+async function uiState(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    const text = await response.text();
+    return response.ok && text.includes(UI_MARKER) ? "ours" : "other";
+  } catch {
+    return "down";
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function openBrowser(url) {
+  const [command, args] = process.platform === "darwin"
+    ? ["open", [url]]
+    : process.platform === "win32"
+      ? ["cmd", ["/c", "start", "", url]]
+      : ["xdg-open", [url]];
+  try {
+    const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+    child.on("error", () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Start the setup screen if it is not already up, and open it in a browser.
+ *
+ * Detached, so the screen outlives the agent's shell command that asked for it.
+ * It is bound to loopback whatever the environment says: it can install hooks
+ * and write credentials.
+ */
+async function uiOpen(options = {}) {
+  const port = Number(process.env.HONCHO_AGENT_BRIDGE_UI_PORT || 4180);
+  const url = `http://${UI_HOST}:${port}/`;
+  const state = await uiState(url);
+  if (state === "other") {
+    return { ok: false, url, error: `Something else is answering at ${url}. Close it, or set HONCHO_AGENT_BRIDGE_UI_PORT.` };
+  }
+  let pid = null;
+  if (state === "down") {
+    const child = spawn(process.execPath, [path.join(SCRIPT_DIR, "ui.mjs")], {
+      cwd: SCRIPT_DIR,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env, HONCHO_AGENT_BRIDGE_UI_HOST: UI_HOST, HONCHO_AGENT_BRIDGE_UI_PORT: String(port) },
+    });
+    child.unref();
+    pid = child.pid;
+    let ready = false;
+    for (let attempt = 0; attempt < 40 && !ready; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      ready = (await uiState(url)) === "ours";
+    }
+    if (!ready) return { ok: false, url, pid, error: "The setup screen did not start." };
+  }
+  const browserRequested = options.noBrowser === true ? false : openBrowser(url);
+  return { ok: true, url, started: state === "down", pid, browserRequested };
 }
 
 async function runHook(provider) {
@@ -746,6 +1004,19 @@ async function main() {
     if (subcommand === "plan") return setupPlan(options);
     if (subcommand === "apply") return setupApply(options);
   }
+  if (command === "bridge") {
+    const subcommand = args.shift() || "status";
+    const options = parseOptions(args);
+    if (subcommand === "status") return bridgeStatus();
+    if (subcommand === "connect") return bridgeConnect(options);
+    if (subcommand === "test") return bridgeTest();
+    if (subcommand === "disconnect") return bridgeDisconnect();
+  }
+  if (command === "ui") {
+    const subcommand = args.shift() || "open";
+    const options = parseOptions(args);
+    if (subcommand === "open") return uiOpen(options);
+  }
   return {
     ok: true,
     version: VERSION,
@@ -764,6 +1035,11 @@ async function main() {
       "host stop [--profile personal]",
       "setup plan [options]",
       "setup apply [options]",
+      "bridge status",
+      "bridge connect --url <address> (secrets in HONCHO_MCP_BEARER_TOKEN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)",
+      "bridge test",
+      "bridge disconnect",
+      "ui open [--no-browser]",
       "doctor",
       "status",
     ],

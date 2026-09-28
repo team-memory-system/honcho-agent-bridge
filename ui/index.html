@@ -9,7 +9,7 @@
 <body>
 <header>
   <h1>기억 설치</h1>
-  <p>대화를 자기 Honcho에 모으는 데 필요한 것만 여기서 끝냅니다. 터미널은 필요 없습니다.</p>
+  <p>다른 사람의 기억에 연결하거나, 내 대화를 내 Honcho에 모으는 설정을 여기서 합니다. 터미널은 필요 없습니다.</p>
   <button id="refresh" class="quiet">다시 확인</button>
 </header>
 
@@ -20,8 +20,37 @@
     <pre id="status-detail" hidden></pre>
   </section>
 
+  <section class="card" id="bridge-card">
+    <h2>2. 다른 사람의 기억에 연결</h2>
+    <p class="muted">
+      기억을 직접 만들지 않고 물어보기만 할 거면 이 칸만 채우면 됩니다.
+      네 값은 모두 기억 주인에게 받으세요. 이 컴퓨터의 설정 파일에만 저장되고, 화면에 다시 보이지 않습니다.
+    </p>
+    <p id="bridge-state" class="muted">확인 중…</p>
+    <form id="bridge-form" autocomplete="off">
+      <label>브리지 주소
+        <input name="url" type="url" placeholder="https://…/mcp" required>
+      </label>
+      <label>브리지 토큰
+        <input name="token" type="password" required>
+      </label>
+      <label>Cloudflare 서비스 토큰 ID
+        <input name="accessClientId" type="password">
+      </label>
+      <label>Cloudflare 서비스 토큰 비밀
+        <input name="accessClientSecret" type="password">
+      </label>
+      <div class="actions">
+        <button type="submit" class="primary">연결</button>
+        <button type="button" data-bridge="test" class="quiet">연결 확인</button>
+        <button type="button" data-bridge="disconnect" class="quiet">연결 끊기</button>
+      </div>
+    </form>
+    <pre id="bridge-result" hidden></pre>
+  </section>
+
   <section class="card">
-    <h2>2. 훅 설치</h2>
+    <h2>3. 훅 설치</h2>
     <p class="muted">에이전트가 대화를 끝낼 때마다 수집기가 그 기록을 읽어 Honcho로 보냅니다.</p>
     <form id="setup-form">
       <label>내 peer id
@@ -45,7 +74,7 @@
   </section>
 
   <section class="card">
-    <h2>3. 서버와 프록시</h2>
+    <h2>4. 서버와 프록시</h2>
     <p class="muted">Honcho 컨테이너와, 구독 계정을 API로 바꿔 주는 프록시를 올립니다.</p>
     <div class="actions">
       <button data-server="status" class="quiet">서버 상태</button>
@@ -74,7 +103,7 @@
   </section>
 
   <section class="card">
-    <h2>4. ChatGPT 웹 대화 넣기</h2>
+    <h2>5. ChatGPT 웹 대화 넣기</h2>
     <p class="muted">
       ChatGPT 설정에서 <strong>데이터 내보내기</strong>를 하면 메일로 zip이 옵니다.
       그 안의 <code>conversations.json</code>을 그대로 올리세요. 이미 들어간 대화는 다시 넣지 않습니다.

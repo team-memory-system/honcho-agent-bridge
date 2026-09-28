@@ -28,13 +28,16 @@ gets an answer, without reading the underlying messages.
    spool and retried on the next hook.
 2. **Install.** `scripts/cli.mjs` detects agents, previews changes, backs up what it
    edits, and writes the hook. `scripts/ui.mjs` is the same thing with a screen, for
-   people who do not open a terminal.
+   people who do not open a terminal; `cli.mjs ui open` starts it detached and opens
+   the browser, which is how `/memory-setup` shows it.
 3. **Run the local stack.** `server ...` drives the Honcho Docker stack;
    `host ...` drives the LLM proxies and Ollama.
 4. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server. Given
    `honcho.mcpBridgeUrl` in its config it stops implementing the tools itself and
    relays to that bridge instead, so the tool definitions live in one place and the
-   call is recorded in the bridge's audit log.
+   call is recorded in the bridge's audit log. `bridge connect` writes that address
+   and its three credentials, and keeps them only if the plugin's own MCP server
+   then reaches the bridge with them.
 
 ### Things that will bite you
 
@@ -52,6 +55,18 @@ gets an answer, without reading the underlying messages.
   are deliberately left at the old spelling: renaming them buys nothing and can
   stop live collection. The installed layout under
   `~/Library/Application Support/HonchoAgentBridge` is the one this code creates.
+- **`setup` rebuilds `config.json` from scratch.** Anything it does not own must be
+  carried through explicitly; `RELAY_FIELDS` in `scripts/cli.mjs` is that list for
+  the shared bridge. Before it existed, installing hooks silently disconnected a
+  teammate from the bridge.
+- **A bridge older than `BearerGate` accepts any token at `initialize`.** It only
+  refuses at the first tool call, so `bridge connect` against it reports success
+  with a wrong token. `honcho-selfhost` added the gate on 2026-09-28; a bridge
+  process started before that still runs the old code.
+- **Shared-bridge credentials never go on a command line.** `bridge connect` reads
+  them from `HONCHO_MCP_BEARER_TOKEN`, `CF_ACCESS_CLIENT_ID` and
+  `CF_ACCESS_CLIENT_SECRET`, refuses them as options, and the UI passes them to the
+  CLI through its environment.
 - **Secrets are never in this repository.** Tokens live in the installed private
   `config.json` and `.env`, and in 1Password. `assertNoSecretFields` rejects a host
   profile that carries one.
@@ -61,15 +76,16 @@ gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 102 tests, no network, no Docker
+npm test          # 114 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # setup screen on localhost
 ```
 
 Tests are the contract. Several of them exist specifically to fail when something
-drifts: the tool count in `tests/mcp-server.test.mjs`, the setup form's field names
-in `tests/ui.test.mjs`, and the absence of any OS-registration call in
+drifts: the tool count in `tests/mcp-server.test.mjs`, the setup and connect forms'
+field names in `tests/ui.test.mjs`, the relay fields surviving `setup apply` in
+`tests/bridge-connect.test.mjs`, and the absence of any OS-registration call in
 `tests/host-manager.test.mjs`.
 
 ### Licence

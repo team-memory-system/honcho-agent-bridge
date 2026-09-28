@@ -30,6 +30,7 @@ const CHECK_LABELS = {
   runtime: "수집기 런타임",
   honcho: "Honcho 연결",
   hooks: "훅",
+  "shared-bridge": "공유 브리지",
 };
 
 function checkDetail(check) {
@@ -43,8 +44,13 @@ function statusRows(payload) {
   const detect = payload.detect || {};
   const doctor = payload.doctor || {};
   const rows = [];
+  // A machine that only asks someone else's memory installs no hooks; listing them
+  // as missing would tell that person something is broken when nothing is.
+  const checkNames = new Set((doctor.checks || []).map((check) => check.name));
+  const relayOnly = checkNames.has("shared-bridge") && !checkNames.has("runtime");
   for (const [provider, state] of Object.entries(detect.agents || {})) {
     rows.push(row(`${provider} 설치됨`, Boolean(state?.detected), state?.configPath || ""));
+    if (relayOnly) continue;
     rows.push(row(`${provider} 훅`, Boolean(state?.hook?.installed ?? state?.plugin?.installed), state?.hook?.path || ""));
   }
   for (const check of doctor.checks || []) {
@@ -72,7 +78,71 @@ function setupBody(extra = {}) {
   return body;
 }
 
-$("#refresh").addEventListener("click", loadStatus);
+$("#refresh").addEventListener("click", () => { loadStatus(); loadBridgeState(); });
+
+// What went wrong, in the terms of what the person typed. The raw result stays
+// underneath for whoever they ask for help.
+function bridgeProblem(payload) {
+  const text = [payload?.error, ...(payload?.issues || [])].filter(Boolean).join(" ");
+  // What the form got wrong comes first: these messages mention the token too.
+  if (/not a valid URL|--url is required/.test(text)) return "브리지 주소를 확인하세요.";
+  if (/must use https/.test(text)) return "주소는 https로 시작해야 합니다.";
+  if (/token is required/.test(text)) return "브리지 토큰을 넣으세요.";
+  if (/both its ID and its secret/.test(text)) return "서비스 토큰은 ID와 비밀을 둘 다 넣어야 합니다.";
+  if (/MCP bridge 401|Unauthorized/i.test(text)) return "브리지 토큰이 맞지 않습니다.";
+  if (/MCP bridge 403|Forbidden/i.test(text)) return "Cloudflare가 막았습니다. 서비스 토큰 ID와 비밀을 확인하세요.";
+  if (/timed out|fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|MCP bridge 5\d\d/i.test(text)) {
+    return "그 주소에서 브리지가 응답하지 않습니다. 주소를 확인하거나 기억 주인에게 브리지가 켜져 있는지 물어보세요.";
+  }
+  return "연결하지 못했습니다. 아래 내용을 기억 주인에게 보여 주세요.";
+}
+
+function bridgeSummary(payload) {
+  if (!payload?.connected) return "연결 안 됨";
+  const tools = payload.tools?.length ? ` · 쓸 수 있는 도구: ${payload.tools.join(", ")}` : "";
+  return `연결됨 · ${payload.url}${tools}`;
+}
+
+async function loadBridgeState() {
+  const payload = await api("/api/bridge/status");
+  $("#bridge-state").textContent = bridgeSummary(payload);
+}
+
+$("#bridge-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = $("#bridge-form").elements;
+  show("#bridge-result", "연결하고 확인하는 중… 최대 30초 걸립니다.");
+  const payload = await api("/api/bridge/connect", {
+    url: form.url.value.trim(),
+    token: form.token.value,
+    accessClientId: form.accessClientId.value,
+    accessClientSecret: form.accessClientSecret.value,
+  });
+  if (payload.ok) {
+    // Saved and proven; nothing on this page needs to keep holding them.
+    for (const name of ["token", "accessClientId", "accessClientSecret"]) form[name].value = "";
+    show("#bridge-result", `연결했습니다. 쓰는 에이전트를 다시 시작하면 도구가 보입니다.\n\n${JSON.stringify(payload, null, 2)}`);
+  } else {
+    show("#bridge-result", `${bridgeProblem(payload)} 저장하지 않았습니다.\n\n${JSON.stringify(payload, null, 2)}`);
+  }
+  $("#bridge-state").textContent = payload.ok ? bridgeSummary(payload) : $("#bridge-state").textContent;
+  await loadStatus();
+});
+
+document.querySelector("[data-bridge='test']").addEventListener("click", async () => {
+  show("#bridge-result", "확인 중… 최대 30초 걸립니다.");
+  const payload = await api("/api/bridge/test", {});
+  show("#bridge-result", `${payload.ok ? "잘 연결되어 있습니다." : bridgeProblem(payload)}\n\n${JSON.stringify(payload, null, 2)}`);
+  $("#bridge-state").textContent = payload.connected ? bridgeSummary(payload) : "연결 안 됨";
+});
+
+document.querySelector("[data-bridge='disconnect']").addEventListener("click", async () => {
+  const payload = await api("/api/bridge/disconnect", {});
+  show("#bridge-result", `${payload.ok ? "연결을 끊었습니다. 쓰는 에이전트를 다시 시작하세요." : "끊지 못했습니다."}\n\n${JSON.stringify(payload, null, 2)}`);
+  await loadBridgeState();
+});
+
+loadBridgeState().catch(() => { $("#bridge-state").textContent = "상태를 읽지 못했습니다."; });
 
 $("#setup-form").addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -1,17 +1,18 @@
 // The collector's install screen.
 //
 // Everything here already exists as a `cli.mjs` subcommand. This is the same set of
-// steps for someone who does not open a terminal: see what is missing, install the
-// hooks, bring up Honcho and the proxies, and drop in a ChatGPT export.
+// steps for someone who does not open a terminal: see what is missing, connect to
+// someone else's shared bridge, install the hooks, bring up Honcho and the proxies,
+// and drop in a ChatGPT export. `cli.mjs ui open` starts it.
 //
 // It runs the CLI as a subprocess rather than importing it, so the UI and a terminal
 // take exactly the same path and there is one implementation of each step.
 import { execFile } from "node:child_process";
-import { createReadStream, promises as fs } from "node:fs";
+import { createReadStream, promises as fs, realpathSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { installPaths } from "./config.mjs";
@@ -233,7 +234,34 @@ async function writeProxyProfile(body) {
   return { ...(await readProxyProfile()), updated: true };
 }
 
+/**
+ * The shared-bridge values are credentials for someone else's memory. They reach
+ * the CLI through its environment, never its arguments, because a command line is
+ * visible to every process on the machine. A value the form left blank is removed
+ * rather than inherited from whatever environment started this UI.
+ */
+const BRIDGE_SECRET_FIELDS = Object.freeze({
+  token: "HONCHO_MCP_BEARER_TOKEN",
+  accessClientId: "CF_ACCESS_CLIENT_ID",
+  accessClientSecret: "CF_ACCESS_CLIENT_SECRET",
+});
+
+function connectBridge(body) {
+  const env = { ...process.env };
+  for (const [field, name] of Object.entries(BRIDGE_SECRET_FIELDS)) {
+    delete env[name];
+    const value = typeof body?.[field] === "string" ? body[field].trim() : "";
+    if (value) env[name] = value;
+  }
+  const url = typeof body?.url === "string" ? body.url.trim() : "";
+  return runCli(["bridge", "connect", "--url", url], { timeout: 90_000, env });
+}
+
 const ROUTES = {
+  "/api/bridge/status": async () => runCli(["bridge", "status"], { timeout: 30_000 }),
+  "/api/bridge/connect": async (body) => connectBridge(body),
+  "/api/bridge/test": async () => runCli(["bridge", "test"], { timeout: 90_000 }),
+  "/api/bridge/disconnect": async () => runCli(["bridge", "disconnect"], { timeout: 30_000 }),
   "/api/status": async () => ({
     detect: await runCli(["detect"], { timeout: 120_000 }),
     doctor: await runCli(["doctor"], { timeout: 120_000 }),
@@ -370,7 +398,19 @@ export function createUiServer() {
   });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  // `file://${argv[1]}` never matches a Windows path, which kept the screen from
+  // ever listening there, and a symlinked path (macOS /tmp) differs from the real
+  // one Node loads the module from.
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
+}
+
+if (isMainModule()) {
   createUiServer().listen(port, host, () => {
     process.stdout.write(`Honcho Agent Bridge setup: http://${host}:${port}\n`);
   });
