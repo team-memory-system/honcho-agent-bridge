@@ -301,7 +301,7 @@ function replaceEnvironmentValues(text, values) {
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
-function personalEnvironment(text) {
+export function personalEnvironment(text) {
   const sanitized = withoutConflictingPersonalModelSettings(sanitizedEnvironment(text));
   const source = parseEnvironment(text);
   // Follow whatever the owner's own environment points at instead of assuming the

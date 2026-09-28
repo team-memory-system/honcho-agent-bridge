@@ -135,6 +135,75 @@ async function bundleProbe(directory = sourceServerDir()) {
   return { ok: missing.length === 0, directory, missing };
 }
 
+// A release bundle ships `honcho/` already filled. A plugin installed from the
+// marketplace cannot: the Honcho source is AGPL and lives in its own repository,
+// which is why `server/.gitignore` excludes the directory and why this package
+// carries no Honcho code. `honcho-source.json` says where to get it instead.
+const HONCHO_SOURCE_PIN = "honcho-source.json";
+const HONCHO_SOURCE_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._\/-]+$/;
+const HONCHO_SOURCE_REF = /^[A-Za-z0-9._\/-]{1,128}$/;
+const HONCHO_SOURCE_COMMIT = /^[0-9a-f]{40}$/;
+
+export async function honchoSourcePin(directory = sourceServerDir()) {
+  const pinPath = path.join(directory, HONCHO_SOURCE_PIN);
+  let raw;
+  try { raw = await fsp.readFile(pinPath, "utf8"); }
+  catch { return { ok: false, path: pinPath, reason: "no source pin is bundled" }; }
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch { return { ok: false, path: pinPath, reason: `${HONCHO_SOURCE_PIN} is not valid JSON` }; }
+  const repo = String(parsed?.repo || "").trim();
+  const ref = String(parsed?.ref || "").trim();
+  const commit = String(parsed?.commit || "").trim();
+  // Both values reach a command line, so neither is taken on trust.
+  if (!HONCHO_SOURCE_URL.test(repo)) return { ok: false, path: pinPath, reason: `${HONCHO_SOURCE_PIN} needs an https repository URL` };
+  if (!HONCHO_SOURCE_REF.test(ref)) return { ok: false, path: pinPath, reason: `${HONCHO_SOURCE_PIN} needs a branch or tag in "ref"` };
+  if (commit && !HONCHO_SOURCE_COMMIT.test(commit)) return { ok: false, path: pinPath, reason: `${HONCHO_SOURCE_PIN} "commit" must be a full 40-character hash` };
+  return { ok: true, path: pinPath, repo, ref, ...(commit ? { commit } : {}) };
+}
+
+async function gitAvailable(runner) {
+  try { await runner("git", ["--version"], { timeout: 10_000 }); return true; }
+  catch { return false; }
+}
+
+export async function honchoSourceProbe(directory = sourceServerDir(), { runner = execFileAsync } = {}) {
+  const target = path.join(directory, "honcho");
+  const present = await exists(path.join(target, "Dockerfile"));
+  if (present) return { present: true, directory: target, fetchable: false };
+  const pin = await honchoSourcePin(directory);
+  if (!pin.ok) return { present: false, directory: target, fetchable: false, reason: pin.reason };
+  if (!(await gitAvailable(runner))) {
+    return { present: false, directory: target, fetchable: false, pin, reason: "git is not installed, so the Honcho source cannot be fetched" };
+  }
+  return { present: false, directory: target, fetchable: true, pin };
+}
+
+// Clones into a sibling directory and renames, so an interrupted fetch never
+// leaves a half-populated `honcho/` that bundleProbe would then accept.
+export async function ensureHonchoSource(directory = sourceServerDir(), { runner = execFileAsync } = {}) {
+  const probe = await honchoSourceProbe(directory, { runner });
+  if (probe.present) return { ok: true, fetched: false, directory: probe.directory };
+  if (!probe.fetchable) return { ok: false, fetched: false, directory: probe.directory, error: probe.reason };
+  const { pin } = probe;
+  const staging = `${probe.directory}.fetching`;
+  await fsp.rm(staging, { recursive: true, force: true });
+  try {
+    const clone = ["clone", "--branch", pin.ref, "--single-branch"];
+    if (!pin.commit) clone.push("--depth", "1");
+    clone.push(pin.repo, staging);
+    await runner("git", clone, { timeout: 900_000 });
+    if (pin.commit) await runner("git", ["-C", staging, "checkout", "--detach", pin.commit], { timeout: 120_000 });
+    const { stdout } = await runner("git", ["-C", staging, "rev-parse", "HEAD"], { timeout: 30_000 });
+    await fsp.rm(path.join(staging, ".git"), { recursive: true, force: true });
+    await fsp.rename(staging, probe.directory);
+    return { ok: true, fetched: true, directory: probe.directory, repo: pin.repo, ref: pin.ref, commit: stdout.trim() };
+  } catch (error) {
+    await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
+    return { ok: false, fetched: false, directory: probe.directory, error: error?.stderr?.trim() || error?.message || String(error) };
+  }
+}
+
 export async function dockerCliEnvironment(directory, {
   platform = process.platform,
   env = process.env,
@@ -307,14 +376,25 @@ export async function serverPlan({
   platform = process.platform,
   dockerInspector = dockerProbe,
   bundleInspector = bundleProbe,
+  honchoSourceInspector = honchoSourceProbe,
 } = {}) {
   requireServerProfile(profile);
-  const [docker, bundle] = await Promise.all([dockerInspector(), bundleInspector()]);
+  const [docker, bundle, honchoSource] = await Promise.all([dockerInspector(), bundleInspector(), honchoSourceInspector()]);
   const issues = [];
   const warnings = [];
   if (!docker.installed) issues.push("Docker CLI is not installed");
   else if (!docker.running) issues.push("Docker is installed but the engine is not running");
-  if (!bundle.ok) issues.push(`The bundled Honcho source is incomplete: ${bundle.missing.join(", ")}`);
+  if (!bundle.ok) {
+    // Everything under honcho/ is fetched by prepare when a source pin is bundled,
+    // so report the download instead of failing the plan over an absent directory.
+    const onlyHonchoSource = bundle.missing.every(item => item.startsWith("honcho/"));
+    if (onlyHonchoSource && honchoSource.fetchable) {
+      warnings.push(`Honcho source will be downloaded from ${honchoSource.pin.repo} (${honchoSource.pin.commit || honchoSource.pin.ref})`);
+    } else {
+      const reason = onlyHonchoSource && honchoSource.reason ? ` (${honchoSource.reason})` : "";
+      issues.push(`The bundled Honcho source is incomplete: ${bundle.missing.join(", ")}${reason}`);
+    }
+  }
   const profilePath = profile === "personal" ? "env.personal.example" : ".env.example";
   if (!(await exists(path.join(bundle.directory, profilePath)))) issues.push(`The ${profile} environment profile is not included`);
   if (profile === "personal") {
@@ -351,6 +431,7 @@ export async function serverPlan({
     docker,
     bundle,
     installDirectory: installedServerDir(),
+    honchoSource,
     apiUrl: "http://127.0.0.1:8001",
     dashboardUrl: "http://127.0.0.1:4173",
     issues,
@@ -698,8 +779,22 @@ async function serverPrepareUnlocked({
   env = process.env,
   privateFileRunner,
   fileSystem,
+  honchoSourceFetcher = ensureHonchoSource,
 } = {}) {
   requireServerProfile(profile);
+  // The download happens here and never in `server plan`, which must not mutate.
+  const honchoSource = await honchoSourceFetcher();
+  if (!honchoSource.ok) {
+    return {
+      ok: false,
+      ready: false,
+      mode: "local-docker",
+      profile,
+      honchoSource,
+      issues: [`The Honcho source could not be prepared: ${honchoSource.error}`],
+      next: "Make the Honcho source repository reachable, or install a release bundle that already contains server/honcho",
+    };
+  }
   const plan = preparedPlan || await serverPlan({ profile });
   if (!plan.ready) return plan;
   const installed = path.resolve(serverDirectory || installedServerDir());

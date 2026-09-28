@@ -7,6 +7,9 @@ import test from "node:test";
 import {
   copyServerBundle,
   dockerCliEnvironment,
+  ensureHonchoSource,
+  honchoSourcePin,
+  honchoSourceProbe,
   serverPlan,
   serverPrepare,
   serverStart,
@@ -14,6 +17,10 @@ import {
   serverStop,
   serverVerify,
 } from "../scripts/server-manager.mjs";
+
+// Nothing in this file may reach the network. Every call that could fetch the
+// Honcho source is given its own runner or a stub.
+const noFetch = async () => ({ ok: true, fetched: false, directory: "(stubbed)" });
 
 test("Windows Compose uses an isolated anonymous Docker config without changing the user config", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-docker-config-"));
@@ -45,6 +52,7 @@ test("server lifecycle rejects mistyped profiles before any mutation", async (t)
     profile: "personl",
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: root } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   }), /Unsupported server profile/);
   await assert.rejects(serverStart({
@@ -263,6 +271,7 @@ test("portable prepare fails closed and propagates retained backup cleanup detai
     profile: "portable",
     fileSystem,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, false);
@@ -328,6 +337,7 @@ test("personal server prepare adds missing safe profile settings without replaci
       },
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
@@ -367,6 +377,7 @@ test("personal server prepare generates only missing local secrets for an existi
       },
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
@@ -398,6 +409,7 @@ test("personal server prepare installs its environment before preparing host ser
     profile: "personal",
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
@@ -429,6 +441,7 @@ test("personal server prepare fails closed before host setup when Windows .env A
         prepare: async () => { hostPrepareCalled = true; return { ok: true, ready: true }; },
       },
       preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+      honchoSourceFetcher: noFetch,
       serverDirectory: destination,
     }),
     /ACL restriction failed/,
@@ -464,6 +477,7 @@ test("personal server update stops a running host before swapping the installed 
     profile: "personal",
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
@@ -497,6 +511,7 @@ test("concurrent prepares allow only one candidate to enter and keep the origina
     profile: "personal",
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   };
 
@@ -543,6 +558,7 @@ test("concurrent rejected prepare cannot disturb rollback of the original and it
     profile: "personal",
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   };
 
@@ -579,6 +595,7 @@ test("personal update validates candidate secrets before inspecting or stopping 
     profile: "personal",
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
@@ -629,6 +646,7 @@ test("personal host readiness failure restores both backups and restarts the pre
     profile: "personal",
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, false);
@@ -653,6 +671,7 @@ test("fresh personal host failure removes the candidate installation", async (t)
       prepare: async () => ({ ok: false, ready: false, issues: ["host profile rejected"] }),
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, false);
@@ -694,6 +713,7 @@ test("personal rollback reports a retained failed candidate instead of hiding cl
       prepare: async () => ({ ok: false, ready: false, issues: ["candidate host rejected"] }),
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   });
   assert.equal(result.ok, false);
@@ -735,6 +755,7 @@ test("personal host exception keeps the original error visible when host recover
       start: async () => { throw new Error("must not start after failed recovery preparation"); },
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
   }), (error) => {
     captured = error;
@@ -757,6 +778,7 @@ test("personal start prepares under its existing lifecycle lock without reentran
   const result = await serverStart({
     profile: "personal",
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
     serverDirectory: destination,
     hostRuntime: {
       prepare: async () => { events.push("prepare"); return { ok: true, ready: true }; },
@@ -1117,8 +1139,152 @@ test("live verification reads the proxy secret only in-process and discards the 
   const source = await personalBundle(root);
   await fsp.writeFile(path.join(source, "host-profile.personal.json"), JSON.stringify({codexProxy: {enabled:false}}));
   const destination = path.join(root, "installed");
-  const result = await serverPrepare({profile:"personal", serverDirectory:destination, preparedPlan:{ok:true, ready:true, bundle:{directory:source}}, hostRuntime:{prepare:async()=>({ok:true,ready:true})}});
+  const result = await serverPrepare({profile:"personal", serverDirectory:destination, preparedPlan:{ok:true, ready:true, bundle:{directory:source}}, hostRuntime:{prepare:async()=>({ok:true,ready:true})}, honchoSourceFetcher: noFetch});
   assert.equal(result.ready, false);
   assert.equal(result.installation.candidateRejected, true);
   assert.ok(result.missingSecretFields.includes("LLM_VLLM_API_KEY"));
  });
+
+test("the source pin only accepts an https repository and a plausible ref", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-pin-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const write = (value) => fsp.writeFile(path.join(root, "honcho-source.json"), value, "utf8");
+
+  assert.equal((await honchoSourcePin(root)).ok, false, "a missing pin is not an error, just absent");
+
+  await write("{ not json");
+  assert.match((await honchoSourcePin(root)).reason, /not valid JSON/);
+
+  // Both values are handed to git on a command line.
+  for (const rejected of [
+    { repo: "git@github.com:team/repo.git", ref: "main" },
+    { repo: "http://github.com/team/repo", ref: "main" },
+    { repo: "https://github.com/team/repo", ref: "main; rm -rf /" },
+    { repo: "https://github.com/team/repo", ref: "--upload-pack=touch" },
+    { repo: "https://github.com/team/repo", ref: "main", commit: "abc123" },
+  ]) {
+    await write(JSON.stringify(rejected));
+    assert.equal((await honchoSourcePin(root)).ok, false, `accepted ${JSON.stringify(rejected)}`);
+  }
+
+  await write(JSON.stringify({ repo: "https://github.com/team-memory-system/honcho-selfhost", ref: "main" }));
+  const pin = await honchoSourcePin(root);
+  assert.equal(pin.ok, true);
+  assert.equal(pin.repo, "https://github.com/team-memory-system/honcho-selfhost");
+  assert.equal(pin.ref, "main");
+});
+
+test("a plugin without the Honcho source plans a download instead of failing", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-fetch-plan-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(root, "compose.yaml"), "services: {}\n");
+  await fsp.writeFile(path.join(root, ".env.example"), "LOG_LEVEL=INFO\n");
+  await fsp.writeFile(path.join(root, "honcho-source.json"), JSON.stringify({
+    repo: "https://github.com/team-memory-system/honcho-selfhost",
+    ref: "main",
+  }));
+  const bundle = {
+    ok: false,
+    directory: root,
+    missing: ["honcho/Dockerfile", "honcho/LICENSE", "honcho/local-dashboard/Dockerfile"],
+  };
+  const docker = { installed: true, running: true };
+  const gitPresent = async () => ({ stdout: "git version 2.0\n", stderr: "" });
+
+  const withGit = await serverPlan({
+    dockerInspector: async () => docker,
+    bundleInspector: async () => bundle,
+    honchoSourceInspector: () => honchoSourceProbe(root, { runner: gitPresent }),
+  });
+  assert.equal(withGit.ready, true, withGit.issues?.join(", "));
+  assert.match(withGit.warnings.join(" "), /will be downloaded from https:\/\/github\.com\/team-memory-system\/honcho-selfhost \(main\)/);
+  assert.equal(withGit.honchoSource.fetchable, true);
+  // Planning must not create anything.
+  assert.deepEqual(
+    (await fsp.readdir(root)).sort(),
+    [".env.example", "compose.yaml", "honcho-source.json"],
+  );
+
+  const withoutGit = await serverPlan({
+    dockerInspector: async () => docker,
+    bundleInspector: async () => bundle,
+    honchoSourceInspector: () => honchoSourceProbe(root, { runner: async () => { throw new Error("git not found"); } }),
+  });
+  assert.equal(withoutGit.ready, false);
+  assert.match(withoutGit.issues.join(" "), /git is not installed/);
+
+  // No pin at all is still a hard failure: there is nowhere to fetch from.
+  await fsp.rm(path.join(root, "honcho-source.json"));
+  const unpinned = await serverPlan({
+    dockerInspector: async () => docker,
+    bundleInspector: async () => bundle,
+    honchoSourceInspector: () => honchoSourceProbe(root, { runner: gitPresent }),
+  });
+  assert.equal(unpinned.ready, false);
+  assert.match(unpinned.issues.join(" "), /no source pin is bundled/);
+});
+
+test("the fetch stages the clone, drops its history, and leaves nothing behind on failure", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-fetch-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(root, "honcho-source.json"), JSON.stringify({
+    repo: "https://github.com/team-memory-system/honcho-selfhost",
+    ref: "main",
+  }));
+
+  const calls = [];
+  const fakeClone = async (command, args) => {
+    calls.push([command, ...args]);
+    if (args[0] === "--version") return { stdout: "git version 2.0\n", stderr: "" };
+    if (args[0] === "clone") {
+      const target = args[args.length - 1];
+      await fsp.mkdir(path.join(target, ".git"), { recursive: true });
+      await fsp.mkdir(path.join(target, "local-dashboard"), { recursive: true });
+      await fsp.writeFile(path.join(target, "Dockerfile"), "FROM scratch\n");
+      await fsp.writeFile(path.join(target, "LICENSE"), "AGPL\n");
+      await fsp.writeFile(path.join(target, "local-dashboard", "Dockerfile"), "FROM scratch\n");
+      return { stdout: "", stderr: "" };
+    }
+    return { stdout: "11fc292b1bf8e2c7f4e0a5ee2721b2fbe4f29772\n", stderr: "" };
+  };
+
+  const fetched = await ensureHonchoSource(root, { runner: fakeClone });
+  assert.equal(fetched.ok, true);
+  assert.equal(fetched.fetched, true);
+  assert.equal(fetched.commit, "11fc292b1bf8e2c7f4e0a5ee2721b2fbe4f29772");
+  // The clone goes to a staging path so an interrupted fetch cannot look complete.
+  const clone = calls.find(call => call[1] === "clone");
+  assert.equal(clone[clone.length - 1], path.join(root, "honcho.fetching"));
+  assert.ok(clone.includes("--single-branch") && clone.includes("--depth"));
+  assert.equal(await bundleFileExists(root, "honcho/Dockerfile"), true);
+  assert.equal(await bundleFileExists(root, "honcho/.git"), false, "the clone's history is not kept");
+  assert.equal(await bundleFileExists(root, "honcho.fetching"), false);
+
+  // A second call is a no-op and does not run git again.
+  calls.length = 0;
+  const again = await ensureHonchoSource(root, { runner: fakeClone });
+  assert.deepEqual(again, { ok: true, fetched: false, directory: path.join(root, "honcho") });
+  assert.deepEqual(calls, []);
+
+  const broken = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-fetch-fail-"));
+  t.after(() => fsp.rm(broken, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(broken, "honcho-source.json"), JSON.stringify({
+    repo: "https://github.com/team-memory-system/honcho-selfhost",
+    ref: "main",
+  }));
+  const failing = await ensureHonchoSource(broken, {
+    runner: async (command, args) => {
+      if (args[0] === "--version") return { stdout: "git version 2.0\n", stderr: "" };
+      const error = new Error("clone failed");
+      error.stderr = "fatal: repository not found";
+      throw error;
+    },
+  });
+  assert.equal(failing.ok, false);
+  assert.match(failing.error, /repository not found/);
+  assert.deepEqual(await fsp.readdir(broken), ["honcho-source.json"]);
+});
+
+async function bundleFileExists(directory, relative) {
+  try { await fsp.access(path.join(directory, relative)); return true; } catch { return false; }
+}
