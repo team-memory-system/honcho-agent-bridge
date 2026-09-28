@@ -1,6 +1,86 @@
 # Honcho Agent Bridge
 
-Self-contained Codex and Claude Code plugin for one personal, self-hosted Honcho memory.
+Collector, installer and plugin for one person's self-hosted Honcho memory. Reads
+Codex / Claude Code / agy / ChatGPT conversations and writes them into that
+person's Honcho.
+
+## Read this first (for agents)
+
+This is one of three repositories that make up the memory system. Any of them can
+be the place you landed, so here is the whole map.
+
+| Repository | What it is | Installed where |
+|---|---|---|
+| [`honcho-selfhost`](https://github.com/team-memory-system/honcho-selfhost) | The memory server. A fork of `plastic-labs/honcho` (AGPL-3.0), with the MCP bridge and dashboard inside it | One computer per person |
+| **`honcho-agent-bridge`** (this one) | Collector, installer, diagnostics, release builder, agent plugin | Every machine that runs an agent |
+| [`llm-proxy`](https://github.com/team-memory-system/llm-proxy) | Turns subscription accounts into OpenAI-compatible APIs, plus a router (AGPL-3.0) | Only the computer that runs Honcho |
+
+**Topology.** One Honcho and one database per person; that person's several machines
+all feed the same one. Teammates do not share a database. What is shared is a single
+MCP tool, `chat`, on a second bridge process — so a teammate can ask a question and
+gets an answer, without reading the underlying messages.
+
+### What this repository does
+
+1. **Collect.** An agent's Stop hook runs `scripts/main.mjs`, which reads that
+   turn's transcript file and posts new messages to Honcho. There is no daemon:
+   the hook is invoked by the agent, once per turn. Failed writes are queued in a
+   spool and retried on the next hook.
+2. **Install.** `scripts/cli.mjs` detects agents, previews changes, backs up what it
+   edits, and writes the hook. `scripts/ui.mjs` is the same thing with a screen, for
+   people who do not open a terminal.
+3. **Run the local stack.** `server ...` drives the Honcho Docker stack;
+   `host ...` drives the LLM proxies and Ollama.
+4. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server. Given
+   `honcho.mcpBridgeUrl` in its config it stops implementing the tools itself and
+   relays to that bridge instead, so the tool definitions live in one place and the
+   call is recorded in the bridge's audit log.
+
+### Things that will bite you
+
+- **No OS autostart.** Nothing is registered with launchd, the Windows task
+  scheduler or systemd. `host start` spawns the supervisor detached and finds it
+  again through its PID file. After a reboot the proxies stay down until someone
+  runs `host start` or opens the setup UI. While they are down, Honcho's deriver
+  gets `connection refused` and its queue grows; messages are still stored, only
+  derivation stops.
+- **The hook is what keeps collection alive.** Changing the hook command format has
+  happened twice already; `LEGACY_HOOK_MARKERS` in `scripts/cli.mjs` exists so the
+  installer can still recognise and clean up hooks it wrote under an older name.
+- **The owner's machine is hand-wired, not installed.** Its hooks read
+  `~/.config/codex-honcho-sync/.env` and use `CODEX_HONCHO_SYNC_ROOT`. Those names
+  are deliberately left at the old spelling: renaming them buys nothing and can
+  stop live collection. The installed layout under
+  `~/Library/Application Support/HonchoAgentBridge` is the one this code creates.
+- **Secrets are never in this repository.** Tokens live in the installed private
+  `config.json` and `.env`, and in 1Password. `assertNoSecretFields` rejects a host
+  profile that carries one.
+- **`--profile personal` needs macOS or Windows.** Native Linux cannot reach the
+  loopback-only host services from Docker; use `--profile portable` there.
+
+### Verify a change
+
+```sh
+npm test          # 102 tests, no network, no Docker
+node scripts/cli.mjs detect
+node scripts/cli.mjs doctor
+npm run ui        # setup screen on localhost
+```
+
+Tests are the contract. Several of them exist specifically to fail when something
+drifts: the tool count in `tests/mcp-server.test.mjs`, the setup form's field names
+in `tests/ui.test.mjs`, and the absence of any OS-registration call in
+`tests/host-manager.test.mjs`.
+
+### Licence
+
+No open-source licence is granted. `"license": "UNLICENSED"` in the plugin manifest
+is deliberate: the source is readable so teammates can install and audit it, not so
+it can be reused. `llm-proxy` and `honcho-selfhost` are AGPL-3.0 and separate.
+
+---
+
+## Detail
 
 The repository bundles the conversation collectors, setup/diagnostic workflow, a dependency-free MCP bridge, and a release builder for the complete local Honcho Docker stack. It does not publish or download an npm package.
 
@@ -29,17 +109,15 @@ One setup run can enable conversation collection for every detected agent. Insta
 
 ## Plugin installation
 
-From a private Git repository, replace `OWNER/REPOSITORY` below:
-
 ```sh
-codex plugin marketplace add OWNER/REPOSITORY
+codex plugin marketplace add team-memory-system/honcho-agent-bridge
 codex plugin add honcho-agent-bridge@honcho-agent-bridge
 
-claude plugin marketplace add OWNER/REPOSITORY
+claude plugin marketplace add team-memory-system/honcho-agent-bridge
 claude plugin install honcho-agent-bridge@honcho-agent-bridge
 ```
 
-For a local checkout, pass its absolute directory instead of `OWNER/REPOSITORY`. Start a new Codex session or reload Claude plugins after installation. Then invoke `$setup-memory` in Codex or `/memory-setup` in Claude Code.
+For a local checkout, pass its absolute directory instead of the repository name. Start a new Codex session or reload Claude plugins after installation. Then invoke `$setup-memory` in Codex or `/memory-setup` in Claude Code.
 
 ## Setup
 
