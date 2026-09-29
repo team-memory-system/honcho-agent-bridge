@@ -14,6 +14,7 @@ import {
 } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
+import { formatJson, publicUrl, sanitizeUrlsInText } from "./redact.mjs";
 import { VERSION } from "./version.mjs";
 import { installedServerDir, serverPlan, serverPrepare, serverStart, serverStatus, serverStop, serverVerify } from "./server-manager.mjs";
 import { hostPlan, hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
@@ -58,37 +59,7 @@ function parseOptions(items) {
 }
 
 function printJson(value) {
-  process.stdout.write(`${JSON.stringify(redactSecrets(value), null, 2)}\n`);
-}
-
-function redactSecrets(value) {
-  if (Array.isArray(value)) return value.map(redactSecrets);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => {
-      if (/(token|secret|api[_-]?key|authorization)/i.test(key) && item) return [key, "[redacted]"];
-      if (typeof item === "string" && /(url|uri|address)$/i.test(key)) return [key, publicUrl(item)];
-      if (typeof item === "string" && /(error|message|stack)/i.test(key)) return [key, sanitizeUrlsInText(item)];
-      return [key, redactSecrets(item)];
-    }),
-  );
-}
-
-function sanitizeUrlsInText(value) {
-  return String(value).replace(/https?:\/\/[^\s"'<>]+/gi, (match) => publicUrl(match));
-}
-
-function publicUrl(value) {
-  try {
-    const url = new URL(value);
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return "[invalid URL]";
-  }
+  process.stdout.write(formatJson(value));
 }
 
 async function pathExists(target) {

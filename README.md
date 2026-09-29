@@ -94,13 +94,18 @@ gets an answer, without reading the underlying messages.
   profile that carries one. The gateway's router key comes from its `connect-info`,
   is written only into the installed private `.env`, and appears in no result this
   CLI prints; `scripts/gateway.mjs` hands it on as a non-enumerable property.
+- **CLI output redacts by field name.** `scripts/redact.mjs` prints any field whose
+  name contains token, secret, api key or authorization as `"[redacted]"`, whatever
+  it holds. A field that only lists setting NAMES has to be in `NAME_ONLY_FIELDS`
+  there, or it prints as `"[redacted]"` too; `missingSecretFields` did until
+  2026-09-30, so a portable install could not see which keys to fill in.
 - **`--profile personal` needs macOS or Windows.** Native Linux cannot reach the
   loopback-only host services from Docker; use `--profile portable` there.
 
 ### Verify a change
 
 ```sh
-npm test          # 140 tests, no network, no Docker
+npm test          # 143 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # setup screen on localhost
