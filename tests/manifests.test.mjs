@@ -27,7 +27,12 @@ test("Codex, Claude, package, and marketplace metadata stay aligned", async () =
   assert.equal(marketplace.name, codex.name);
   assert.equal(marketplace.plugins[0].name, codex.name);
   assert.equal(marketplace.plugins[0].source, "./");
-  assert.deepEqual([codex.version, claude.version, pkg.version], [VERSION, VERSION, VERSION]);
+  // The marketplace listing carries the version too; a stale one there is what an
+  // install from the marketplace sees.
+  assert.deepEqual(
+    [codex.version, claude.version, pkg.version, marketplace.metadata.version],
+    [VERSION, VERSION, VERSION, VERSION],
+  );
   assert.equal(codex.mcpServers, "./.mcp.json");
   assert.equal(claude.mcpServers, "./.mcp.claude.json");
   assert.ok(codexMcp.mcpServers["honcho-agent-bridge"]);

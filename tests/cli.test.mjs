@@ -287,7 +287,7 @@ test("doctor verifies runtime version, host plugins, Honcho access, and MCP hand
   );
   const result = await runCli(["doctor"], env);
   assert.equal(result.ok, true);
-  assert.equal(result.checks.find((check) => check.name === "runtime").actualVersion, "0.2.0");
+  assert.equal(result.checks.find((check) => check.name === "runtime").actualVersion, "0.3.0");
   assert.equal(result.checks.find((check) => check.name === "mcp").enabledToolCount, 31);
   assert.equal(result.checks.find((check) => check.name === "codex-plugin").enabled, true);
   assert.equal(result.checks.find((check) => check.name === "claude-plugin").enabled, true);
