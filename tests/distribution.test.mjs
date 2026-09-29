@@ -127,22 +127,23 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.match(profile, /^VECTOR_STORE_TYPE=pgvector$/m);
   assert.match(profile, /^VECTOR_STORE_MIGRATED=true$/m);
   assert.match(profile, /^LLM_OPENAI_COMPATIBLE_BASE_URL=http:\/\/host\.docker\.internal:11434\/v1$/m);
-  // The generated profile follows the endpoint the source environment named rather
-  // than assuming the Codex proxy's port: a personal install may route completions
-  // through the llm-proxy router instead.
-  assert.match(profile, /^LLM_VLLM_BASE_URL=http:\/\/host\.docker\.internal:9999\/v1$/m);
-  const codexPrefixes = [
+  // Every chat model goes through the subscription gateway's router, whatever the
+  // source environment pointed at: `server prepare` writes the installed gateway's
+  // own address, key and model over these defaults.
+  assert.match(profile, /^LLM_VLLM_BASE_URL=http:\/\/host\.docker\.internal:11400\/v1$/m);
+  assert.match(profile, /^LLM_VLLM_API_KEY=$/m);
+  const chatPrefixes = [
     "DERIVER_MODEL_CONFIG",
     "SUMMARY_MODEL_CONFIG",
     "DREAM_DEDUCTION_MODEL_CONFIG",
     "DREAM_INDUCTION_MODEL_CONFIG",
     ...["minimal", "low", "medium", "high", "max"].map((level) => `DIALECTIC_LEVELS__${level}__MODEL_CONFIG`),
   ];
-  for (const prefix of codexPrefixes) {
+  for (const prefix of chatPrefixes) {
     assert.match(profile, new RegExp(`^${prefix}__TRANSPORT=openai$`, "m"));
-    assert.match(profile, new RegExp(`^${prefix}__MODEL=gpt-5\\.6-sol$`, "m"));
-    assert.match(profile, new RegExp(`^${prefix}__THINKING_EFFORT=high$`, "m"));
-    assert.match(profile, new RegExp(`^${prefix}__OVERRIDES__BASE_URL=http://host\\.docker\\.internal:9999/v1$`, "m"));
+    assert.match(profile, new RegExp(`^${prefix}__MODEL=gpt-6-luna$`, "m"));
+    assert.match(profile, new RegExp(`^${prefix}__THINKING_EFFORT=low$`, "m"));
+    assert.match(profile, new RegExp(`^${prefix}__OVERRIDES__BASE_URL=http://host\\.docker\\.internal:11400/v1$`, "m"));
     assert.match(profile, new RegExp(`^${prefix}__OVERRIDES__API_KEY_ENV=LLM_VLLM_API_KEY$`, "m"));
   }
   assert.match(profile, /^DIALECTIC_LEVELS__minimal__MAX_TOOL_ITERATIONS=7$/m);
@@ -151,22 +152,23 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.equal(profile.includes("THINKING_BUDGET_TOKENS"), false);
   assert.equal(profile.includes("__FALLBACK__"), false);
   assert.equal(profile.includes("localhost:999"), false);
+  assert.equal(profile.includes(":9999"), false, "the source environment's own endpoint is not copied");
+  assert.equal(profile.includes("11435"), false);
   assert.equal(profile.includes("private-value"), false);
   assert.equal(profile.includes("CONFIDENTIAL_"), false);
   assert.match(profile, /^TRUSTED_HOSTS=\["localhost","127\.0\.0\.1","api"\]$/m);
-  const hostProfile = JSON.parse(await fsp.readFile(path.join(bundle, "server", "host-profile.personal.json"), "utf8"));
-  assert.equal(hostProfile.codexProxy.enabled, false);
-  // The proxies ship separately, so the bundle records all three as off and leaves
-  // the source location blank instead of guessing a path from the build machine.
-  assert.equal(hostProfile.llmProxyRoot, "");
-  assert.equal(hostProfile.claudeProxy.enabled, false);
-  assert.equal(hostProfile.claudeProxy.port, 11446);
-  assert.equal(hostProfile.router.enabled, false);
-  assert.equal(hostProfile.router.port, 11400);
+  const hostProfileText = await fsp.readFile(path.join(bundle, "server", "host-profile.personal.json"), "utf8");
+  const hostProfile = JSON.parse(hostProfileText);
+  // The gateway ships from its own repository; the bundle records only where it is
+  // expected to answer, and the pin that says where to fetch it.
+  assert.deepEqual(hostProfile.gateway, { uiUrl: "http://127.0.0.1:11450", routerUrl: "http://127.0.0.1:11400/v1" });
+  for (const gone of ["codexProxy", "claudeProxy", "router", "llmProxyRoot"]) assert.equal(gone in hostProfile, false, gone);
+  assert.equal(hostProfileText.includes("11435"), false);
+  const gatewayPin = JSON.parse(await fsp.readFile(path.join(bundle, "server", "gateway-source.json"), "utf8"));
+  assert.equal(gatewayPin.repo, "https://github.com/team-memory-system/subscription-gateway");
   for (const name of ["codex-openai-proxy", "claude-print-proxy"]) {
     await assert.rejects(fsp.access(path.join(bundle, "server", "honcho", name)));
   }
-  assert.equal(hostProfile.codexProxy.defaultModel, "gpt-5.6-sol");
   assert.equal(hostProfile.ollama.enabled, true);
   assert.equal(hostProfile.ollama.model, "qwen3-embedding-honcho-8192");
   assert.equal(hostProfile.ollama.dimensions, 1536);
@@ -178,7 +180,7 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.equal(typeof manifest.honchoAgentBridge.dirty, "boolean");
   assert.equal(manifest.honcho.upstreamVersion, "v3.0.11");
   assert.equal(manifest.honcho.dirty, true);
-  assert.equal(manifest.hostServices.codexProxy.enabled, false);
+  assert.equal(manifest.hostServices.gateway.routerUrl, "http://127.0.0.1:11400/v1");
 
   const rerun = await execFileAsync(process.execPath, [
     BUILDER,

@@ -4,14 +4,17 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  CHAT_MODEL_PREFIXES,
+  CHAT_THINKING_EFFORT,
+  DEFAULT_GATEWAY_ROUTER_URL,
+  DEFAULT_GATEWAY_UI_URL,
+  dockerRouterUrl,
+  PREFERRED_CHAT_MODELS,
+} from "./gateway.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PERSONAL_MODEL_PREFIXES = [
-  "DERIVER_MODEL_CONFIG",
-  "SUMMARY_MODEL_CONFIG",
-  "DREAM_DEDUCTION_MODEL_CONFIG",
-  "DREAM_INDUCTION_MODEL_CONFIG",
-  ...["minimal", "low", "medium", "high", "max"].map((level) => `DIALECTIC_LEVELS__${level}__MODEL_CONFIG`),
-];
+const PERSONAL_MODEL_PREFIXES = CHAT_MODEL_PREFIXES;
 const PERSONAL_MODEL_SUFFIXES = new Set([
   "TRANSPORT",
   "MODEL",
@@ -303,23 +306,17 @@ function replaceEnvironmentValues(text, values) {
 
 export function personalEnvironment(text) {
   const sanitized = withoutConflictingPersonalModelSettings(sanitizedEnvironment(text));
-  const source = parseEnvironment(text);
-  // Follow whatever the owner's own environment points at instead of assuming the
-  // Codex proxy: a personal install may route completions through the llm-proxy
-  // router rather than one adapter. The proxies themselves are released separately,
-  // so the bundle records the endpoint and the host profile records where the source
-  // has to be found.
-  const proxyBaseUrl = dockerHostEndpoint(
-    source.DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL || source.LLM_VLLM_BASE_URL,
-    "http://host.docker.internal:11435/v1",
-  );
+  // Every chat model goes through the subscription gateway's router. These are its
+  // defaults; `server prepare` writes the address, the key and the model the
+  // installed gateway reports over them, so the owner's own endpoints are not copied.
+  const routerUrl = dockerRouterUrl(DEFAULT_GATEWAY_ROUTER_URL);
   const embeddingBaseUrl = "http://host.docker.internal:11434/v1";
   const values = {
     LLM_OPENAI_API_KEY: "",
     LLM_OPENAI_COMPATIBLE_API_KEY: "",
     LLM_VLLM_API_KEY: "",
     EMBED_MESSAGES: "true",
-    LLM_VLLM_BASE_URL: proxyBaseUrl,
+    LLM_VLLM_BASE_URL: routerUrl,
     LLM_OPENAI_COMPATIBLE_BASE_URL: embeddingBaseUrl,
     EMBEDDING_MAX_INPUT_TOKENS: "8192",
     EMBEDDING_MAX_TOKENS_PER_REQUEST: "8192",
@@ -338,9 +335,9 @@ export function personalEnvironment(text) {
   };
   for (const prefix of PERSONAL_MODEL_PREFIXES) {
     values[`${prefix}__TRANSPORT`] = "openai";
-    values[`${prefix}__MODEL`] = "gpt-5.6-sol";
-    values[`${prefix}__THINKING_EFFORT`] = "high";
-    values[`${prefix}__OVERRIDES__BASE_URL`] = proxyBaseUrl;
+    values[`${prefix}__MODEL`] = PREFERRED_CHAT_MODELS[0];
+    values[`${prefix}__THINKING_EFFORT`] = CHAT_THINKING_EFFORT;
+    values[`${prefix}__OVERRIDES__BASE_URL`] = routerUrl;
     values[`${prefix}__OVERRIDES__API_KEY_ENV`] = "LLM_VLLM_API_KEY";
   }
   return replaceEnvironmentValues(sanitized, values);
@@ -353,57 +350,22 @@ function parseEnvironment(text) {
   }));
 }
 
-function portFromUrl(value, fallback) {
-  try { return Number(new URL(value).port || fallback); } catch { return fallback; }
-}
-
-/** A loopback endpoint as the API container has to address it. */
-function dockerHostEndpoint(value, fallback) {
-  const raw = String(value || "").trim();
-  if (!raw) return fallback;
-  try {
-    const url = new URL(raw);
-    if (!["127.0.0.1", "localhost", "::1", "host.docker.internal"].includes(url.hostname)) return fallback;
-    url.hostname = "host.docker.internal";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return fallback;
-  }
-}
-
 function personalHostProfile(text) {
   const env = parseEnvironment(text);
   const embeddingUrl = env.EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL
     || env.LLM_OPENAI_COMPATIBLE_BASE_URL
     || "";
-  const proxyUrl = env.DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL
-    || env.LLM_VLLM_BASE_URL
-    || "";
   const embeddingModel = env.EMBEDDING_MODEL_CONFIG__MODEL || "";
-  const codexModel = env.DERIVER_MODEL_CONFIG__MODEL || "gpt-5.6-sol";
   const ollamaEnabled = /(?:host\.docker\.internal|127\.0\.0\.1|localhost):11434(?:\/|$)/.test(embeddingUrl);
   return {
     format: 1,
     profile: "personal",
-    // The proxies live in their own repository and are installed separately. Until
-    // this points at that checkout, no proxy can be enabled — which is better than
-    // guessing a path that only existed on the machine the bundle was built on.
-    llmProxyRoot: "",
-    codexProxy: {
-      enabled: false,
-      baseUrl: proxyUrl.replace("host.docker.internal", "127.0.0.1").replace(/\/v1\/?$/, ""),
-      defaultModel: codexModel,
-      port: portFromUrl(proxyUrl, 11435),
-    },
-    claudeProxy: {
-      enabled: false,
-      baseUrl: "http://127.0.0.1:11446",
-      port: 11446,
-    },
-    router: {
-      enabled: false,
-      baseUrl: "http://127.0.0.1:11400",
-      port: 11400,
+    // The gateway is its own program: `server prepare` fetches it from
+    // gateway-source.json and runs its install. These are only where it is expected
+    // to answer; it reports its real addresses itself.
+    gateway: {
+      uiUrl: DEFAULT_GATEWAY_UI_URL,
+      routerUrl: DEFAULT_GATEWAY_ROUTER_URL,
     },
     ollama: {
       enabled: ollamaEnabled,
@@ -448,7 +410,8 @@ export async function buildDistribution(args, {
     await copyTree(ROOT, candidateBundle);
     await fsp.mkdir(path.join(candidateBundle, "server", "honcho"), { recursive: true });
     await copyTree(honchoSource, path.join(candidateBundle, "server", "honcho"));
-    // Older source checkouts may still contain proxies. They are independently released.
+    // Older source checkouts may still contain the proxies. They now ship with the
+    // subscription gateway.
     for (const name of ["codex-openai-proxy", "claude-print-proxy"]) {
       await fsp.rm(path.join(candidateBundle, "server", "honcho", name), { recursive: true, force: true });
     }

@@ -269,6 +269,34 @@ test("gateway CLI answers are read from its own JSON, and failures from its own 
   assert.match(missing.error, /not installed/);
 });
 
+test("the default runner reads a real CLI process: its JSON, its exit status, and nothing from stderr", async (t) => {
+  const directory = await installedGateway(t);
+  await fsp.writeFile(path.join(directory, "gateway", "cli.mjs"), `
+const key = ${JSON.stringify(ROUTER_KEY)};
+const subcommand = process.argv[2];
+if (subcommand === "install") {
+  console.log(JSON.stringify({ ok: true, autostart: "launchd", uiUrl: "http://127.0.0.1:11450", routerUrl: "http://127.0.0.1:11400/v1" }));
+} else if (subcommand === "connect-info") {
+  console.error("debug: loaded " + key);
+  process.stdout.write(JSON.stringify({ ok: true, ready: true, baseUrl: "http://127.0.0.1:11400/v1", apiKey: key, models: ["gpt-6-luna"] }, null, 2));
+} else {
+  console.error("stderr mentions " + key);
+  console.log(JSON.stringify({ ok: false, error: "unknown subcommand: " + subcommand }));
+  process.exit(2);
+}
+`);
+  const installed = await gatewayInstall({ directory });
+  assert.deepEqual(installed, { ok: true, autostart: "launchd", uiUrl: "http://127.0.0.1:11450", routerUrl: "http://127.0.0.1:11400/v1" });
+
+  const info = await gatewayConnectInfo({ directory });
+  assert.equal(info.ready, true);
+  assert.equal(info.apiKey, ROUTER_KEY);
+  assert.equal(JSON.stringify(info).includes(ROUTER_KEY), false);
+
+  const failed = await gatewayOpen({ directory });
+  assert.deepEqual(failed, { ok: false, error: "unknown subcommand: open" });
+});
+
 test("the chat model is the first preferred one offered, else the first listed, and --model must be offered", () => {
   assert.deepEqual(PREFERRED_CHAT_MODELS, ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5", "claude-haiku-4-5", "claude-sonnet-5-5"]);
   assert.equal(chooseChatModel(["claude-sonnet-5-5", "gpt-5.5", "gpt-6-luna"]).model, "gpt-6-luna");

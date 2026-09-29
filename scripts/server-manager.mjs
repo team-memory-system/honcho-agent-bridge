@@ -7,6 +7,19 @@ import { promisify } from "node:util";
 
 import { installPaths } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
+import {
+  chooseChatModel,
+  DEFAULT_GATEWAY_ROUTER_URL,
+  DEFAULT_GATEWAY_UI_URL,
+  ensureGatewaySource,
+  gatewayConnectInfo,
+  gatewayDirectory,
+  gatewayEnvironment,
+  gatewayLoginAction,
+  gatewaySourceProbe,
+  loopbackUrl,
+  prepareGateway,
+} from "./gateway.mjs";
 import { hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 import { cloneSource, gitAvailable, readSourcePin } from "./source-pin.mjs";
@@ -63,22 +76,23 @@ function containerHostHealthUrl(value, healthPath) {
 
 /**
  * What this install actually expects to reach from inside the API container. An
- * endpoint the environment never configured is not a failure: requiring the Codex
- * proxy unconditionally is what made `server verify` impossible to pass on an
- * install that routes completions elsewhere, or has no proxy at all.
+ * endpoint the environment never configured is not a failure: requiring one
+ * unconditionally is what once made `server verify` impossible to pass on an
+ * install that had none.
  */
 function containerHostTargets(environment) {
   const ollama = containerHostHealthUrl(
     environment.EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL || environment.LLM_OPENAI_COMPATIBLE_BASE_URL,
     "/api/version",
   );
-  const proxy = containerHostHealthUrl(
+  // The gateway's router answers /health without a key.
+  const router = containerHostHealthUrl(
     environment.DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL || environment.LLM_VLLM_BASE_URL,
     "/health",
   );
   const targets = {};
   if (ollama) targets.ollama = ollama;
-  if (proxy) targets.proxy = proxy;
+  if (router) targets.router = router;
   return targets;
 }
 
@@ -229,12 +243,6 @@ async function readEnvironmentFile(target) {
   catch { return {}; }
 }
 
-async function managesCodexProxy() {
-  const hostProfilePath = path.join(installedServerDir(), "host-profile.personal.json");
-  try { return JSON.parse(await fsp.readFile(hostProfilePath, "utf8")).codexProxy?.enabled === true; }
-  catch { return false; }
-}
-
 function localEndpointConfigured(environment, port) {
   return Object.entries(environment).some(([key, value]) =>
     /(?:BASE_URL|ENDPOINT)$/.test(key)
@@ -274,11 +282,13 @@ function mergePersonalProfileEnvironment(currentText, profileText) {
   return replaceEnvironment(withoutConflictingModelKeys, values);
 }
 
-async function initializeEnvironment(directory, profile = "portable", privateFileOptions = {}) {
+/**
+ * Create or update the private .env. `overrides` are applied last, over the profile
+ * template and anything already there: for the personal profile they are the
+ * gateway's router address, its key and the chosen chat model.
+ */
+async function initializeEnvironment(directory, profile = "portable", privateFileOptions = {}, overrides = {}) {
   const target = path.join(directory, ".env");
-  const hostProfilePath = path.join(directory, "host-profile.personal.json");
-  const managesProxy = profile === "personal" && await exists(hostProfilePath)
-    && JSON.parse(await fsp.readFile(hostProfilePath, "utf8")).codexProxy?.enabled === true;
   const candidate = profile === "personal" ? path.join(directory, "env.personal.example") : path.join(directory, ".env.example");
   if (await exists(target)) {
     const original = await fsp.readFile(target, "utf8");
@@ -294,14 +304,12 @@ async function initializeEnvironment(directory, profile = "portable", privateFil
       if (localEndpointConfigured(templateEnvironment, 11434) && !String(currentEnvironment.LLM_OPENAI_COMPATIBLE_API_KEY || "").trim()) {
         generatedValues.LLM_OPENAI_COMPATIBLE_API_KEY = "ollama-local";
       }
-      if (managesProxy && localEndpointConfigured(templateEnvironment, 11435) && !String(currentEnvironment.LLM_VLLM_API_KEY || "").trim()) {
-        generatedValues.LLM_VLLM_API_KEY = crypto.randomBytes(32).toString("base64url");
-      }
     }
     const current = replaceEnvironment(original, generatedValues);
-    const merged = profile === "personal" && candidateExists
+    const profiled = profile === "personal" && candidateExists
       ? mergePersonalProfileEnvironment(current, profileText)
       : current;
+    const merged = Object.keys(overrides).length ? replaceEnvironment(profiled, overrides) : profiled;
     const updated = merged !== original;
     if (updated) {
       const temporary = `${target}.tmp-${process.pid}`;
@@ -325,13 +333,10 @@ async function initializeEnvironment(directory, profile = "portable", privateFil
   if (profile === "personal" && localEndpointConfigured(templateEnvironment, 11434)) {
     values.LLM_OPENAI_COMPATIBLE_API_KEY = templateEnvironment.LLM_OPENAI_COMPATIBLE_API_KEY || "ollama-local";
   }
-  if (managesProxy && localEndpointConfigured(templateEnvironment, 11435)) {
-    values.LLM_VLLM_API_KEY = templateEnvironment.LLM_VLLM_API_KEY || crypto.randomBytes(32).toString("base64url");
-  }
   for (const [key, value] of Object.entries(process.env)) {
     if (/^LLM_[A-Z0-9_]*API_KEY$/.test(key) && value) values[key] = value;
   }
-  text = replaceEnvironment(text, values);
+  text = replaceEnvironment(text, { ...values, ...overrides });
   const temporary = `${target}.tmp-${process.pid}`;
   await fsp.writeFile(temporary, text, { mode: 0o600 });
   try {
@@ -344,12 +349,61 @@ async function initializeEnvironment(directory, profile = "portable", privateFil
   return { created: true, path: target, profile };
 }
 
+/** Where the bundled host profile expects the gateway to answer. */
+async function gatewayAddresses(bundleDirectory) {
+  let profile = null;
+  try { profile = JSON.parse(await fsp.readFile(path.join(bundleDirectory, "host-profile.personal.json"), "utf8")); }
+  catch {}
+  return {
+    uiUrl: loopbackUrl(profile?.gateway?.uiUrl, { keepPath: true }) || DEFAULT_GATEWAY_UI_URL,
+    routerUrl: loopbackUrl(profile?.gateway?.routerUrl, { keepPath: true }) || DEFAULT_GATEWAY_ROUTER_URL,
+  };
+}
+
+/** What `server prepare --profile personal` is going to do, in order. */
+function personalOperations({ honchoSource, gateway, bundle, installDirectory }) {
+  const operations = [];
+  if (!honchoSource.present && honchoSource.fetchable) {
+    operations.push({ type: "fetch-honcho-source", repo: honchoSource.pin.repo, ref: honchoSource.pin.commit || honchoSource.pin.ref });
+  }
+  if (gateway.source.fetchable) {
+    operations.push({
+      type: gateway.source.state === "stale" ? "update-gateway-source" : "fetch-gateway-source",
+      repo: gateway.source.pin.repo,
+      ref: gateway.source.pin.commit || gateway.source.pin.ref,
+      directory: gateway.directory,
+    });
+  }
+  operations.push(
+    {
+      type: "gateway-install",
+      directory: gateway.directory,
+      uiUrl: gateway.uiUrl,
+      note: "the gateway's own install: its npm dependencies, its own per-user autostart, and its screen",
+    },
+    {
+      type: "gateway-connect",
+      uiUrl: gateway.uiUrl,
+      note: "asks the gateway for its router and key; stops here until a Codex or Claude login is connected in the gateway screen",
+    },
+    {
+      type: "write-environment",
+      target: path.join(installDirectory, ".env"),
+      note: "the router address, its key and the chosen chat model for every chat setting; embeddings stay on Ollama",
+    },
+    { type: "install-bundle", source: bundle.directory, destination: installDirectory },
+    { type: "prepare-ollama", note: "qwen3-embedding:8b and its 8192-token alias" },
+  );
+  return operations;
+}
+
 export async function serverPlan({
   profile = "portable",
   platform = process.platform,
   dockerInspector = dockerProbe,
   bundleInspector = bundleProbe,
   honchoSourceInspector = honchoSourceProbe,
+  gatewaySourceInspector = null,
 } = {}) {
   requireServerProfile(profile);
   const [docker, bundle, honchoSource] = await Promise.all([dockerInspector(), bundleInspector(), honchoSourceInspector()]);
@@ -370,6 +424,8 @@ export async function serverPlan({
   }
   const profilePath = profile === "personal" ? "env.personal.example" : ".env.example";
   if (!(await exists(path.join(bundle.directory, profilePath)))) issues.push(`The ${profile} environment profile is not included`);
+  const installDirectory = installedServerDir();
+  let gateway = null;
   if (profile === "personal") {
     if (platform === "linux") {
       issues.push("The personal host profile currently requires macOS or Windows; use the portable profile on native Linux");
@@ -378,23 +434,28 @@ export async function serverPlan({
     const missingHostAssets = [];
     for (const asset of hostAssets) if (!(await exists(path.join(bundle.directory, asset)))) missingHostAssets.push(asset);
     if (missingHostAssets.length) issues.push(`The personal host runtime is incomplete: ${missingHostAssets.join(", ")}`);
+
+    // Every chat model goes through the subscription gateway. Prepare fetches and
+    // installs it and then asks it for the router key, so nothing here needs a key.
+    const directory = gatewayDirectory(installDirectory);
+    const source = await (gatewaySourceInspector
+      ? gatewaySourceInspector()
+      : gatewaySourceProbe({ pinDirectory: bundle.directory, directory }));
+    if (source.state === "missing" && !source.fetchable) {
+      issues.push(`The subscription gateway cannot be installed: ${source.reason}`);
+    } else if (source.state === "stale" && !source.fetchable) {
+      issues.push(`The subscription gateway source cannot be updated: ${source.reason}`);
+    } else if (source.fetchable) {
+      const verb = source.state === "stale" ? "replaced from" : "downloaded from";
+      warnings.push(`Subscription gateway source will be ${verb} ${source.pin.repo} (${source.pin.commit || source.pin.ref}) into ${directory}`);
+    }
+    if (source.state === "external") {
+      warnings.push(`${directory} was not fetched by this installer; it is used as it is and never replaced`);
+    }
+    gateway = { directory, source, ...(await gatewayAddresses(bundle.directory)) };
   }
   if (profile === "portable" && !process.env.LLM_OPENAI_API_KEY && !(await exists(path.join(bundle.directory, ".env")))) {
     warnings.push("No OpenAI key was supplied; add the required LLM key to server/.env before memory processing");
-  }
-  if (profile === "personal") {
-    // A key is only invented for a proxy this install manages. When the proxy is
-    // run elsewhere the key has to match that proxy's, so it can only be copied in
-    // by hand — and saying nothing left Honcho calling the proxy with no key at all.
-    const installedEnvironment = await readEnvironmentFile(path.join(installedServerDir(), ".env"));
-    const templatePath = path.join(bundle.directory, profilePath);
-    const template = await readEnvironmentFile(templatePath);
-    const managed = await managesCodexProxy();
-    const wantsProxy = localEndpointConfigured(template, 11435) || localEndpointConfigured(installedEnvironment, 11435);
-    const hasSecret = Boolean(String(installedEnvironment.LLM_VLLM_API_KEY || "").trim());
-    if (wantsProxy && !managed && !hasSecret) {
-      warnings.push("Honcho is configured to reach a proxy this install does not manage; copy that proxy's shared secret into LLM_VLLM_API_KEY in server/.env");
-    }
   }
   return {
     ok: issues.length === 0,
@@ -403,8 +464,9 @@ export async function serverPlan({
     profile,
     docker,
     bundle,
-    installDirectory: installedServerDir(),
+    installDirectory,
     honchoSource,
+    ...(gateway ? { gateway, operations: personalOperations({ honchoSource, gateway, bundle, installDirectory }) } : {}),
     apiUrl: "http://127.0.0.1:8001",
     dashboardUrl: "http://127.0.0.1:4173",
     issues,
@@ -711,7 +773,8 @@ async function recoverPersonalUpdate({
       issues.push("host recovery was skipped because the prior server bundle was not restored safely");
     } else {
       try {
-        hostPreparation = await hostRuntime.prepare({ profile, installedServerDir: installed });
+        // The gateway is not part of the bundle and the update never touched it.
+        hostPreparation = await hostRuntime.prepare({ profile, installedServerDir: installed, skipGateway: true });
         if (!hostPreparation?.ok || !hostPreparation?.ready) {
           const detail = hostPreparation?.issues?.join("; ") || "the restored host runtime was not ready";
           issues.push(`host re-prepare: ${detail}`);
@@ -743,6 +806,73 @@ async function recoverPersonalUpdate({
   };
 }
 
+/**
+ * Install the gateway and ask it how Honcho reaches its router. The result is either
+ * the values the new bundle's .env needs, or a result to stop with. A gateway with
+ * no login yet is not a failure: logging in is the user's next step.
+ *
+ * `values` carries the router key; it goes to initializeEnvironment and nowhere else.
+ */
+async function connectGateway({ plan, installed, model, sourceFetcher, runner, env }) {
+  const directory = gatewayDirectory(installed);
+  const stopped = { ok: false, ready: false, mode: "local-docker", profile: "personal" };
+  const prepared = await prepareGateway({ pinDirectory: plan.bundle.directory, directory, sourceFetcher, runner, env });
+  const report = {
+    directory,
+    ...(prepared.source ? { source: prepared.source } : {}),
+    ...(prepared.autostart ? { autostart: prepared.autostart } : {}),
+    uiUrl: prepared.uiUrl || plan.gateway?.uiUrl || DEFAULT_GATEWAY_UI_URL,
+  };
+  if (!prepared.ok) {
+    return {
+      stop: { ...stopped, gateway: report, issues: [prepared.error], next: "Resolve the gateway problem above, then run server prepare again" },
+    };
+  }
+  const connection = await gatewayConnectInfo({ directory, runner, env });
+  if (!connection.ok) {
+    return {
+      stop: {
+        ...stopped,
+        gateway: report,
+        issues: [`The subscription gateway did not say how to reach its router: ${connection.error}`],
+        next: "Check the gateway screen, then run server prepare again",
+      },
+    };
+  }
+  report.models = connection.models;
+  if (!connection.ready) {
+    const nextAction = gatewayLoginAction(report.uiUrl, "run server prepare --profile personal again");
+    return {
+      stop: { ...stopped, ok: true, gateway: { ...report, reason: connection.reason }, nextAction, next: nextAction.message },
+    };
+  }
+  const choice = chooseChatModel(connection.models, model);
+  if (!choice.ok) {
+    return {
+      stop: {
+        ...stopped,
+        gateway: report,
+        issues: [choice.error],
+        next: model
+          ? "Choose one of the models the gateway offers with --model, or leave --model out"
+          : "Log in to an account in the gateway screen that offers a chat model, then run server prepare again",
+      },
+    };
+  }
+  const previous = await readEnvironmentFile(path.join(installed, ".env"));
+  return {
+    values: gatewayEnvironment({ routerUrl: connection.baseUrl, apiKey: connection.apiKey, model: choice.model }),
+    model: choice.model,
+    report: {
+      ...report,
+      routerUrl: connection.baseUrl,
+      chatModel: choice.model,
+      modelChoice: choice.source,
+      routerKeyUpdated: previous.LLM_VLLM_API_KEY !== connection.apiKey,
+    },
+  };
+}
+
 async function serverPrepareUnlocked({
   profile = "portable",
   hostRuntime = DEFAULT_HOST_RUNTIME,
@@ -753,6 +883,9 @@ async function serverPrepareUnlocked({
   privateFileRunner,
   fileSystem,
   honchoSourceFetcher = ensureHonchoSource,
+  gatewaySourceFetcher = ensureGatewaySource,
+  gatewayRunner,
+  model = "",
 } = {}) {
   requireServerProfile(profile);
   // The download happens here and never in `server plan`, which must not mutate.
@@ -811,12 +944,25 @@ async function serverPrepareUnlocked({
     };
   }
 
+  // The gateway comes first: the new bundle's .env needs the router key only the
+  // installed gateway can give, and a gateway with no login yet stops prepare before
+  // anything installed is touched.
+  const gateway = await connectGateway({
+    plan,
+    installed,
+    model,
+    sourceFetcher: gatewaySourceFetcher,
+    runner: gatewayRunner,
+    env,
+  });
+  if (gateway.stop) return gateway.stop;
+
   const hadInstalledBundle = await exists(installed);
   const candidate = await prepareBundleCandidate(plan.bundle.directory, installed, privateFileOptions);
   let candidateEnvironment;
   let missingSecretFields;
   try {
-    candidateEnvironment = await initializeEnvironment(candidate.path, profile, privateFileOptions);
+    candidateEnvironment = await initializeEnvironment(candidate.path, profile, privateFileOptions, gateway.values);
     missingSecretFields = await missingLlmSecrets(candidateEnvironment.path);
   } catch (error) {
     const cleanup = await removeTransactionArtifact(candidate.fileSystem, candidate.path, "candidate bundle");
@@ -834,6 +980,7 @@ async function serverPrepareUnlocked({
       installation: { changed: false, source: plan.bundle.directory, destination: installed, candidateRejected: true },
       environment: { ...environment, installed: hadInstalledBundle, candidateInstalled: false },
       missingSecretFields,
+      gateway: gateway.report,
       cleanup,
       ...(cleanup.issues.length ? { issues: cleanup.issues, retainedPaths: cleanup.retainedPaths } : {}),
       hostStoppedForUpdate: false,
@@ -921,7 +1068,7 @@ async function serverPrepareUnlocked({
 
   let host;
   try {
-    host = await hostRuntime.prepare({ profile, installedServerDir: installed });
+    host = await hostRuntime.prepare({ profile, installedServerDir: installed, skipGateway: true });
   } catch (error) {
     const recovery = await recoverPersonalUpdate({
       transaction,
@@ -950,6 +1097,7 @@ async function serverPrepareUnlocked({
       installation: { changed: false, source: plan.bundle.directory, destination: installed, rolledBack: true },
       environment: { ...environment, installed: hadInstalledBundle, candidateInstalled: false },
       missingSecretFields,
+      gateway: gateway.report,
       host,
       rollback: recovery,
       ...(recovery.retainedPaths.length ? { retainedPaths: recovery.retainedPaths } : {}),
@@ -980,6 +1128,8 @@ async function serverPrepareUnlocked({
     },
     environment,
     missingSecretFields,
+    chatModel: gateway.model,
+    gateway: gateway.report,
     ...(committed.issues.length ? { issues: committed.issues, retainedPaths: committed.retainedPaths } : {}),
     next: committed.ok
       ? "Run server start"
@@ -1024,14 +1174,24 @@ async function serverStartUnlocked({
   serverDirectory = null,
   composeRunner = compose,
   healthWaiter = waitForHealth,
+  honchoSourceFetcher,
+  gatewaySourceFetcher,
+  gatewayRunner,
+  model,
 } = {}) {
   requireServerProfile(profile);
   const installed = path.resolve(serverDirectory || installedServerDir());
+  // Start prepares again, so the chat model is chosen again: an explicit --model has
+  // to come along.
   const prepared = preparedServer || await serverPrepareUnlocked({
     profile,
     hostRuntime,
     preparedPlan,
     serverDirectory: installed,
+    honchoSourceFetcher,
+    gatewaySourceFetcher,
+    gatewayRunner,
+    model,
   });
   if (!prepared.ok || !prepared.ready) return prepared;
   const host = profile === "personal"
@@ -1198,7 +1358,8 @@ function statusSummary(status) {
     },
     host: {
       running: Boolean(status.host?.running),
-      proxyHealthy: Boolean(status.host?.proxy?.healthy),
+      routerHealthy: Boolean(status.host?.gateway?.router?.ok),
+      gatewayLoggedIn: Boolean(status.host?.gateway?.loggedIn),
       ollamaHealthy: Boolean(status.host?.ollama?.healthy),
       embeddingResident: Boolean(status.host?.ollama?.resident),
     },
@@ -1270,7 +1431,7 @@ async function verifyContainerHostAccess({ directory, composeRunner }) {
   const targets = containerHostTargets(environment);
   const skipped = { ok: true, status: null, skipped: true };
   if (!Object.keys(targets).length) {
-    return { ok: true, ollama: skipped, proxy: skipped, skipped: true };
+    return { ok: true, ollama: skipped, router: skipped, skipped: true };
   }
   let result;
   try {
@@ -1286,7 +1447,7 @@ async function verifyContainerHostAccess({ directory, composeRunner }) {
     return {
       ok: false,
       ollama: targets.ollama ? { ok: false, status: null } : skipped,
-      proxy: targets.proxy ? { ok: false, status: null } : skipped,
+      router: targets.router ? { ok: false, status: null } : skipped,
       error: "Docker API-container host connectivity probe failed",
     };
   }
@@ -1303,11 +1464,11 @@ async function verifyContainerHostAccess({ directory, composeRunner }) {
     };
   };
   const ollama = reading("ollama");
-  const proxy = reading("proxy");
+  const router = reading("router");
   return {
-    ok: ollama.ok && proxy.ok,
+    ok: ollama.ok && router.ok,
     ollama,
-    proxy,
+    router,
     ...(!document ? { error: "Docker API-container host connectivity probe returned no valid result" } : {}),
   };
 }
@@ -1326,20 +1487,41 @@ async function verifyHonchoHealth({ fetchImpl, timeoutMs }) {
   }
 }
 
-async function verifyLiveCompletion({ directory, fetchImpl, model, port, timeoutMs }) {
+/**
+ * The router Honcho is configured to call, as this machine reaches it. Only a local
+ * address is accepted and only its port and path are kept, so the key read below is
+ * never sent anywhere but this machine.
+ */
+function localRouterUrl(value) {
+  let url;
+  try { url = new URL(String(value || "").trim()); } catch { return ""; }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) return "";
+  if (!["127.0.0.1", "localhost", "::1", "[::1]", "host.docker.internal"].includes(url.hostname)) return "";
+  return `http://127.0.0.1:${url.port || (url.protocol === "https:" ? 443 : 80)}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+/**
+ * One real completion exactly as the deriver would make it: the installed router
+ * address, key, model and effort. The key is read here, in process, and the
+ * response body is discarded unread.
+ */
+async function verifyLiveCompletion({ directory, fetchImpl, timeoutMs }) {
   let environment;
   try { environment = parseEnvironment(await fsp.readFile(path.join(directory, ".env"), "utf8")); }
   catch {
-    return { ok: false, model };
+    return { ok: false, model: null, error: "The installed server environment could not be read" };
   }
+  const model = String(environment.DERIVER_MODEL_CONFIG__MODEL || "").trim() || null;
+  const routerUrl = localRouterUrl(environment.DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL || environment.LLM_VLLM_BASE_URL);
   const secretName = String(environment.DERIVER_MODEL_CONFIG__OVERRIDES__API_KEY_ENV || "LLM_VLLM_API_KEY").trim();
   const secret = String(environment[secretName] || "").trim();
-  if (!secret) {
-    return { ok: false, model };
+  const effort = String(environment.DERIVER_MODEL_CONFIG__THINKING_EFFORT || "low").trim();
+  if (!model || !routerUrl || !secret) {
+    return { ok: false, model, error: "The installed environment names no local router, key and model to call" };
   }
   let response;
   try {
-    response = await fetchWithTimeout(fetchImpl, `http://127.0.0.1:${port}/v1/chat/completions`, {
+    response = await fetchWithTimeout(fetchImpl, `${routerUrl}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1350,21 +1532,22 @@ async function verifyLiveCompletion({ directory, fetchImpl, model, port, timeout
         model,
         messages: [{ role: "user", content: "Reply OK" }],
         max_completion_tokens: 32,
-        reasoning_effort: "high",
+        reasoning_effort: effort,
         stream: false,
       }),
     }, timeoutMs);
   } catch {
     return { ok: false, model };
   }
-  const result = { ok: Boolean(response.ok), model };
+  const result = response.ok ? { ok: true, model } : { ok: false, model, status: response.status ?? null };
   await discardBody(response);
   return result;
 }
 
 /**
  * Exercise the production-shaped personal topology without returning response
- * bodies, vectors, prompts, or credentials. A live Codex request is opt-in.
+ * bodies, vectors, prompts, or credentials. A live completion through the
+ * gateway's router is opt-in.
  */
 export async function serverVerify({
   profile = "personal",
@@ -1390,16 +1573,13 @@ export async function serverVerify({
   try { rawStatus = await statusInspector({ profile, serverDirectory: directory }); } catch {}
   const status = statusSummary(rawStatus);
   const embeddingModel = rawStatus?.host?.ollama?.model || "qwen3-embedding-honcho-8192";
-  const completionModel = rawStatus?.host?.proxy?.model || "gpt-5.6-sol";
-  const proxyPort = Number(rawStatus?.host?.proxy?.port || 11435);
-  const safeProxyPort = Number.isInteger(proxyPort) && proxyPort > 0 && proxyPort <= 65_535 ? proxyPort : 11435;
 
   const [embedding, containerHost, honcho, completion] = await Promise.all([
     verifyOllamaEmbedding({ fetchImpl, model: embeddingModel, timeoutMs: requestTimeoutMs }),
     verifyContainerHostAccess({ directory, composeRunner }),
     verifyHonchoHealth({ fetchImpl, timeoutMs: Math.min(requestTimeoutMs, 30_000) }),
     liveCompletion
-      ? verifyLiveCompletion({ directory, fetchImpl, model: completionModel, port: safeProxyPort, timeoutMs: requestTimeoutMs })
+      ? verifyLiveCompletion({ directory, fetchImpl, timeoutMs: requestTimeoutMs })
       : Promise.resolve({ ok: true, skipped: true }),
   ]);
 

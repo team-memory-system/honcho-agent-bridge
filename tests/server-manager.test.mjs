@@ -22,6 +22,59 @@ import {
 // Honcho source is given its own runner or a stub.
 const noFetch = async () => ({ ok: true, fetched: false, directory: "(stubbed)" });
 
+const ROUTER_KEY = "0123456789abcdef".repeat(4);
+const CHAT_PREFIXES = [
+  "DERIVER_MODEL_CONFIG",
+  "SUMMARY_MODEL_CONFIG",
+  "DREAM_DEDUCTION_MODEL_CONFIG",
+  "DREAM_INDUCTION_MODEL_CONFIG",
+  ...["minimal", "low", "medium", "high", "max"].map((level) => `DIALECTIC_LEVELS__${level}__MODEL_CONFIG`),
+];
+
+function parseEnv(text) {
+  return Object.fromEntries(text.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    return match ? [[match[1], match[2]]] : [];
+  }));
+}
+
+// The gateway is a separate program with its own CLI. Every personal prepare here
+// gets a stand-in for fetching its source and for running that CLI, the same way
+// every prepare gets `noFetch` for the Honcho source.
+function fakeGateway({
+  ready = true,
+  apiKey = ROUTER_KEY,
+  models = ["claude-sonnet-5-5", "gpt-6-luna"],
+  install = { ok: true, autostart: "launchd", uiUrl: "http://127.0.0.1:11450", routerUrl: "http://127.0.0.1:11400/v1" },
+} = {}) {
+  const calls = [];
+  return {
+    calls,
+    options: {
+      gatewaySourceFetcher: async ({ directory }) => {
+        await fsp.mkdir(path.join(directory, "gateway"), { recursive: true });
+        await fsp.writeFile(path.join(directory, "gateway", "cli.mjs"), "// stand-in; never executed\n");
+        return { ok: true, fetched: false, updated: false, state: "current", directory };
+      },
+      gatewayRunner: async (_command, args) => {
+        calls.push(args[1]);
+        if (args[1] === "install") return { code: install.ok ? 0 : 1, stdout: JSON.stringify(install) };
+        if (args[1] === "connect-info") {
+          return {
+            code: 0,
+            stdout: JSON.stringify(ready
+              ? { ok: true, ready: true, baseUrl: "http://127.0.0.1:11400/v1", apiKey, models, reason: "" }
+              : { ok: true, ready: false, models: [], reason: "no account is logged in" }),
+          };
+        }
+        return { code: 1, stdout: JSON.stringify({ ok: false, error: `unexpected ${args[1]}` }) };
+      },
+    },
+  };
+}
+
+const gatewayStub = () => fakeGateway().options;
+
 test("Windows Compose uses an isolated anonymous Docker config without changing the user config", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-docker-config-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -53,6 +106,7 @@ test("server lifecycle rejects mistyped profiles before any mutation", async (t)
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: root } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   }), /Unsupported server profile/);
   await assert.rejects(serverStart({
@@ -272,6 +326,7 @@ test("portable prepare fails closed and propagates retained backup cleanup detai
     fileSystem,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, false);
@@ -288,26 +343,33 @@ async function personalBundle(root) {
   const source = path.join(root, "source");
   await fsp.mkdir(source, { recursive: true });
   await fsp.writeFile(path.join(source, "compose.yaml"), "name: test\n");
-  await fsp.writeFile(path.join(source, "host-profile.personal.json"), JSON.stringify({codexProxy: {enabled: true}}));
+  await fsp.writeFile(path.join(source, "host-profile.personal.json"), JSON.stringify({
+    gateway: { uiUrl: "http://127.0.0.1:11450", routerUrl: "http://127.0.0.1:11400/v1" },
+  }));
+  await fsp.writeFile(path.join(source, "gateway-source.json"), JSON.stringify({
+    repo: "https://github.com/team-memory-system/subscription-gateway",
+    ref: "main",
+  }));
   await fsp.writeFile(path.join(source, "env.personal.example"), `
 POSTGRES_PASSWORD=
 LLM_VLLM_API_KEY=
+LLM_VLLM_BASE_URL=http://host.docker.internal:11400/v1
 DERIVER_MODEL_CONFIG__TRANSPORT=openai
-DERIVER_MODEL_CONFIG__MODEL=gpt-5.6-sol
-DERIVER_MODEL_CONFIG__THINKING_EFFORT=high
-DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11435/v1
+DERIVER_MODEL_CONFIG__MODEL=gpt-6-luna
+DERIVER_MODEL_CONFIG__THINKING_EFFORT=low
+DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11400/v1
 DERIVER_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_VLLM_API_KEY
 EMBEDDING_MAX_INPUT_TOKENS=8192
 EMBEDDING_MODEL_CONFIG__TRANSPORT=openai
 EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-honcho-8192
 EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11434/v1
 EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_OPENAI_COMPATIBLE_API_KEY
-DIALECTIC_LEVELS__high__MODEL_CONFIG__THINKING_EFFORT=high
+DIALECTIC_LEVELS__high__MODEL_CONFIG__THINKING_EFFORT=low
 `);
   return source;
 }
 
-test("personal server prepare adds missing safe profile settings without replacing secrets or custom values", async (t) => {
+test("personal server prepare adds missing safe profile settings without replacing other secrets or custom values", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-profile-merge-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
@@ -338,18 +400,21 @@ test("personal server prepare adds missing safe profile settings without replaci
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
   assert.equal(result.environment.created, false);
   assert.equal(result.environment.updated, true);
   assert.match(installedEnvironment, /^POSTGRES_PASSWORD=private-existing-password$/m);
-  assert.match(installedEnvironment, /^LLM_VLLM_API_KEY=private-existing-key$/m);
+  assert.match(installedEnvironment, /^LLM_OPENAI_COMPATIBLE_API_KEY=private-ollama-key$/m);
+  // The router key belongs to the gateway, so the gateway's replaces the old one.
+  assert.match(installedEnvironment, new RegExp(`^LLM_VLLM_API_KEY=${ROUTER_KEY}$`, "m"));
   assert.match(installedEnvironment, /^CUSTOM_SETTING=keep-me$/m);
-  assert.match(installedEnvironment, /^DERIVER_MODEL_CONFIG__MODEL=gpt-5\.6-sol$/m);
-  assert.match(installedEnvironment, /^DERIVER_MODEL_CONFIG__THINKING_EFFORT=high$/m);
+  assert.match(installedEnvironment, /^DERIVER_MODEL_CONFIG__MODEL=gpt-6-luna$/m);
+  assert.match(installedEnvironment, /^DERIVER_MODEL_CONFIG__THINKING_EFFORT=low$/m);
   assert.match(installedEnvironment, /^EMBEDDING_MAX_INPUT_TOKENS=8192$/m);
-  assert.match(installedEnvironment, /^DIALECTIC_LEVELS__high__MODEL_CONFIG__THINKING_EFFORT=high$/m);
+  assert.match(installedEnvironment, /^DIALECTIC_LEVELS__high__MODEL_CONFIG__THINKING_EFFORT=low$/m);
   assert.equal((installedEnvironment.match(/^LLM_VLLM_API_KEY=/gm) || []).length, 1);
   assert.equal(installedEnvironment.includes("private-direct-key"), false);
   assert.equal(installedEnvironment.includes("external-model"), false);
@@ -378,13 +443,14 @@ test("personal server prepare generates only missing local secrets for an existi
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
   assert.equal(result.ready, true);
   assert.equal(environment.CUSTOM_SETTING, "keep-me");
   assert.ok(environment.POSTGRES_PASSWORD.length >= 24);
-  assert.ok(environment.LLM_VLLM_API_KEY.length >= 32);
+  assert.equal(environment.LLM_VLLM_API_KEY, ROUTER_KEY, "the router key comes from the gateway, not from this installer");
   assert.equal(environment.LLM_OPENAI_COMPATIBLE_API_KEY, "ollama-local");
 });
 
@@ -395,10 +461,11 @@ test("personal server prepare installs its environment before preparing host ser
   const destination = path.join(root, "installed");
   const events = [];
   const hostRuntime = {
-    prepare: async ({ profile, installedServerDir }) => {
+    prepare: async ({ profile, installedServerDir, skipGateway }) => {
       events.push("host-prepare");
       assert.equal(profile, "personal");
       assert.equal(installedServerDir, destination);
+      assert.equal(skipGateway, true, "prepare already installed the gateway");
       const environment = await fsp.readFile(path.join(installedServerDir, ".env"), "utf8");
       assert.match(environment, /POSTGRES_PASSWORD=\S+/);
       assert.match(environment, /LLM_VLLM_API_KEY=\S+/);
@@ -410,6 +477,7 @@ test("personal server prepare installs its environment before preparing host ser
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
@@ -442,6 +510,7 @@ test("personal server prepare fails closed before host setup when Windows .env A
       },
       preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
       honchoSourceFetcher: noFetch,
+      ...gatewayStub(),
       serverDirectory: destination,
     }),
     /ACL restriction failed/,
@@ -478,6 +547,7 @@ test("personal server update stops a running host before swapping the installed 
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
@@ -512,6 +582,7 @@ test("concurrent prepares allow only one candidate to enter and keep the origina
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   };
 
@@ -559,6 +630,7 @@ test("concurrent rejected prepare cannot disturb rollback of the original and it
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   };
 
@@ -580,9 +652,10 @@ test("personal update validates candidate secrets before inspecting or stopping 
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-candidate-secrets-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
+  // The chat settings all take the gateway's key, so the missing one is an
+  // embedding provider's.
   await fsp.appendFile(path.join(source, "env.personal.example"), [
-    "SUMMARY_MODEL_CONFIG__TRANSPORT=openai",
-    "SUMMARY_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_UNAVAILABLE_API_KEY",
+    "EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_UNAVAILABLE_API_KEY",
     "",
   ].join("\n"));
   const destination = path.join(root, "installed");
@@ -596,6 +669,7 @@ test("personal update validates candidate secrets before inspecting or stopping 
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, true);
@@ -629,7 +703,7 @@ test("personal host readiness failure restores both backups and restarts the pre
       if (prepareCalls === 1) {
         events.push("prepare-candidate");
         assert.equal(await fsp.readFile(path.join(installedServerDir, "compose.yaml"), "utf8"), "name: test\n");
-        return { ok: false, ready: false, issues: ["candidate proxy is unavailable"] };
+        return { ok: false, ready: false, issues: ["candidate Ollama is unavailable"] };
       }
       events.push("prepare-restored");
       assert.equal(await fsp.readFile(path.join(installedServerDir, "marker"), "utf8"), "current\n");
@@ -647,13 +721,14 @@ test("personal host readiness failure restores both backups and restarts the pre
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, false);
   assert.equal(result.ready, false);
   assert.equal(result.rollback.ok, true);
   assert.equal(result.rollback.restored, true);
-  assert.match(result.issues[0], /candidate proxy is unavailable/);
+  assert.match(result.issues[0], /candidate Ollama is unavailable/);
   assert.deepEqual(events, ["stop", "prepare-candidate", "prepare-restored", "start-restored"]);
   assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "current\n");
   assert.equal(await fsp.readFile(path.join(destination, ".env"), "utf8"), originalEnvironment);
@@ -672,6 +747,7 @@ test("fresh personal host failure removes the candidate installation", async (t)
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, false);
@@ -714,6 +790,7 @@ test("personal rollback reports a retained failed candidate instead of hiding cl
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   });
   assert.equal(result.ok, false);
@@ -722,7 +799,7 @@ test("personal rollback reports a retained failed candidate instead of hiding cl
   assert.equal(result.retainedPaths.length, 1);
   const retained = result.retainedPaths[0];
   assert.ok(retained.includes(".failed-"));
-  assert.match(await fsp.readFile(path.join(retained, ".env"), "utf8"), /^LLM_VLLM_API_KEY=private-vllm$/m);
+  assert.match(await fsp.readFile(path.join(retained, ".env"), "utf8"), new RegExp(`^LLM_VLLM_API_KEY=${ROUTER_KEY}$`, "m"));
   assert.equal(await fsp.readFile(path.join(destination, "marker"), "utf8"), "original-current\n");
   assert.equal(await fsp.readFile(path.join(destination, ".env"), "utf8"), originalEnvironment);
   assert.equal(await fsp.readFile(path.join(previous, "marker"), "utf8"), "original-previous\n");
@@ -756,6 +833,7 @@ test("personal host exception keeps the original error visible when host recover
     },
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
     serverDirectory: destination,
   }), (error) => {
     captured = error;
@@ -779,6 +857,8 @@ test("personal start prepares under its existing lifecycle lock without reentran
     profile: "personal",
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
+    model: "claude-sonnet-5-5",
     serverDirectory: destination,
     hostRuntime: {
       prepare: async () => { events.push("prepare"); return { ok: true, ready: true }; },
@@ -794,6 +874,8 @@ test("personal start prepares under its existing lifecycle lock without reentran
   assert.equal(result.ok, true);
   assert.deepEqual(events, ["prepare", "start", "compose"]);
   await assert.rejects(fsp.access(`${destination}.lifecycle.lock`));
+  // Start prepares again, and the model it was given reaches that prepare.
+  assert.equal(parseEnv(await fsp.readFile(path.join(destination, ".env"), "utf8")).DERIVER_MODEL_CONFIG__MODEL, "claude-sonnet-5-5");
 });
 
 test("personal start requires a healthy host before Compose and rolls it back on Compose failure", async () => {
@@ -834,7 +916,7 @@ test("personal start never invokes Compose when the host runtime is unhealthy", 
   const result = await serverStart({
     profile: "personal",
     hostRuntime: {
-      start: async () => ({ ok: false, running: false, issues: ["proxy unavailable"] }),
+      start: async () => ({ ok: false, running: false, issues: ["router unavailable"] }),
     },
     preparedServer: { ok: true, ready: true, installation: {}, environment: {} },
     serverDirectory: path.join(os.tmpdir(), "honcho-agent-bridge-start-blocked"),
@@ -842,7 +924,7 @@ test("personal start never invokes Compose when the host runtime is unhealthy", 
   });
   assert.equal(result.ok, false);
   assert.equal(composeCalled, false);
-  assert.equal(result.host.issues[0], "proxy unavailable");
+  assert.equal(result.host.issues[0], "router unavailable");
 });
 
 test("personal status combines Docker and host health", async (t) => {
@@ -852,14 +934,14 @@ test("personal status combines Docker and host health", async (t) => {
   const result = await serverStatus({
     profile: "personal",
     serverDirectory: root,
-    hostRuntime: { status: async () => ({ ok: true, running: true, proxy: { healthy: true } }) },
+    hostRuntime: { status: async () => ({ ok: true, running: true, gateway: { ok: true, router: { ok: true } } }) },
     dockerInspector: async () => ({ installed: true, running: true }),
     composeRunner: async () => ({ stdout: `${JSON.stringify({ Service: "api", State: "running" })}\n` }),
     healthWaiter: async () => ({ ok: true, status: 200 }),
   });
   assert.equal(result.ok, true);
   assert.equal(result.running, true);
-  assert.equal(result.host.proxy.healthy, true);
+  assert.equal(result.host.gateway.router.ok, true);
 });
 
 test("personal stop orders Compose before host shutdown and still stops host without a Compose bundle", async (t) => {
@@ -938,7 +1020,7 @@ function healthyVerifyStatus() {
     docker: { installed: true, running: true },
     host: {
       running: true,
-      proxy: { healthy: true, port: 11435, model: "gpt-5.6-sol" },
+      gateway: { ok: true, loggedIn: true, router: { url: "http://127.0.0.1:11400/v1", ok: true } },
       ollama: { healthy: true, resident: true, model: "qwen3-embedding-honcho-8192" },
     },
   };
@@ -951,7 +1033,7 @@ test("personal verify proves long 1536d embeddings and both Docker-to-host route
   // installed environment is what decides which routes have to answer.
   const installedEnvironment = [
     "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11434/v1",
-    "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11435/v1",
+    "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11400/v1",
     "",
   ].join("\n");
   await fsp.writeFile(path.join(root, ".env"), installedEnvironment);
@@ -964,7 +1046,7 @@ test("personal verify proves long 1536d embeddings and both Docker-to-host route
     composeRunner: async (_directory, args) => {
       composeArgs = args;
       return {
-        stdout: `${JSON.stringify({ ollama: { ok: true, status: 200 }, proxy: { ok: true, status: 200 } })}\n`,
+        stdout: `${JSON.stringify({ ollama: { ok: true, status: 200 }, router: { ok: true, status: 200 } })}\n`,
         stderr: "",
       };
     },
@@ -993,17 +1075,18 @@ test("personal verify proves long 1536d embeddings and both Docker-to-host route
   assert.equal(result.checks.embedding.promptEvalCount, 3001);
   assert.equal(result.checks.embedding.vectorLength, 1536);
   assert.equal(result.checks.containerHost.ollama.ok, true);
-  assert.equal(result.checks.containerHost.proxy.ok, true);
+  assert.equal(result.checks.containerHost.router.ok, true);
+  assert.equal(result.checks.status.host.routerHealthy, true);
   assert.deepEqual(composeArgs.slice(0, 5), ["exec", "-T", "api", "python", "-c"]);
   assert.match(composeArgs.at(-1), /host\.docker\.internal:11434\/api\/version/);
-  assert.match(composeArgs.at(-1), /host\.docker\.internal:11435\/health/);
+  assert.match(composeArgs.at(-1), /host\.docker\.internal:11400\/health/);
   assert.equal(result.checks.completion.skipped, true);
   assert.equal(calls.some((call) => call.url.includes("chat/completions")), false);
   assert.equal(await fsp.readFile(path.join(root, ".env"), "utf8"), installedEnvironment, "verify never writes to the installed environment");
 });
 
-test("verify does not demand a proxy the installed environment never configured", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-noproxy-"));
+test("verify does not demand a router the installed environment never configured", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-norouter-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   await fsp.writeFile(
     path.join(root, ".env"),
@@ -1028,9 +1111,9 @@ test("verify does not demand a proxy the installed environment never configured"
     },
   });
 
-  assert.equal(result.ok, true, "a completion proxy is not a precondition for every install");
+  assert.equal(result.ok, true, "a completion endpoint is not a precondition for every install");
   assert.equal(result.checks.containerHost.ollama.ok, true);
-  assert.equal(result.checks.containerHost.proxy.skipped, true);
+  assert.equal(result.checks.containerHost.router.skipped, true);
   assert.equal(composeArgs.at(-1).includes("/health"), false, "the unconfigured endpoint is never probed");
 });
 
@@ -1066,7 +1149,7 @@ test("personal verify fails when Ollama cannot prove more than 2048 tokens or ex
     serverDirectory: root,
     statusInspector: async () => healthyVerifyStatus(),
     composeRunner: async () => ({
-      stdout: `${JSON.stringify({ ollama: { ok: true, status: 200 }, proxy: { ok: true, status: 200 } })}\n`,
+      stdout: `${JSON.stringify({ ollama: { ok: true, status: 200 }, router: { ok: true, status: 200 } })}\n`,
       stderr: "",
     }),
     fetchImpl: async (url) => String(url).endsWith("/api/embed")
@@ -1079,12 +1162,18 @@ test("personal verify fails when Ollama cannot prove more than 2048 tokens or ex
   assert.equal(result.checks.embedding.vectorLength, 1535);
 });
 
-test("live verification reads the proxy secret only in-process and discards the completion body", async (t) => {
+test("live verification calls the router as the deriver would, reads the key only in-process, and discards the body", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-live-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  const secret = "must-never-appear-in-output-or-argv";
   const responseMarker = "must-never-parse-completion-body";
-  await fsp.writeFile(path.join(root, ".env"), `DERIVER_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_VLLM_API_KEY\nLLM_VLLM_API_KEY=${secret}\n`);
+  await fsp.writeFile(path.join(root, ".env"), [
+    "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11400/v1",
+    "DERIVER_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_VLLM_API_KEY",
+    "DERIVER_MODEL_CONFIG__MODEL=gpt-6-luna",
+    "DERIVER_MODEL_CONFIG__THINKING_EFFORT=low",
+    `LLM_VLLM_API_KEY=${ROUTER_KEY}`,
+    "",
+  ].join("\n"));
   let completionCancelled = false;
   let completionCalls = 0;
   let composeArgs = null;
@@ -1096,7 +1185,7 @@ test("live verification reads the proxy secret only in-process and discards the 
     composeRunner: async (_directory, args) => {
       composeArgs = args;
       return {
-        stdout: `${JSON.stringify({ ollama: { ok: true, status: 200 }, proxy: { ok: true, status: 200 } })}\n`,
+        stdout: `${JSON.stringify({ router: { ok: true, status: 200 } })}\n`,
         stderr: "",
       };
     },
@@ -1104,13 +1193,14 @@ test("live verification reads the proxy secret only in-process and discards the 
       if (String(url).endsWith("/api/embed")) {
         return fakeResponse({ prompt_eval_count: 3000, embeddings: [Array(1536).fill(0)] });
       }
-      if (String(url).endsWith("/v1/chat/completions")) {
+      if (String(url).endsWith("/chat/completions")) {
         completionCalls += 1;
-        assert.equal(options.headers.Authorization, `Bearer ${secret}`);
+        assert.equal(String(url), "http://127.0.0.1:11400/v1/chat/completions");
+        assert.equal(options.headers.Authorization, `Bearer ${ROUTER_KEY}`);
         const body = JSON.parse(options.body);
-        assert.equal(body.model, "gpt-5.6-sol");
+        assert.equal(body.model, "gpt-6-luna");
         assert.equal(body.max_completion_tokens, 32);
-        assert.equal(body.reasoning_effort, "high");
+        assert.equal(body.reasoning_effort, "low");
         assert.equal(body.stream, false);
         return fakeResponse({ choices: [{ message: { content: responseMarker } }] }, {
           onCancel: () => { completionCancelled = true; },
@@ -1120,30 +1210,253 @@ test("live verification reads the proxy secret only in-process and discards the 
     },
   });
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result.checks));
   assert.equal(completionCalls, 1);
   assert.equal(completionCancelled, true);
-  assert.deepEqual(result.checks.completion, {
-    ok: true,
-    model: "gpt-5.6-sol",
-  });
+  assert.deepEqual(result.checks.completion, { ok: true, model: "gpt-6-luna" });
   const serialized = JSON.stringify(result);
-  assert.equal(serialized.includes(secret), false);
+  assert.equal(serialized.includes(ROUTER_KEY), false);
   assert.equal(serialized.includes(responseMarker), false);
-  assert.equal(JSON.stringify(composeArgs).includes(secret), false);
+  assert.equal(JSON.stringify(composeArgs).includes(ROUTER_KEY), false);
 });
 
- test("external proxy profile does not invent a key for an independently managed service", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "external-proxy-"));
-  t.after(() => fsp.rm(root, {recursive:true, force:true}));
+test("live verification never sends the key to a router that is not on this machine", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-verify-remote-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(root, ".env"), [
+    "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=https://example.test/v1",
+    "DERIVER_MODEL_CONFIG__MODEL=gpt-6-luna",
+    `LLM_VLLM_API_KEY=${ROUTER_KEY}`,
+    "",
+  ].join("\n"));
+  const requested = [];
+  const result = await serverVerify({
+    profile: "personal",
+    liveCompletion: true,
+    serverDirectory: root,
+    statusInspector: async () => healthyVerifyStatus(),
+    composeRunner: async () => ({ stdout: "{}\n", stderr: "" }),
+    fetchImpl: async (url) => {
+      requested.push(String(url));
+      return String(url).endsWith("/api/embed")
+        ? fakeResponse({ prompt_eval_count: 3000, embeddings: [Array(1536).fill(0)] })
+        : fakeResponse({ status: "ok" });
+    },
+  });
+  assert.equal(result.checks.completion.ok, false);
+  assert.equal(requested.some((url) => url.includes("example.test") || url.includes("chat/completions")), false);
+  assert.equal(JSON.stringify(result).includes(ROUTER_KEY), false);
+});
+
+test("personal prepare stops at the gateway login and says where to log in, touching nothing installed", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-login-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const source = await personalBundle(root);
-  await fsp.writeFile(path.join(source, "host-profile.personal.json"), JSON.stringify({codexProxy: {enabled:false}}));
   const destination = path.join(root, "installed");
-  const result = await serverPrepare({profile:"personal", serverDirectory:destination, preparedPlan:{ok:true, ready:true, bundle:{directory:source}}, hostRuntime:{prepare:async()=>({ok:true,ready:true})}, honchoSourceFetcher: noFetch});
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.writeFile(path.join(destination, ".env"), "CUSTOM_SETTING=keep-me\n", { mode: 0o600 });
+  const gateway = fakeGateway({ ready: false });
+  let hostCalled = false;
+  const hostRuntime = new Proxy({}, { get: () => async () => { hostCalled = true; return { ok: true, ready: true }; } });
+
+  const result = await serverPrepare({
+    profile: "personal",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
+    ...gateway.options,
+    serverDirectory: destination,
+  });
+  assert.equal(result.ok, true, "a missing login is the user's next step, not a failure");
   assert.equal(result.ready, false);
-  assert.equal(result.installation.candidateRejected, true);
-  assert.ok(result.missingSecretFields.includes("LLM_VLLM_API_KEY"));
- });
+  assert.equal(result.nextAction.kind, "gateway-login");
+  assert.equal(result.nextAction.url, "http://127.0.0.1:11450");
+  assert.match(result.nextAction.message, /log in with Codex and\/or Claude in the gateway screen, then run server prepare --profile personal again/);
+  assert.equal(result.next, result.nextAction.message);
+  assert.equal(result.gateway.reason, "no account is logged in");
+  assert.equal("missingSecretFields" in result, false, "nothing asks the user for a key");
+  assert.deepEqual(gateway.calls, ["install", "connect-info"]);
+  assert.equal(hostCalled, false);
+  assert.equal(await fsp.readFile(path.join(destination, ".env"), "utf8"), "CUSTOM_SETTING=keep-me\n");
+  assert.equal((await fsp.readdir(root)).some((item) => item.includes(".candidate-")), false);
+});
+
+test("personal prepare writes the gateway's router, key and chosen model into the private .env", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-ready-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const gateway = fakeGateway({ models: ["claude-sonnet-5-5", "gpt-5.5", "gpt-6-luna"] });
+  let hostOptions = null;
+
+  const result = await serverPrepare({
+    profile: "personal",
+    hostRuntime: { prepare: async (options) => { hostOptions = options; return { ok: true, ready: true }; } },
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
+    ...gateway.options,
+    serverDirectory: destination,
+  });
+  assert.equal(result.ok, true, result.issues?.join(", "));
+  assert.equal(result.ready, true);
+  assert.equal(result.chatModel, "gpt-6-luna");
+  assert.equal(result.gateway.modelChoice, "preferred");
+  assert.equal(result.gateway.routerUrl, "http://127.0.0.1:11400/v1");
+  assert.equal(result.gateway.autostart, "launchd");
+  assert.equal(result.gateway.routerKeyUpdated, true);
+  assert.deepEqual(result.gateway.models, ["claude-sonnet-5-5", "gpt-5.5", "gpt-6-luna"]);
+  assert.deepEqual(result.missingSecretFields, []);
+  assert.equal(hostOptions.skipGateway, true);
+  assert.equal(JSON.stringify(result).includes(ROUTER_KEY), false, "the key is in the private .env and in no result");
+
+  const text = await fsp.readFile(path.join(destination, ".env"), "utf8");
+  const environment = parseEnv(text);
+  assert.equal(environment.LLM_VLLM_API_KEY, ROUTER_KEY);
+  assert.equal(environment.LLM_VLLM_BASE_URL, "http://host.docker.internal:11400/v1");
+  for (const prefix of CHAT_PREFIXES) {
+    assert.equal(environment[`${prefix}__MODEL`], "gpt-6-luna", prefix);
+    assert.equal(environment[`${prefix}__THINKING_EFFORT`], "low", prefix);
+    assert.equal(environment[`${prefix}__OVERRIDES__BASE_URL`], "http://host.docker.internal:11400/v1", prefix);
+    assert.equal(environment[`${prefix}__OVERRIDES__API_KEY_ENV`], "LLM_VLLM_API_KEY", prefix);
+  }
+  // Embeddings stay on Ollama.
+  assert.equal(environment.EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL, "http://host.docker.internal:11434/v1");
+  assert.equal(environment.EMBEDDING_MODEL_CONFIG__MODEL, "qwen3-embedding-honcho-8192");
+  assert.equal(environment.LLM_OPENAI_COMPATIBLE_API_KEY, "ollama-local");
+  assert.equal(text.includes("11435"), false);
+  assert.equal((text.match(/^LLM_VLLM_API_KEY=/gm) || []).length, 1);
+  if (process.platform !== "win32") {
+    assert.equal((await fsp.stat(path.join(destination, ".env"))).mode & 0o777, 0o600);
+  }
+});
+
+test("re-running prepare updates the key and model and keeps what the user edited", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-rerun-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const hostRuntime = { status: async () => ({ running: false }), prepare: async () => ({ ok: true, ready: true }) };
+  const prepare = (gateway, extra = {}) => serverPrepare({
+    profile: "personal",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
+    ...gateway.options,
+    serverDirectory: destination,
+    ...extra,
+  });
+  const envPath = path.join(destination, ".env");
+
+  assert.equal((await prepare(fakeGateway())).ready, true);
+  const first = parseEnv(await fsp.readFile(envPath, "utf8"));
+  // What the user changes by hand is theirs.
+  await fsp.appendFile(envPath, "CUSTOM_SETTING=keep-me\nLOG_LEVEL=DEBUG\n");
+
+  const rotatedKey = "fedcba9876543210".repeat(4);
+  const second = await prepare(fakeGateway({ apiKey: rotatedKey }), { model: "claude-sonnet-5-5" });
+  assert.equal(second.ready, true, second.issues?.join(", "));
+  assert.equal(second.chatModel, "claude-sonnet-5-5");
+  assert.equal(second.gateway.modelChoice, "requested");
+  assert.equal(second.gateway.routerKeyUpdated, true);
+  assert.equal(second.environment.updated, true);
+  assert.equal(JSON.stringify(second).includes(rotatedKey), false);
+  const secondText = await fsp.readFile(envPath, "utf8");
+  const updated = parseEnv(secondText);
+  assert.equal(updated.LLM_VLLM_API_KEY, rotatedKey);
+  assert.equal((secondText.match(/^LLM_VLLM_API_KEY=/gm) || []).length, 1);
+  for (const prefix of CHAT_PREFIXES) assert.equal(updated[`${prefix}__MODEL`], "claude-sonnet-5-5", prefix);
+  assert.equal(updated.CUSTOM_SETTING, "keep-me");
+  assert.equal(updated.LOG_LEVEL, "DEBUG");
+  assert.equal(updated.POSTGRES_PASSWORD, first.POSTGRES_PASSWORD, "the database password is never regenerated");
+
+  // Nothing changed at the gateway: nothing changes in the file.
+  const third = await prepare(fakeGateway({ apiKey: rotatedKey }), { model: "claude-sonnet-5-5" });
+  assert.equal(third.ready, true);
+  assert.equal(third.environment.updated, false);
+  assert.equal(third.gateway.routerKeyUpdated, false);
+  assert.equal(await fsp.readFile(envPath, "utf8"), secondText);
+});
+
+test("a requested model the gateway does not offer, or a failed gateway install, stops prepare before the bundle", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-refused-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  let hostCalled = false;
+  const hostRuntime = new Proxy({}, { get: () => async () => { hostCalled = true; return { ok: true, ready: true }; } });
+  const base = {
+    profile: "personal",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
+    serverDirectory: destination,
+  };
+
+  const unknown = await serverPrepare({ ...base, ...fakeGateway().options, model: "gpt-7" });
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.ready, false);
+  assert.match(unknown.issues[0], /does not offer the model "gpt-7"\. It offers: claude-sonnet-5-5, gpt-6-luna/);
+
+  const broken = fakeGateway({ install: { ok: false, error: "npm install failed" } });
+  const failed = await serverPrepare({ ...base, ...broken.options });
+  assert.equal(failed.ok, false);
+  assert.match(failed.issues[0], /gateway install failed: npm install failed/);
+  assert.deepEqual(broken.calls, ["install"], "connect-info is not asked of a gateway that did not install");
+
+  assert.equal(hostCalled, false);
+  await assert.rejects(fsp.access(destination), "no bundle was installed");
+});
+
+test("personal plan shows the gateway steps and asks for no key", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-plan-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  await fsp.mkdir(path.join(source, "host"), { recursive: true });
+  await fsp.writeFile(path.join(source, "host", "supervisor.mjs"), "// supervisor\n");
+  await fsp.writeFile(path.join(source, "host", "qwen3-embedding-8192.Modelfile"), "FROM qwen3-embedding:8b\n");
+  const inspectors = {
+    profile: "personal",
+    platform: "darwin",
+    dockerInspector: async () => ({ installed: true, running: true }),
+    bundleInspector: async () => ({ ok: true, directory: source, missing: [] }),
+    honchoSourceInspector: async () => ({ present: true, fetchable: false }),
+  };
+
+  const plan = await serverPlan({
+    ...inspectors,
+    gatewaySourceInspector: async () => ({
+      state: "missing",
+      present: false,
+      fetchable: true,
+      pin: { repo: "https://github.com/team-memory-system/subscription-gateway", ref: "main" },
+    }),
+  });
+  assert.equal(plan.ready, true, plan.issues.join(", "));
+  assert.deepEqual(plan.operations.map((item) => item.type), [
+    "fetch-gateway-source",
+    "gateway-install",
+    "gateway-connect",
+    "write-environment",
+    "install-bundle",
+    "prepare-ollama",
+  ]);
+  assert.equal(plan.gateway.uiUrl, "http://127.0.0.1:11450");
+  assert.equal(plan.gateway.routerUrl, "http://127.0.0.1:11400/v1");
+  assert.match(plan.warnings.join(" "), /Subscription gateway source will be downloaded from https:\/\/github\.com\/team-memory-system\/subscription-gateway \(main\)/);
+  assert.equal(/proxy|11435|LLM_VLLM_API_KEY/i.test(JSON.stringify(plan)), false, "no proxy and no key to supply");
+
+  const blocked = await serverPlan({
+    ...inspectors,
+    gatewaySourceInspector: async () => ({
+      state: "missing",
+      present: false,
+      fetchable: false,
+      reason: "git is not installed, so the subscription gateway source cannot be fetched",
+    }),
+  });
+  assert.equal(blocked.ready, false);
+  assert.match(blocked.issues.join(" "), /subscription gateway cannot be installed: git is not installed/);
+});
 
 test("the source pin only accepts an https repository and a plausible ref", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-pin-"));

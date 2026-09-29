@@ -976,11 +976,19 @@ async function main() {
   if (command === "server") {
     const subcommand = args.shift() || "status";
     const options = parseOptions(args);
-    if (subcommand === "plan") return serverPlan({ profile: optionString(options.profile, "portable") });
-    if (subcommand === "prepare") return serverPrepare({ profile: optionString(options.profile, "portable") });
+    const profile = optionString(options.profile, "portable");
+    // The chat model is chosen from what the gateway offers, so it only means
+    // something for the personal profile.
+    if (options.model !== undefined && (typeof options.model !== "string" || profile !== "personal")) {
+      return { ok: false, error: "--model takes a model id and applies to --profile personal only" };
+    }
+    const model = optionString(options.model, "");
+    if (subcommand === "plan") return serverPlan({ profile });
+    if (subcommand === "prepare") return serverPrepare({ profile, model });
     if (subcommand === "start") return serverStart({
-      profile: optionString(options.profile, "portable"),
+      profile,
       build: options.noBuild !== true,
+      model,
     });
     if (subcommand === "status") return serverStatus({ profile: optionString(options.profile, "portable") });
     if (subcommand === "stop") return serverStop({ profile: optionString(options.profile, "portable") });
@@ -1030,8 +1038,8 @@ async function main() {
     usage: [
       "detect",
       "server plan [--profile portable|personal]",
-      "server prepare [--profile portable|personal]",
-      "server start [--profile portable|personal] [--no-build]",
+      "server prepare [--profile portable|personal] [--model <id>]",
+      "server start [--profile portable|personal] [--no-build] [--model <id>]",
       "server status [--profile portable|personal]",
       "server stop [--profile portable|personal]",
       "server verify [--profile personal] [--live-completion]",
