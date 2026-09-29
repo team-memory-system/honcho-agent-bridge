@@ -230,86 +230,12 @@ test("the form's field names and the accepted option names are the same set", as
   }
 });
 
-test("the proxy source location and the three enable flags are editable from the UI", async (t) => {
-  // A fresh bundle ships llmProxyRoot blank with every proxy off, so without this
-  // the install and start buttons would only ever prepare a host that manages nothing.
-  const appHome = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-profile-"));
-  t.after(() => fsp.rm(appHome, { recursive: true, force: true }));
-  const profilePath = path.join(appHome, "server", "host-profile.personal.json");
-  await fsp.mkdir(path.dirname(profilePath), { recursive: true });
-  const original = {
-    format: 1,
-    profile: "personal",
-    llmProxyRoot: "",
-    codexProxy: { enabled: false, baseUrl: "http://127.0.0.1:11435", defaultModel: "gpt-5.6-sol" },
-    claudeProxy: { enabled: false, baseUrl: "http://127.0.0.1:11446" },
-    router: { enabled: false, baseUrl: "http://127.0.0.1:11400" },
-    ollama: { enabled: true, model: "qwen3-embedding-honcho-8192", dimensions: 1536 },
-  };
-  await fsp.writeFile(profilePath, JSON.stringify(original));
-
-  const proxyRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "llm-proxy-"));
-  t.after(() => fsp.rm(proxyRoot, { recursive: true, force: true }));
-
-  const previousHome = process.env.HONCHO_AGENT_BRIDGE_HOME;
-  process.env.HONCHO_AGENT_BRIDGE_HOME = appHome;
-  t.after(() => {
-    if (previousHome === undefined) delete process.env.HONCHO_AGENT_BRIDGE_HOME;
-    else process.env.HONCHO_AGENT_BRIDGE_HOME = previousHome;
-  });
-
-  const scoped = createUiServer();
-  const scopedPort = await availablePort();
-  await new Promise((resolve, reject) => { scoped.once("error", reject); scoped.listen(scopedPort, "127.0.0.1", resolve); });
-  t.after(() => new Promise((resolve) => scoped.close(() => resolve())));
-
-  const call = (body) => new Promise((resolve, reject) => {
-    const payload = JSON.stringify(body);
-    const request = http.request({
-      hostname: "127.0.0.1", port: scopedPort, path: "/api/proxies/config", method: "POST",
-      headers: { host: `127.0.0.1:${scopedPort}`, "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
-    }, (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () => resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
-    });
-    request.on("error", reject);
-    request.end(payload);
-  });
-
-  const read = await call({});
-  assert.equal(read.ok, true, JSON.stringify(read));
-  assert.equal(read.llmProxyRoot, "");
-  assert.equal(read.proxies.codex.enabled, false);
-
-  const refusedEnable = await call({ proxies: { codex: { enabled: true } } });
-  assert.equal(refusedEnable.ok, false, "enabling a proxy with nowhere to find it is refused");
-
-  const refusedRoot = await call({ llmProxyRoot: path.join(proxyRoot, "does-not-exist") });
-  assert.equal(refusedRoot.ok, false);
-  assert.match(refusedRoot.error, /not a directory/);
-
-  const saved = await call({ llmProxyRoot: proxyRoot, proxies: { codex: { enabled: true }, router: { enabled: true } } });
-  assert.equal(saved.ok, true, JSON.stringify(saved));
-  assert.equal(saved.llmProxyRoot, proxyRoot);
-  assert.equal(saved.proxies.codex.enabled, true);
-  assert.equal(saved.proxies.router.enabled, true);
-  assert.equal(saved.proxies.claude.enabled, false, "a flag the form did not send is left alone");
-
-  const onDisk = JSON.parse(await fsp.readFile(profilePath, "utf8"));
-  assert.deepEqual(onDisk.ollama, original.ollama, "the rest of the profile is untouched");
-  assert.equal(onDisk.codexProxy.defaultModel, "gpt-5.6-sol", "fields this UI does not own survive");
-  assert.equal((await fsp.readdir(path.dirname(profilePath))).length, 1, "no temp file is left behind");
-});
-
 test("files the UI writes are restricted before any bytes reach them", async (t) => {
   // Windows ignores a POSIX creation mode, so `mode: 0o600` on its own protects
-  // nothing there. Both files this UI writes carry someone's private data - a whole
-  // chat history, and the host profile - so both go through the installer's own
-  // writer rather than a bare fs call.
+  // nothing there. The one file this UI writes is a whole chat history, so it goes
+  // through the installer's own restriction rather than a bare fs call.
   const source = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
   assert.match(source, /securePrivateFile/, "the spooled export is restricted");
-  assert.match(source, /writePrivateFileAtomic/, "the host profile uses the atomic private writer");
   assert.equal(
     /fs\.rename\(/.test(source), false,
     "a bare rename would publish the file before its ACL is applied",
@@ -330,23 +256,34 @@ test("files the UI writes are restricted before any bytes reach them", async (t)
   }
 });
 
-test("the proxy buttons drive the host lifecycle, not the Docker stack", async () => {
-  // Starting proxies must not also bring Docker up, and must go through the same
-  // `host start` a terminal would use - so the supervisor it launches is detached and
-  // outlives this UI process.
+test("the host buttons drive the host lifecycle, not the Docker stack", async () => {
+  // Starting the gateway and Ollama must not also bring Docker up, and must go
+  // through the same `host start` a terminal would use - so the supervisor it
+  // launches is detached and outlives this UI process.
   const source = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
-  const routes = source.match(/const PROXY_ROUTES = \{([\s\S]*?)\n\};/)[1];
+  const routes = source.match(/const HOST_ROUTES = \{([\s\S]*?)\n\};/)[1];
   assert.match(routes, /"host", "status"/);
   assert.match(routes, /"host", "prepare"/);
   assert.match(routes, /"host", "start"/);
   assert.match(routes, /"host", "stop"/);
-  assert.equal(/"server",/.test(routes), false, "a proxy button must not start the whole stack");
+  assert.match(routes, /"gateway", "open"/);
+  assert.equal(/"server",/.test(routes), false, "a host button must not start the whole stack");
+  assert.equal(/proxies|llmProxyRoot/.test(source), false, "there is no proxy source location to edit any more");
 
   const cli = await fsp.readFile(path.join(ROOT, "scripts", "cli.mjs"), "utf8");
-  for (const subcommand of ["plan", "prepare", "start", "status", "stop"]) {
-    assert.match(cli, new RegExp(`subcommand === "${subcommand}"`), `host ${subcommand} is dispatched`);
+  for (const subcommand of ["plan", "prepare", "start", "status", "stop", "open"]) {
+    assert.match(cli, new RegExp(`subcommand === "${subcommand}"`), `${subcommand} is dispatched`);
   }
   assert.match(cli, /command === "host"/);
+  assert.match(cli, /command === "gateway"/);
+
+  // Every button on the page has a route to go to.
+  const markup = await fsp.readFile(path.join(ROOT, "ui", "index.html"), "utf8");
+  const hostButtons = [...markup.matchAll(/data-host="([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(hostButtons.length >= 3, "the host buttons were not found");
+  for (const action of hostButtons) assert.match(routes, new RegExp(`"/api/host/${action}"`));
+  assert.match(markup, /data-gateway="open"/);
+  assert.equal(/id="proxy-config"|llmProxyRoot/.test(markup), false);
 });
 
 test("the connect form reaches the bridge, and saves only once the bridge has answered", async (t) => {

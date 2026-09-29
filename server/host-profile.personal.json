@@ -1,9 +1,8 @@
 {
   "format": 1,
-  "codexProxy": {
-    "enabled": false,
-    "baseUrl": "http://127.0.0.1:11435",
-    "defaultModel": "gpt-5.6-sol"
+  "gateway": {
+    "uiUrl": "http://127.0.0.1:11450",
+    "routerUrl": "http://127.0.0.1:11400/v1"
   },
   "ollama": {
     "enabled": true,

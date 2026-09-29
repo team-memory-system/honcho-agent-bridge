@@ -55,5 +55,3 @@ pre {
 .status-row .ok { color: var(--accent); }
 .status-row .bad { color: var(--danger); }
 code { background: #0f1310; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
-label.inline { display: inline-flex; align-items: center; gap: 6px; margin: 0; text-transform: none; letter-spacing: normal; font-size: 14px; color: var(--text); }
-label.inline input { width: auto; margin: 0; }

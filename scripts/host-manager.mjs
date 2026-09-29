@@ -1,66 +1,40 @@
+// The personal profile's host side: what runs on this machine beside the Honcho
+// containers, because it cannot run inside them.
+//
+// Two things, with two lifecycles:
+//   - The subscription gateway (scripts/gateway.mjs), which turns the user's own
+//     Codex and Claude logins into the router every chat model goes through. It is
+//     fetched into runtime/subscription-gateway and installed through its own CLI,
+//     which registers the gateway's own per-user autostart, so it comes back after
+//     a reboot by itself.
+//   - Ollama with the Qwen3 embedding alias, kept resident by
+//     server/host/supervisor.mjs. `host start` spawns that supervisor detached and
+//     finds it again through its PID file.
+//
+// This repository registers nothing with launchd, the Windows task scheduler or
+// registry, or systemd. After a reboot the supervisor stays down until the app or
+// `host start` runs again.
 import { execFile, spawn as nodeSpawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import {
+  DEFAULT_GATEWAY_ROUTER_URL,
+  DEFAULT_GATEWAY_UI_URL,
+  gatewayCliPath,
+  gatewayDirectory,
+  gatewayLoginAction,
+  gatewaySourceProbe,
+  gatewayStatus,
+  loopbackUrl,
+  prepareGateway,
+} from "./gateway.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 
 const execFileAsync = promisify(execFile);
 const FORMAT_VERSION = 1;
-
-/**
- * The Node services that turn a subscription account into an OpenAI-shaped API,
- * plus the router that chooses between them. All three live in the llm-proxy
- * repository, one directory each, and are started the same way: `node server.mjs`
- * with HOST and PORT in the environment.
- *
- * `codex` keeps the legacy `codexProxy` profile key, because that is the only one
- * that has ever been written to an installed host profile.
- */
-export const PROXY_SERVICES = Object.freeze([
-  Object.freeze({
-    name: "codex",
-    profileKey: "codexProxy",
-    subdirectory: "codex-openai-proxy",
-    defaultPort: 11435,
-    secretEnv: "CODEX_PROXY_SHARED_SECRET",
-    // Only this one has dependencies, so only this one can be waiting on an install.
-    dependenciesSubpath: path.join("node_modules", "@mariozechner", "pi-ai"),
-  }),
-  Object.freeze({
-    name: "claude",
-    profileKey: "claudeProxy",
-    subdirectory: "claude-print-proxy",
-    defaultPort: 11446,
-    secretEnv: "CLAUDE_PROXY_SHARED_SECRET",
-    dependenciesSubpath: "",
-  }),
-  Object.freeze({
-    name: "router",
-    profileKey: "router",
-    subdirectory: "router",
-    defaultPort: 11400,
-    secretEnv: "",
-    dependenciesSubpath: "",
-  }),
-]);
-
-
-/**
- * Each proxy's shared secret, read from the installed environment under its own
- * name. `LLM_VLLM_API_KEY` stays the Codex fallback: that is the name Honcho uses
- * for the key it presents to the proxy, and the only one older installs ever set.
- */
-export function proxySecrets(environment = {}) {
-  const secrets = {};
-  for (const service of PROXY_SERVICES) {
-    if (!service.secretEnv) { secrets[service.name] = ""; continue; }
-    secrets[service.name] = String(environment[service.secretEnv] || "").trim()
-      || (service.name === "codex" ? String(environment.LLM_VLLM_API_KEY || "").trim() : "");
-  }
-  return secrets;
-}
 
 async function exists(target) {
   try { await fsp.access(target); return true; } catch { return false; }
@@ -97,6 +71,7 @@ export function resolveHostPaths({
     configFile,
     pidFile,
     logDir,
+    gatewayDir: gatewayDirectory(serverDir),
     supervisorFile: path.join(serverDir, "host", "supervisor.mjs"),
     modelfile: path.join(serverDir, "host", "qwen3-embedding-8192.Modelfile"),
     profileFile: (profile) => path.join(serverDir, `host-profile.${profile}.json`),
@@ -173,67 +148,15 @@ function keepAliveOption(value) {
 }
 
 /**
- * Where a proxy's source lives. An installed profile has to say: guessing a path
- * under the user's home was only ever right on the machine this was written on.
+ * Where the gateway is expected to answer. The gateway reports its real addresses
+ * itself when it installs; these are what a plan can show before that.
  */
-function proxySourceDir({ service, serviceInput, profileConfig }) {
-  if (serviceInput.sourceDir) return path.resolve(serviceInput.sourceDir);
-  if (profileConfig.llmProxyRoot) {
-    return path.resolve(profileConfig.llmProxyRoot, service.subdirectory);
-  }
-  return "";
-}
-
-function deriveProxyServices({ environment, profileConfig, homeDir }) {
-  const derived = {};
-  for (const service of PROXY_SERVICES) {
-    const serviceInput = profileConfig[service.profileKey] || {};
-    const fallbackUrl = `http://127.0.0.1:${service.defaultPort}`;
-    const rawUrl = serviceInput.baseUrl
-      || (service.name === "codex"
-        ? firstEnvironment(environment, [
-          "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL",
-          "SUMMARY_MODEL_CONFIG__OVERRIDES__BASE_URL",
-          "LLM_VLLM_BASE_URL",
-        ])
-        : "");
-    const enabled = Boolean(serviceInput.enabled ?? false);
-    if (enabled && rawUrl && !isLocalEndpoint(rawUrl)) {
-      throw new Error(`Managed ${service.name} proxy must use a loopback endpoint`);
-    }
-    const baseUrl = localServiceUrl(rawUrl || fallbackUrl, fallbackUrl);
-    const sourceDir = proxySourceDir({ service, serviceInput, profileConfig });
-    if (enabled && !sourceDir) {
-      throw new Error(
-        `Host profile enables the ${service.name} proxy without a source directory: set ${service.profileKey}.sourceDir or llmProxyRoot`,
-      );
-    }
-    derived[service.name] = {
-      name: service.name,
-      enabled,
-      baseUrl,
-      port: numberOption(serviceInput.port || new URL(baseUrl).port || service.defaultPort, service.defaultPort, { max: 65_535 }),
-      secretEnv: service.secretEnv,
-      sourceDir,
-      entrypoint: sourceDir ? path.join(sourceDir, "server.mjs") : "",
-      packageFile: sourceDir ? path.join(sourceDir, "package.json") : "",
-      dependenciesPath: sourceDir && service.dependenciesSubpath
-        ? path.join(sourceDir, service.dependenciesSubpath)
-        : "",
-    };
-    if (service.name === "codex") {
-      derived.codex.defaultModel = validModel(serviceInput.defaultModel || environment.DERIVER_MODEL_CONFIG__MODEL, "gpt-5.6-sol");
-      derived.codex.authPath = path.resolve(serviceInput.authPath || environment.CODEX_AUTH_PATH || path.join(homeDir, ".codex", "auth.json"));
-    }
-    if (service.name === "claude") {
-      derived.claude.defaultModel = validModel(serviceInput.defaultModel, "claude-opus-5-5");
-      derived.claude.claudeBin = String(serviceInput.claudeBin || "claude");
-    }
-    if (service.name === "router") {
-      derived.router.configPath = serviceInput.configPath ? path.resolve(serviceInput.configPath) : "";
-    }
-  }
-  return derived;
+function deriveGateway(profileConfig, paths) {
+  const input = profileConfig.gateway || {};
+  const uiUrl = input.uiUrl === undefined ? DEFAULT_GATEWAY_UI_URL : loopbackUrl(input.uiUrl, { keepPath: true });
+  const routerUrl = input.routerUrl === undefined ? DEFAULT_GATEWAY_ROUTER_URL : loopbackUrl(input.routerUrl, { keepPath: true });
+  if (!uiUrl || !routerUrl) throw new Error("Host profile gateway addresses must be credential-free loopback URLs");
+  return { directory: paths.gatewayDir, uiUrl, routerUrl };
 }
 
 /**
@@ -245,9 +168,9 @@ export function deriveHostTopology({
   profileConfig = {},
   paths,
   platform = process.platform,
-  homeDir = os.homedir(),
 } = {}) {
   assertNoSecretFields(profileConfig);
+  const gateway = deriveGateway(profileConfig, paths);
   const ollamaInput = profileConfig.ollama || {};
   const rawOllamaUrl = ollamaInput.baseUrl || firstEnvironment(environment, [
     "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL",
@@ -256,16 +179,12 @@ export function deriveHostTopology({
   const ollamaEnabled = ollamaInput.enabled ?? (Boolean(rawOllamaUrl) && isLocalEndpoint(rawOllamaUrl));
   if (ollamaEnabled && rawOllamaUrl && !isLocalEndpoint(rawOllamaUrl)) throw new Error("Managed Ollama must use a loopback endpoint");
   const ollamaUrl = localServiceUrl(rawOllamaUrl || "http://127.0.0.1:11434", "http://127.0.0.1:11434");
-  const proxies = deriveProxyServices({ environment, profileConfig, homeDir });
   const dimensions = numberOption(ollamaInput.dimensions || environment.EMBEDDING_VECTOR_DIMENSIONS, 1536, { min: 1, max: 65_536 });
   const contextLength = numberOption(ollamaInput.contextLength || environment.EMBEDDING_MAX_INPUT_TOKENS, 8192, { min: 256, max: 1_000_000 });
   return {
     format: FORMAT_VERSION,
     platform,
-    proxies,
-    // Everything written before the proxies were generalized reads `proxy` and
-    // means the Codex one.
-    proxy: proxies.codex,
+    gateway,
     ollama: {
       enabled: Boolean(ollamaEnabled),
       baseUrl: ollamaUrl,
@@ -364,16 +283,6 @@ async function probeJson(fetchImpl, url, timeoutMs = 2_000) {
   finally { clearTimeout(timer); }
 }
 
-async function inspectAuth(authPath) {
-  if (!(await exists(authPath))) return { exists: false, valid: false, hasAccessToken: false, hasRefreshToken: false };
-  try {
-    const document = JSON.parse(await fsp.readFile(authPath, "utf8"));
-    const hasAccessToken = typeof document?.tokens?.access_token === "string" && document.tokens.access_token.length > 0;
-    const hasRefreshToken = typeof document?.tokens?.refresh_token === "string" && document.tokens.refresh_token.length > 0;
-    return { exists: true, valid: hasAccessToken && hasRefreshToken, hasAccessToken, hasRefreshToken };
-  } catch { return { exists: true, valid: false, hasAccessToken: false, hasRefreshToken: false }; }
-}
-
 function modelNames(text) {
   return String(text || "").split(/\r?\n/).slice(1).map((line) => line.trim().split(/\s+/, 1)[0]).filter(Boolean);
 }
@@ -398,19 +307,11 @@ async function readInputs({ profile, profilePath, paths }) {
 
 function publicTopology(topology) {
   return {
-    proxy: {
-      enabled: topology.proxy.enabled,
-      baseUrl: topology.proxy.baseUrl,
-      port: topology.proxy.port,
-      defaultModel: topology.proxy.defaultModel,
-      authPath: topology.proxy.authPath,
+    gateway: {
+      directory: topology.gateway.directory,
+      uiUrl: topology.gateway.uiUrl,
+      routerUrl: topology.gateway.routerUrl,
     },
-    proxies: Object.fromEntries(
-      Object.entries(topology.proxies).map(([name, service]) => [
-        name,
-        { enabled: service.enabled, baseUrl: service.baseUrl, port: service.port, sourceDir: service.sourceDir },
-      ]),
-    ),
     ollama: {
       enabled: topology.ollama.enabled,
       baseUrl: topology.ollama.baseUrl,
@@ -432,12 +333,13 @@ export async function hostPlan({
   homeDir = homeFor(env),
   run = defaultRun,
   fetchImpl = globalThis.fetch,
+  gatewaySourceInspector = null,
 } = {}) {
   const resolved = resolveHostPaths({ installedServerDir, platform, env, homeDir });
   const paths = { ...resolved, homeDir, env };
   const issues = [];
   const warnings = [];
-  if (profile !== "personal") issues.push("Managed Codex and Ollama host services are only defined for the personal profile");
+  if (profile !== "personal") issues.push("The subscription gateway and Ollama host services are only defined for the personal profile");
   let inputs;
   try { inputs = await readInputs({ profile, profilePath, paths }); }
   catch (error) {
@@ -445,70 +347,27 @@ export async function hostPlan({
   }
   if (!(await exists(inputs.environmentPath)) && !inputs.profileExists) issues.push("Neither installed server/.env nor host-profile.personal.json exists");
   let topology;
-  try { topology = deriveHostTopology({ environment: inputs.environment, profileConfig: inputs.profileConfig, paths, platform, homeDir }); }
+  try { topology = deriveHostTopology({ environment: inputs.environment, profileConfig: inputs.profileConfig, paths, platform }); }
   catch (error) {
     return { ok: false, ready: false, profile, paths: resolved, issues: [sanitizeError(error)], warnings, operations: [] };
   }
 
-  const auth = topology.proxy.enabled ? await inspectAuth(topology.proxy.authPath) : { exists: false, valid: false };
-  const npmName = platform === "win32" ? "npm.cmd" : "npm";
-  const pnpmName = platform === "win32" ? "pnpm.cmd" : "pnpm";
-  const npmExecutable = topology.proxy.enabled ? await resolveExecutable(npmName, platform, run, env) : "";
-  const pnpmExecutable = topology.proxy.enabled ? await resolveExecutable(pnpmName, platform, run, env) : "";
+  // The installed server's pin says which gateway this bundle expects.
+  const gatewaySource = await (gatewaySourceInspector
+    ? gatewaySourceInspector()
+    : gatewaySourceProbe({ pinDirectory: resolved.serverDir, directory: topology.gateway.directory }));
+  if (gatewaySource.state === "missing" && !gatewaySource.fetchable) {
+    issues.push(`The subscription gateway cannot be installed: ${gatewaySource.reason}`);
+  }
+  if (gatewaySource.state === "stale" && !gatewaySource.fetchable) {
+    issues.push(`The subscription gateway source cannot be updated: ${gatewaySource.reason}`);
+  }
+  if (gatewaySource.state === "external") {
+    warnings.push(`${topology.gateway.directory} was not fetched by this installer; it is used as it is and never replaced`);
+  }
+
   const ollamaExecutable = topology.ollama.enabled ? await resolveExecutable(topology.ollama.executable, platform, run, env) : "";
   if (ollamaExecutable) topology.ollama.executable = ollamaExecutable;
-  const npm = topology.proxy.enabled && npmExecutable
-    ? await runWith(run, npmExecutable, ["--version"], { env, timeout: 5_000 })
-    : { ok: !topology.proxy.enabled };
-  const pnpm = topology.proxy.enabled && pnpmExecutable
-    ? await runWith(run, pnpmExecutable, ["--version"], { env, timeout: 5_000 })
-    : { ok: false };
-  const packageLock = path.join(topology.proxy.sourceDir, "package-lock.json");
-  const shrinkwrap = path.join(topology.proxy.sourceDir, "npm-shrinkwrap.json");
-  const pnpmLock = path.join(topology.proxy.sourceDir, "pnpm-lock.yaml");
-  const npmLockFile = (await exists(shrinkwrap)) ? shrinkwrap : ((await exists(packageLock)) ? packageLock : null);
-  const pnpmLockFile = (await exists(pnpmLock)) ? pnpmLock : null;
-  const dependencyMode = pnpmLockFile
-    ? (pnpm.ok ? "pnpm-frozen" : (npm.ok ? "npm-exec-pnpm-frozen" : "unavailable"))
-    : (npmLockFile && npm.ok ? "npm-ci" : (npm.ok ? "npm-install-unlocked" : "unavailable"));
-  const proxySource = {
-    package: await exists(topology.proxy.packageFile),
-    entrypoint: await exists(topology.proxy.entrypoint),
-    dependenciesReady: await exists(topology.proxy.dependenciesPath),
-    lockFile: pnpmLockFile || npmLockFile,
-    dependencyMode,
-  };
-  if (topology.proxy.enabled) {
-    if (!proxySource.package || !proxySource.entrypoint) issues.push("The installed Codex OpenAI proxy source is incomplete");
-    if (dependencyMode === "unavailable") issues.push("Neither a compatible package manager nor npm fallback is available for the Codex proxy");
-    if (!auth.exists) issues.push("Codex authentication was not found in the current user's home directory");
-    else if (!auth.valid) issues.push("Codex authentication exists but does not contain usable access and refresh credentials");
-    if (!inputs.environment.LLM_VLLM_API_KEY) issues.push("The installed server environment has no private Codex proxy shared secret");
-  }
-
-  // The Claude proxy and the router have no dependencies to install, so their only
-  // precondition is that the source the profile points at is actually there.
-  const proxies = {};
-  for (const [name, service] of Object.entries(topology.proxies)) {
-    const source = name === "codex"
-      ? proxySource
-      : {
-        package: service.packageFile ? await exists(service.packageFile) : false,
-        entrypoint: service.entrypoint ? await exists(service.entrypoint) : false,
-        dependenciesReady: true,
-      };
-    proxies[name] = {
-      enabled: service.enabled,
-      port: service.port,
-      baseUrl: service.baseUrl,
-      sourceDir: service.sourceDir,
-      ...source,
-    };
-    if (name !== "codex" && service.enabled && (!source.package || !source.entrypoint)) {
-      issues.push(`The ${name} proxy source the host profile points at is incomplete: ${service.sourceDir}`);
-    }
-  }
-
   let ollama = { installed: false, running: false, version: "", models: [], baseModelPresent: false, aliasPresent: false, aliasMatches: false };
   if (topology.ollama.enabled) {
     const cli = ollamaExecutable
@@ -539,13 +398,17 @@ export async function hostPlan({
     }
     if (ollama.installed && !ollama.running) warnings.push("Ollama is installed but not running; prepare will try to start its local service");
   }
-  if (topology.proxy.enabled && !proxySource.dependenciesReady && dependencyMode === "npm-install-unlocked") {
-    warnings.push("The proxy bundle has no supported lockfile; dependency installation will be non-reproducible");
-  }
   if (!(await exists(paths.supervisorFile))) issues.push("The bundled host supervisor is missing");
 
   const operations = [];
-  if (topology.proxy.enabled && !proxySource.dependenciesReady) operations.push({ type: "install-proxy-dependencies", mode: dependencyMode, directory: topology.proxy.sourceDir });
+  if (gatewaySource.fetchable) {
+    operations.push({
+      type: gatewaySource.state === "stale" ? "update-gateway-source" : "fetch-gateway-source",
+      ...gatewaySource.pin,
+      directory: topology.gateway.directory,
+    });
+  }
+  operations.push({ type: "gateway-install", directory: topology.gateway.directory, uiUrl: topology.gateway.uiUrl });
   if (topology.ollama.enabled && !ollama.baseModelPresent) operations.push({ type: "ollama-pull", model: topology.ollama.baseModel });
   if (topology.ollama.enabled && (!ollama.aliasPresent || !ollama.aliasMatches)) operations.push({ type: "ollama-create", model: topology.ollama.model });
   operations.push({ type: "write-host-config", target: paths.configFile });
@@ -557,32 +420,18 @@ export async function hostPlan({
     profilePath: inputs.profileExists ? inputs.profilePath : null,
     paths: resolved,
     topology: publicTopology(topology),
-    auth,
-    proxy: { ...proxySource, npmAvailable: npm.ok, pnpmAvailable: pnpm.ok, sharedSecretConfigured: Boolean(inputs.environment.LLM_VLLM_API_KEY) },
-    proxies,
+    gateway: {
+      source: gatewaySource,
+      installed: await exists(gatewayCliPath(topology.gateway.directory)),
+    },
     ollama,
-    executables: { node: path.resolve(process.execPath), npm: npmExecutable || null, pnpm: pnpmExecutable || null, ollama: ollamaExecutable || null },
+    executables: { node: path.resolve(process.execPath), ollama: ollamaExecutable || null },
     issues,
     warnings,
     operations,
   };
-  Object.defineProperty(result, "_internal", {
-    value: {
-      topology,
-      sharedSecret: inputs.environment.LLM_VLLM_API_KEY || "",
-      secrets: proxySecrets(inputs.environment),
-    },
-    enumerable: false,
-  });
+  Object.defineProperty(result, "_internal", { value: { topology }, enumerable: false });
   return result;
-}
-
-async function writeAtomic(target, content, mode) {
-  await fsp.mkdir(path.dirname(target), { recursive: true });
-  const temporary = `${target}.tmp-${process.pid}`;
-  await fsp.writeFile(temporary, content, { mode });
-  await fsp.rename(temporary, target);
-  await fsp.chmod(target, mode).catch(() => {});
 }
 
 async function writePrivateAtomic(target, content, mode, privateFileOptions) {
@@ -613,7 +462,13 @@ function spawnDetached(spawnImpl, command, args, options) {
   return child;
 }
 
-/** Install proxy dependencies, prepare the Qwen alias, and write the host config. */
+/**
+ * Fetch and install the gateway, prepare the Qwen alias, and write the host config.
+ *
+ * `server prepare` installs the gateway itself, before it builds the new bundle,
+ * because it needs the gateway's router key for that bundle's .env. It passes
+ * `skipGateway` so the gateway's install does not run twice.
+ */
 export async function hostPrepare(options = {}) {
   const run = options.run || defaultRun;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
@@ -624,30 +479,26 @@ export async function hostPrepare(options = {}) {
     // readiness issues must remain non-mutating.
     return { ...plan, _internal: undefined };
   }
-  const { topology, sharedSecret, secrets } = plan._internal;
+  const { topology } = plan._internal;
   const actions = [];
   await fsp.mkdir(topology.state.logDir, { recursive: true });
 
-  if (topology.proxy.enabled && !plan.proxy.dependenciesReady) {
-    let executable = plan.executables.npm;
-    let args;
-    if (plan.proxy.dependencyMode === "pnpm-frozen") {
-      executable = plan.executables.pnpm;
-      args = ["install", "--frozen-lockfile", "--prod", "--ignore-scripts"];
-    } else if (plan.proxy.dependencyMode === "npm-exec-pnpm-frozen") {
-      args = ["exec", "--yes", "pnpm@10.14.0", "--", "install", "--frozen-lockfile", "--prod", "--ignore-scripts"];
-    } else if (plan.proxy.dependencyMode === "npm-ci") {
-      args = ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"];
-    } else {
-      args = ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false"];
-    }
-    const result = await runWith(run, executable, args, {
-      cwd: topology.proxy.sourceDir,
-      env: options.env || process.env,
-      timeout: 600_000,
+  let gateway = null;
+  if (!options.skipGateway) {
+    gateway = await prepareGateway({
+      pinDirectory: plan.paths.serverDir,
+      directory: topology.gateway.directory,
+      sourceFetcher: options.gatewaySourceFetcher,
+      runner: options.gatewayRunner,
+      env: options.env,
     });
-    if (!result.ok) return { ok: false, ready: false, profile: plan.profile, issues: ["Codex proxy dependency installation failed"], warnings: plan.warnings, actions };
-    actions.push({ type: "install-proxy-dependencies", mode: plan.proxy.dependencyMode, changed: true });
+    if (!gateway.ok) {
+      return { ok: false, ready: false, profile: plan.profile, issues: [gateway.error], warnings: plan.warnings, actions, gateway };
+    }
+    if (gateway.source?.fetched || gateway.source?.updated) {
+      actions.push({ type: gateway.source.updated ? "update-gateway-source" : "fetch-gateway-source", commit: gateway.source.commit, changed: true });
+    }
+    actions.push({ type: "gateway-install", autostart: gateway.autostart, changed: true });
   }
 
   if (topology.ollama.enabled) {
@@ -683,14 +534,7 @@ export async function hostPrepare(options = {}) {
     format: FORMAT_VERSION,
     generatedAt: new Date().toISOString(),
     profile: plan.profile,
-    proxies: Object.fromEntries(
-      Object.entries(topology.proxies).map(([name, service]) => [
-        name,
-        { ...service, sharedSecret: secrets[name] || "" },
-      ]),
-    ),
-    // Kept so a supervisor from an older bundle still finds the Codex proxy.
-    proxy: { ...topology.proxy, sharedSecret },
+    gateway: topology.gateway,
     ollama: topology.ollama,
     state: topology.state,
     supervisorFile: topology.supervisorFile,
@@ -710,6 +554,7 @@ export async function hostPrepare(options = {}) {
     configFile: topology.state.configFile,
     actions,
     warnings: plan.warnings,
+    ...(gateway ? { gateway } : {}),
   };
 }
 
@@ -733,14 +578,20 @@ async function pidState(pidFile) {
   } catch { return { record: null, running: false }; }
 }
 
+/** The gateway answered and has nobody logged in, so its router has nothing to route to. */
+function gatewayNeedsLogin(status) {
+  return status?.gateway?.installed === true && status.gateway.ok === false && status.gateway.loggedIn === false;
+}
+
 /**
- * Prepare and start the personal host supervisor.
+ * Prepare (the gateway included) and start the personal host supervisor.
  *
  * The supervisor is started directly, detached from whoever asked for it, and found
  * again through its PID file. Nothing is registered with launchd, the Windows task
- * scheduler or systemd: the app starts the proxies, and they outlive the terminal or
- * the UI process that pressed the button. The cost is deliberate - nothing restarts
- * them after a reboot until the app runs again.
+ * scheduler or systemd: the app starts the supervisor, and it outlives the terminal
+ * or the UI process that pressed the button. The cost is deliberate - nothing
+ * restarts it after a reboot until the app runs again. The gateway is different:
+ * its own install registers its own autostart.
  */
 export async function hostStart(options = {}) {
   const prepared = options.skipPrepare
@@ -765,40 +616,37 @@ export async function hostStart(options = {}) {
     }
   }
   const deadline = Date.now() + (options.startTimeoutMs ?? 180_000);
-  const pollMs = options.statusPollMs ?? 500;
+  const pollMs = options.statusPollMs ?? 1_000;
   let status = await hostStatus(options);
-  while (!status.ok && Date.now() < deadline) {
+  // Waiting for a router with no login behind it would only run out the clock.
+  while (!status.ok && !gatewayNeedsLogin(status) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, pollMs));
     status = await hostStatus(options);
   }
-  return { ...status, prepared: true, started, alreadyRunning: existing.running, timedOut: !status.ok };
+  const loginNeeded = gatewayNeedsLogin(status);
+  return {
+    ...status,
+    prepared: true,
+    started,
+    alreadyRunning: existing.running,
+    timedOut: !status.ok && !loginNeeded,
+    ...(loginNeeded
+      ? { nextAction: gatewayLoginAction(status.gateway.ui?.url || config.gateway?.uiUrl, "run host start again") }
+      : {}),
+  };
 }
 
-/** Report only booleans and non-secret topology; response bodies are discarded. */
+/**
+ * The gateway's own status plus the supervisor and Ollama. Only booleans and
+ * non-secret topology are reported; response bodies are discarded.
+ */
 export async function hostStatus(options = {}) {
   const paths = resolveHostPaths(options);
+  const gateway = await gatewayStatus({ directory: paths.gatewayDir, runner: options.gatewayRunner, env: options.env });
   const config = await readRuntimeConfig(paths);
-  if (!config) return { ok: false, installed: false, running: false, paths };
+  if (!config) return { ok: false, installed: false, running: false, gateway, paths };
   const pid = await pidState(config.state.pidFile);
   const fetchImpl = options.fetchImpl || globalThis.fetch;
-  const proxyHealth = config.proxy.enabled ? await probeJson(fetchImpl, `${config.proxy.baseUrl}/health`) : { ok: true, status: null };
-  // Every managed proxy answers /health on its own port; a disabled one is not a
-  // failure, so it reports ok without being probed.
-  const proxyServices = config.proxies && typeof config.proxies === "object" ? config.proxies : { codex: config.proxy };
-  const proxyHealthByName = {};
-  for (const [name, service] of Object.entries(proxyServices)) {
-    const health = service?.enabled
-      ? (name === "codex" ? proxyHealth : await probeJson(fetchImpl, `${service.baseUrl}/health`))
-      : { ok: true, status: null };
-    proxyHealthByName[name] = {
-      enabled: Boolean(service?.enabled),
-      healthy: health.ok,
-      status: health.status,
-      port: service?.port ?? null,
-      model: service?.defaultModel ?? null,
-    };
-  }
-  const allProxiesHealthy = Object.values(proxyHealthByName).every((entry) => entry.healthy);
   const ollamaHealth = config.ollama.enabled ? await probeJson(fetchImpl, `${config.ollama.baseUrl}/api/version`) : { ok: true, status: null };
   let resident = !config.ollama.enabled;
   if (config.ollama.enabled && ollamaHealth.ok) {
@@ -807,18 +655,21 @@ export async function hostStatus(options = {}) {
   }
   const running = pid.running;
   return {
-    ok: running && allProxiesHealthy && ollamaHealth.ok && resident,
+    ok: running && gateway.ok && ollamaHealth.ok && resident,
     installed: true,
     running,
     supervisor: { pid: pid.record?.pid || null, processAlive: pid.running },
-    proxy: { enabled: config.proxy.enabled, healthy: proxyHealth.ok, status: proxyHealth.status, port: config.proxy.port, model: config.proxy.defaultModel },
-    proxies: proxyHealthByName,
+    gateway,
     ollama: { enabled: config.ollama.enabled, healthy: ollamaHealth.ok, status: ollamaHealth.status, model: config.ollama.model, resident },
     paths,
   };
 }
 
-/** Stop the supervisor and unload only its embedding model. */
+/**
+ * Stop the supervisor and unload only its embedding model. The gateway is left
+ * running: it has its own lifecycle, and `gateway/cli.mjs uninstall` in its
+ * directory is what removes it.
+ */
 export async function hostStop(options = {}) {
   const paths = resolveHostPaths(options);
   const config = await readRuntimeConfig(paths);

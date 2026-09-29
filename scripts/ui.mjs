@@ -2,8 +2,8 @@
 //
 // Everything here already exists as a `cli.mjs` subcommand. This is the same set of
 // steps for someone who does not open a terminal: see what is missing, connect to
-// someone else's shared bridge, install the hooks, bring up Honcho and the proxies,
-// and drop in a ChatGPT export. `cli.mjs ui open` starts it.
+// someone else's shared bridge, install the hooks, bring up Honcho and its host
+// services, and drop in a ChatGPT export. `cli.mjs ui open` starts it.
 //
 // It runs the CLI as a subprocess rather than importing it, so the UI and a terminal
 // take exactly the same path and there is one implementation of each step.
@@ -15,8 +15,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { installPaths } from "./config.mjs";
-import { securePrivateFile, writePrivateFileAtomic } from "./private-file-permissions.mjs";
+import { securePrivateFile } from "./private-file-permissions.mjs";
 
 const execFileAsync = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -171,70 +170,6 @@ async function spoolUpload(req) {
 }
 
 /**
- * The proxies are enabled in the installed host profile, which is also the only
- * place that says where their source lives. A fresh install ships with the
- * location blank and all three off, so without this the UI's proxy buttons could
- * never succeed - they would prepare a host that manages nothing.
- *
- * Only these fields are writable. Everything else in the profile, including the
- * Ollama section, is left exactly as it was, and a secret is refused outright
- * because `deriveHostTopology` rejects the whole profile when one appears.
- */
-const PROXY_NAMES = Object.freeze({ codex: "codexProxy", claude: "claudeProxy", router: "router" });
-
-function hostProfilePath() {
-  return path.join(installPaths().appHome, "server", "host-profile.personal.json");
-}
-
-async function readProxyProfile() {
-  const target = hostProfilePath();
-  let profile;
-  try { profile = JSON.parse(await fs.readFile(target, "utf8")); }
-  catch { return { ok: false, path: target, error: "The installed host profile does not exist yet. Install the server first." }; }
-  const proxies = {};
-  for (const [name, key] of Object.entries(PROXY_NAMES)) {
-    proxies[name] = { enabled: profile[key]?.enabled === true, baseUrl: profile[key]?.baseUrl || "", sourceDir: profile[key]?.sourceDir || "" };
-  }
-  return { ok: true, path: target, llmProxyRoot: profile.llmProxyRoot || "", proxies };
-}
-
-async function writeProxyProfile(body) {
-  const current = await readProxyProfile();
-  if (!current.ok) return current;
-  const target = current.path;
-  const profile = JSON.parse(await fs.readFile(target, "utf8"));
-
-  if (typeof body.llmProxyRoot === "string") {
-    const root = body.llmProxyRoot.trim();
-    if (root) {
-      const resolved = path.resolve(root);
-      try {
-        const stat = await fs.stat(resolved);
-        if (!stat.isDirectory()) throw new Error("not a directory");
-      } catch {
-        return { ok: false, error: `That is not a directory on this machine: ${resolved}` };
-      }
-      profile.llmProxyRoot = resolved;
-    } else {
-      profile.llmProxyRoot = "";
-    }
-  }
-  for (const [name, key] of Object.entries(PROXY_NAMES)) {
-    const wanted = body.proxies?.[name]?.enabled;
-    if (typeof wanted !== "boolean") continue;
-    profile[key] = { ...(profile[key] || {}), enabled: wanted };
-    if (wanted && !profile.llmProxyRoot && !profile[key].sourceDir) {
-      return { ok: false, error: `Set the proxy source location before enabling ${name}.` };
-    }
-  }
-
-  // Same writer the rest of the installer uses, so the file keeps its restricted
-  // ACL on Windows and its owner-only mode elsewhere.
-  await writePrivateFileAtomic(target, `${JSON.stringify(profile, null, 2)}\n`);
-  return { ...(await readProxyProfile()), updated: true };
-}
-
-/**
  * The shared-bridge values are credentials for someone else's memory. They reach
  * the CLI through its environment, never its arguments, because a command line is
  * visible to every process on the machine. A value the form left blank is removed
@@ -274,25 +209,23 @@ const ROUTES = {
   "/api/server/stop": async (body) => runCli(["server", "stop", ...profileOption(body)]),
   "/api/server/status": async (body) => runCli(["server", "status", ...profileOption(body)]),
   "/api/server/verify": async (body) => runCli(["server", "verify", ...profileOption(body, "personal")]),
-  "/api/proxies/config": async (body) => (
-    Object.keys(body || {}).length ? writeProxyProfile(body) : readProxyProfile()
-  ),
 };
 
 /**
- * The proxies have their own lifecycle, separate from the Docker stack: `host start`
- * launches the supervisor detached and records its PID, so the proxies survive this
- * UI process restarting or a terminal closing. Nothing is registered with launchd,
- * the Windows task scheduler or systemd - which also means nothing brings them back
- * after a reboot until someone opens the app or runs `host start` again.
- *
- * The UI says "proxy" because that is what the person is looking for.
+ * The host services have their own lifecycle, separate from the Docker stack.
+ * `host start` installs the subscription gateway through its own CLI - the gateway
+ * registers its own autostart - and launches the Ollama supervisor detached, so it
+ * survives this UI process restarting or a terminal closing. This repository
+ * registers nothing with launchd, the Windows task scheduler or systemd, so after
+ * a reboot the supervisor stays down until someone opens the app or runs
+ * `host start` again; the gateway comes back by itself.
  */
-const PROXY_ROUTES = {
-  "/api/proxies/health": ["host", "status", "--profile", "personal"],
-  "/api/proxies/install": ["host", "prepare", "--profile", "personal"],
-  "/api/proxies/start": ["host", "start", "--profile", "personal"],
-  "/api/proxies/stop": ["host", "stop", "--profile", "personal"],
+const HOST_ROUTES = {
+  "/api/host/status": ["host", "status", "--profile", "personal"],
+  "/api/host/prepare": ["host", "prepare", "--profile", "personal"],
+  "/api/host/start": ["host", "start", "--profile", "personal"],
+  "/api/host/stop": ["host", "stop", "--profile", "personal"],
+  "/api/gateway/open": ["gateway", "open"],
 };
 
 function profileOption(body, fallback = "portable") {
@@ -382,15 +315,15 @@ export function createUiServer() {
       return importChatGpt(req, res);
     }
     const route = ROUTES[url.pathname];
-    const proxyRoute = PROXY_ROUTES[url.pathname];
-    if (!route && !proxyRoute) return json(res, 404, { error: "Not found" });
+    const hostRoute = HOST_ROUTES[url.pathname];
+    if (!route && !hostRoute) return json(res, 404, { error: "Not found" });
     let body = {};
     if (req.method === "POST") {
       try { body = await readJsonBody(req); }
       catch (error) { return json(res, 400, { error: String(error?.message || error) }); }
     }
     try {
-      const result = proxyRoute ? await runCli(proxyRoute) : await route(body);
+      const result = hostRoute ? await runCli(hostRoute) : await route(body);
       return json(res, 200, result ?? { ok: false, error: "No result." });
     } catch (error) {
       return json(res, 500, { ok: false, error: String(error?.message || error) });

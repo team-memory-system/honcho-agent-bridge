@@ -74,30 +74,22 @@
   </section>
 
   <section class="card">
-    <h2>4. 서버와 프록시</h2>
-    <p class="muted">Honcho 컨테이너와, 구독 계정을 API로 바꿔 주는 프록시를 올립니다.</p>
+    <h2>4. 서버와 게이트웨이</h2>
+    <p class="muted">
+      Honcho 컨테이너를 올립니다. 대화 정리에 쓰는 모델은 구독 게이트웨이가 내 Codex·Claude 로그인으로 돌립니다.
+      로그인은 게이트웨이 화면에서 합니다. 서버 준비가 로그인을 요청하면 그 화면을 열어 로그인한 뒤 서버 준비를 다시 누르세요.
+    </p>
     <div class="actions">
       <button data-server="status" class="quiet">서버 상태</button>
       <button data-server="prepare" class="quiet">서버 준비</button>
       <button data-server="start" class="primary">서버 시작</button>
       <button data-server="stop" class="quiet">서버 정지</button>
     </div>
-    <form id="proxy-config">
-      <label>프록시 소스 위치
-        <input name="llmProxyRoot" placeholder="/Users/me/dev/llm-proxy" autocomplete="off">
-      </label>
-      <div class="actions">
-        <label class="inline"><input type="checkbox" name="codex"> Codex</label>
-        <label class="inline"><input type="checkbox" name="claude"> Claude</label>
-        <label class="inline"><input type="checkbox" name="router"> 라우터</label>
-        <button type="submit" class="quiet">저장</button>
-      </div>
-    </form>
     <div class="actions">
-      <button data-proxy="health" class="quiet">프록시 상태</button>
-      <button data-proxy="install" class="quiet">프록시 설치</button>
-      <button data-proxy="start" class="primary">프록시 시작</button>
-      <button data-proxy="stop" class="quiet">프록시 정지</button>
+      <button data-gateway="open" class="primary">게이트웨이 화면 열기</button>
+      <button data-host="status" class="quiet">게이트웨이·Ollama 상태</button>
+      <button data-host="start" class="quiet">게이트웨이·Ollama 시작</button>
+      <button data-host="stop" class="quiet">Ollama 정지</button>
     </div>
     <pre id="server-result" hidden></pre>
   </section>

@@ -15,8 +15,9 @@ import {
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { VERSION } from "./version.mjs";
-import { serverPlan, serverPrepare, serverStart, serverStatus, serverStop, serverVerify } from "./server-manager.mjs";
+import { installedServerDir, serverPlan, serverPrepare, serverStart, serverStatus, serverStop, serverVerify } from "./server-manager.mjs";
 import { hostPlan, hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
+import { gatewayDirectory, gatewayOpen } from "./gateway.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
@@ -998,6 +999,12 @@ async function main() {
     if (subcommand === "status") return hostStatus(hostOptions);
     if (subcommand === "stop") return hostStop(hostOptions);
   }
+  if (command === "gateway") {
+    const subcommand = args.shift() || "open";
+    // Asks the gateway to open its own screen, where the user logs in with Codex
+    // and Claude, and reports that screen's address.
+    if (subcommand === "open") return gatewayOpen({ directory: gatewayDirectory(installedServerDir()) });
+  }
   if (command === "setup") {
     const subcommand = args.shift() || "plan";
     const options = parseOptions(args);
@@ -1033,6 +1040,7 @@ async function main() {
       "host start [--profile personal]",
       "host status [--profile personal]",
       "host stop [--profile personal]",
+      "gateway open",
       "setup plan [options]",
       "setup apply [options]",
       "bridge status",

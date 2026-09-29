@@ -156,44 +156,39 @@ document.querySelector("[data-setup='plan']").addEventListener("click", async ()
   show("#setup-result", await api("/api/setup/plan", setupBody()));
 });
 
+// A prepare or start that stops for a gateway login says where to log in; say it
+// in words above the raw result.
+function serverSummary(payload, retry) {
+  if (payload?.nextAction?.kind === "gateway-login") {
+    return `게이트웨이 화면(${payload.nextAction.url})에서 Codex나 Claude로 로그인한 뒤 ${retry} 버튼을 다시 누르세요.\n\n`;
+  }
+  if (payload?.chatModel) return `대화 정리 모델: ${payload.chatModel}\n\n`;
+  return "";
+}
+
 for (const button of document.querySelectorAll("[data-server]")) {
   button.addEventListener("click", async () => {
     show("#server-result", `${button.textContent} 실행 중…`);
-    show("#server-result", await api(`/api/server/${button.dataset.server}`, { profile: "personal" }));
+    const payload = await api(`/api/server/${button.dataset.server}`, { profile: "personal" });
+    show("#server-result", `${serverSummary(payload, button.textContent)}${JSON.stringify(payload, null, 2)}`);
   });
 }
 
-for (const button of document.querySelectorAll("[data-proxy]")) {
+for (const button of document.querySelectorAll("[data-host]")) {
   button.addEventListener("click", async () => {
     show("#server-result", `${button.textContent} 실행 중…`);
-    show("#server-result", await api(`/api/proxies/${button.dataset.proxy}`, {}));
+    const payload = await api(`/api/host/${button.dataset.host}`, {});
+    show("#server-result", `${serverSummary(payload, button.textContent)}${JSON.stringify(payload, null, 2)}`);
   });
 }
 
-async function loadProxyConfig() {
-  const payload = await api("/api/proxies/config");
-  if (!payload.ok) { show("#server-result", payload); return; }
-  $("#proxy-config").elements.llmProxyRoot.value = payload.llmProxyRoot || "";
-  for (const name of ["codex", "claude", "router"]) {
-    $("#proxy-config").elements[name].checked = Boolean(payload.proxies?.[name]?.enabled);
-  }
-}
-
-$("#proxy-config").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = $("#proxy-config").elements;
-  show("#server-result", "저장 중…");
-  show("#server-result", await api("/api/proxies/config", {
-    llmProxyRoot: form.llmProxyRoot.value.trim(),
-    proxies: {
-      codex: { enabled: form.codex.checked },
-      claude: { enabled: form.claude.checked },
-      router: { enabled: form.router.checked },
-    },
-  }));
+document.querySelector("[data-gateway='open']").addEventListener("click", async () => {
+  show("#server-result", "게이트웨이 화면을 여는 중…");
+  const payload = await api("/api/gateway/open", {});
+  show("#server-result", payload.ok
+    ? `게이트웨이 화면: ${payload.url}\n브라우저 창이 안 떴으면 이 주소를 직접 여세요.`
+    : `열지 못했습니다. 서버 준비를 먼저 누르면 게이트웨이가 설치됩니다.\n\n${JSON.stringify(payload, null, 2)}`);
 });
-
-loadProxyConfig().catch(() => {});
 
 const fileInput = $("#chatgpt-file");
 fileInput.addEventListener("change", () => {
