@@ -146,8 +146,10 @@ export async function gatewaySourceProbe({ pinDirectory, directory, runner = exe
  * what it started runs from that folder, and on Windows a running process keeps a
  * folder from being renamed. The replaced copy is then kept as
  * `<directory>.previous` until the next replacement, and the caller installs the
- * new one. A copy that is current, or that this installer did not fetch, is never
- * uninstalled.
+ * new one. If the swap fails after the old copy uninstalled itself, the old copy is
+ * put back and its own `install` runs again, best effort, so the gateway keeps
+ * serving; the next attempt uninstalls it first again. A copy that is current, or
+ * that this installer did not fetch, is never uninstalled.
  *
  * `runner` runs git; `fileSystem` is replaceable so tests can make the swap fail.
  */
@@ -205,8 +207,15 @@ export async function ensureGatewaySource({
       `the gateway source could not be put in place (${error?.code || error?.message || error}); a gateway running from ${directory} can hold it open`,
     ];
     if (uninstall && !uninstall.ok) reasons.push(`before that, the old copy's uninstall failed: ${uninstall.error}`);
+    // The old copy took itself down for a swap that did not happen: bring it back.
+    let restore = null;
     if (uninstall?.ok) {
-      reasons.push("the old copy was uninstalled before the swap and is not running now; run server prepare or host start again once nothing holds the folder");
+      restore = (await exists(gatewayCliPath(directory)))
+        ? await gatewayInstall({ directory, runner: cliRunner, env, nodePath })
+        : { ok: false, error: `the old copy could not be put back at ${directory}` };
+      reasons.push(restore.ok
+        ? "the old copy had uninstalled itself before the swap and was installed again"
+        : `the old copy had uninstalled itself before the swap and could not be installed again: ${restore.error}`);
     }
     return {
       ok: false,
@@ -215,6 +224,7 @@ export async function ensureGatewaySource({
       state: probe.state,
       directory,
       ...(uninstall ? { uninstall } : {}),
+      ...(restore ? { restored: restore.ok, ...(restore.ok ? {} : { restoreError: restore.error }) } : {}),
       error: reasons.join("; "),
     };
   }
@@ -430,7 +440,7 @@ export async function gatewayOpen({ directory, runner, env, nodePath } = {}) {
 
 function publicSource(source) {
   if (!source || typeof source !== "object") return null;
-  const fields = ["ok", "fetched", "updated", "state", "repo", "ref", "commit", "previous", "uninstall"];
+  const fields = ["ok", "fetched", "updated", "state", "repo", "ref", "commit", "previous", "uninstall", "restored", "restoreError"];
   return Object.fromEntries(fields.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]));
 }
 

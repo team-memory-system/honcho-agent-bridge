@@ -58,9 +58,11 @@ gets an answer, without reading the underlying messages.
   or `host start` fetches the new copy, runs the old copy's own `uninstall` (its
   autostart removed, what it started stopped, logins kept) so nothing holds the
   folder open on Windows, keeps the old copy as `.previous`, and installs the new
-  one. If the swap still fails, the result says so, including a failed uninstall; a
-  copy that was uninstalled but could not be replaced stays down until the next run.
-  A folder there that this installer did not fetch is never uninstalled or replaced.
+  one. If the swap still fails, the result says so, including a failed uninstall. An
+  old copy that had already uninstalled itself is put back and installed again, best
+  effort, so the gateway keeps serving (`restored`, and `restoreError` when that
+  install fails); the next run uninstalls it first again. A folder there that this
+  installer did not fetch is never uninstalled or replaced.
 - **The gateway's logins are its own.** A Codex or Claude login made in the gateway
   screen lives in the gateway's app directory (`SubscriptionGateway`), apart from the
   user's own `codex` and `claude` logins; `codex login` and `~/.codex/auth.json` play
@@ -112,7 +114,7 @@ gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 148 tests, no network, no Docker
+npm test          # 149 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # setup screen on localhost
