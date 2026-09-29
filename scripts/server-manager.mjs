@@ -9,6 +9,7 @@ import { installPaths } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import { hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
+import { cloneSource, gitAvailable, readSourcePin } from "./source-pin.mjs";
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -140,31 +141,9 @@ async function bundleProbe(directory = sourceServerDir()) {
 // which is why `server/.gitignore` excludes the directory and why this package
 // carries no Honcho code. `honcho-source.json` says where to get it instead.
 const HONCHO_SOURCE_PIN = "honcho-source.json";
-const HONCHO_SOURCE_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._\/-]+$/;
-const HONCHO_SOURCE_REF = /^[A-Za-z0-9._\/-]{1,128}$/;
-const HONCHO_SOURCE_COMMIT = /^[0-9a-f]{40}$/;
 
 export async function honchoSourcePin(directory = sourceServerDir()) {
-  const pinPath = path.join(directory, HONCHO_SOURCE_PIN);
-  let raw;
-  try { raw = await fsp.readFile(pinPath, "utf8"); }
-  catch { return { ok: false, path: pinPath, reason: "no source pin is bundled" }; }
-  let parsed;
-  try { parsed = JSON.parse(raw); }
-  catch { return { ok: false, path: pinPath, reason: `${HONCHO_SOURCE_PIN} is not valid JSON` }; }
-  const repo = String(parsed?.repo || "").trim();
-  const ref = String(parsed?.ref || "").trim();
-  const commit = String(parsed?.commit || "").trim();
-  // Both values reach a command line, so neither is taken on trust.
-  if (!HONCHO_SOURCE_URL.test(repo)) return { ok: false, path: pinPath, reason: `${HONCHO_SOURCE_PIN} needs an https repository URL` };
-  if (!HONCHO_SOURCE_REF.test(ref)) return { ok: false, path: pinPath, reason: `${HONCHO_SOURCE_PIN} needs a branch or tag in "ref"` };
-  if (commit && !HONCHO_SOURCE_COMMIT.test(commit)) return { ok: false, path: pinPath, reason: `${HONCHO_SOURCE_PIN} "commit" must be a full 40-character hash` };
-  return { ok: true, path: pinPath, repo, ref, ...(commit ? { commit } : {}) };
-}
-
-async function gitAvailable(runner) {
-  try { await runner("git", ["--version"], { timeout: 10_000 }); return true; }
-  catch { return false; }
+  return readSourcePin(directory, HONCHO_SOURCE_PIN);
 }
 
 export async function honchoSourceProbe(directory = sourceServerDir(), { runner = execFileAsync } = {}) {
@@ -189,15 +168,9 @@ export async function ensureHonchoSource(directory = sourceServerDir(), { runner
   const staging = `${probe.directory}.fetching`;
   await fsp.rm(staging, { recursive: true, force: true });
   try {
-    const clone = ["clone", "--branch", pin.ref, "--single-branch"];
-    if (!pin.commit) clone.push("--depth", "1");
-    clone.push(pin.repo, staging);
-    await runner("git", clone, { timeout: 900_000 });
-    if (pin.commit) await runner("git", ["-C", staging, "checkout", "--detach", pin.commit], { timeout: 120_000 });
-    const { stdout } = await runner("git", ["-C", staging, "rev-parse", "HEAD"], { timeout: 30_000 });
-    await fsp.rm(path.join(staging, ".git"), { recursive: true, force: true });
+    const commit = await cloneSource(pin, staging, runner);
     await fsp.rename(staging, probe.directory);
-    return { ok: true, fetched: true, directory: probe.directory, repo: pin.repo, ref: pin.ref, commit: stdout.trim() };
+    return { ok: true, fetched: true, directory: probe.directory, repo: pin.repo, ref: pin.ref, commit };
   } catch (error) {
     await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
     return { ok: false, fetched: false, directory: probe.directory, error: error?.stderr?.trim() || error?.message || String(error) };

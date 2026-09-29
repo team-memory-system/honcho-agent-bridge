@@ -1161,6 +1161,7 @@ test("the source pin only accepts an https repository and a plausible ref", asyn
     { repo: "http://github.com/team/repo", ref: "main" },
     { repo: "https://github.com/team/repo", ref: "main; rm -rf /" },
     { repo: "https://github.com/team/repo", ref: "--upload-pack=touch" },
+    { repo: "https://github.com/team/repo", ref: "--depth" },
     { repo: "https://github.com/team/repo", ref: "main", commit: "abc123" },
   ]) {
     await write(JSON.stringify(rejected));
