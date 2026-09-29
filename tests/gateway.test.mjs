@@ -388,6 +388,23 @@ test("connect-info refuses what it cannot store safely and passes on why it is n
   }
 });
 
+test("the gateway's own Korean reason survives the sanitizer: a URL ends where the sentence goes on", async (t) => {
+  const directory = await installedGateway(t);
+  // Word for word what the real gateway's connect-info says with no login yet.
+  const reason = "라우터(http://127.0.0.1:52977/v1)가 응답하지 않습니다. 게이트웨이 화면(http://127.0.0.1:52976)에서 Codex 나 Claude 에 로그인하면 연결됩니다";
+  const notReady = await gatewayConnectInfo({
+    directory,
+    runner: answering({ ok: true, ready: false, baseUrl: "http://127.0.0.1:52977/v1", apiKey: ROUTER_KEY, models: [], reason }).runner,
+  });
+  assert.equal(notReady.reason, reason);
+
+  const withCredentials = await gatewayConnectInfo({
+    directory,
+    runner: answering({ ok: true, ready: false, models: [], reason: "화면(http://user:pw@127.0.0.1:11450/?token=1)에서 로그인, 그다음 http://127.0.0.1:11450." }).runner,
+  });
+  assert.equal(withCredentials.reason, "화면(http://127.0.0.1:11450/)에서 로그인, 그다음 http://127.0.0.1:11450.");
+});
+
 test("gateway CLI answers are read from its own JSON, and failures from its own error", async (t) => {
   const directory = await installedGateway(t);
   const installed = await gatewayInstall({

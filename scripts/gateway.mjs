@@ -64,6 +64,10 @@ const ROUTER_KEY = /^[A-Za-z0-9._~+\/=-]{16,4096}$/;
 const AUTOSTART_KIND = /^[a-z][a-z0-9-]{0,31}$/;
 const ACCOUNT_FIELD = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+// A URL inside running text: only characters a URL can hold, and no parentheses,
+// so it ends where the sentence goes on. The gateway writes Korean, where a
+// particle follows a URL with no space: "화면(http://127.0.0.1:11450)에서".
+const URL_IN_TEXT = /https?:\/\/[A-Za-z0-9\-._~:\/?#[\]@!$&*+,;=%]+/gi;
 
 async function exists(target) {
   try { await fsp.access(target); return true; } catch { return false; }
@@ -271,15 +275,19 @@ function sanitizeText(value, secrets = []) {
     .replace(/\b(?:sk|hch)-[A-Za-z0-9._-]+/g, "[redacted]")
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted]")
     .replace(/\b[0-9a-f]{32,}\b/gi, "[redacted]")
-    .replace(/https?:\/\/[^\s"'<>]+/gi, (match) => {
+    .replace(URL_IN_TEXT, (match) => {
+      // Sentence punctuation after a URL stays with the sentence.
+      const [, candidate, trailing] = match.match(/^(.*?)([.,;:!?]*)$/);
       try {
-        const url = new URL(match);
+        const url = new URL(candidate);
+        // A URL with nothing to strip is left exactly as the sentence wrote it.
+        if (!url.username && !url.password && !url.search && !url.hash) return match;
         url.username = "";
         url.password = "";
         url.search = "";
         url.hash = "";
-        return url.toString();
-      } catch { return "[redacted-url]"; }
+        return `${url.toString()}${trailing}`;
+      } catch { return `[redacted-url]${trailing}`; }
     })
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ")
     .trim()

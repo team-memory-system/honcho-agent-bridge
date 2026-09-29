@@ -8,7 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { formatJson, NAME_ONLY_FIELDS } from "../scripts/redact.mjs";
+import { formatJson, NAME_ONLY_FIELDS, sanitizeUrlsInText } from "../scripts/redact.mjs";
 import { serverPrepare } from "../scripts/server-manager.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -89,6 +89,16 @@ test("secret values stay redacted, and the names-only allowlist lets only settin
   assert.equal(printed.hasBridgeCredential, true);
   for (const secret of secrets) assert.equal(text.includes(secret), false, secret);
   assert.deepEqual([...NAME_ONLY_FIELDS], ["missingSecretFields"], "the allowlist grows only on purpose");
+});
+
+test("a URL in a printed error ends where the sentence goes on, credentials removed", () => {
+  // The gateway writes Korean, with a particle straight after a URL.
+  const gatewayError = "자동 시작(launchd)은 등록했지만 화면(http://127.0.0.1:11450)이 30초 안에 응답하지 않았습니다";
+  assert.equal(JSON.parse(formatJson({ error: gatewayError })).error, gatewayError);
+  assert.equal(
+    sanitizeUrlsInText("see https://user:pw@example.test/x?token=1, then 화면(http://[::1]:11400/v1)에서."),
+    "see https://example.test/x, then 화면(http://[::1]:11400/v1)에서.",
+  );
 });
 
 test("the CLI prints every result through that same formatter", async () => {

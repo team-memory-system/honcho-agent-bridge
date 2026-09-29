@@ -30,8 +30,17 @@ export function publicUrl(value) {
   }
 }
 
+// Only characters a URL can hold, and no parentheses, so a URL inside a sentence
+// ends where the sentence goes on - including a Korean particle with no space
+// before it, as in the gateway's own messages.
+const URL_IN_TEXT = /https?:\/\/[A-Za-z0-9\-._~:\/?#[\]@!$&*+,;=%]+/gi;
+
 export function sanitizeUrlsInText(value) {
-  return String(value).replace(/https?:\/\/[^\s"'<>]+/gi, (match) => publicUrl(match));
+  return String(value).replace(URL_IN_TEXT, (match) => {
+    // Sentence punctuation after a URL stays with the sentence.
+    const [, url, trailing] = match.match(/^(.*?)([.,;:!?]*)$/);
+    return `${publicUrl(url)}${trailing}`;
+  });
 }
 
 export function redactSecrets(value) {
