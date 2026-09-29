@@ -13,7 +13,7 @@ be the place you landed, so here is the whole map.
 |---|---|---|
 | [`honcho-selfhost`](https://github.com/team-memory-system/honcho-selfhost) | The memory server. A fork of `plastic-labs/honcho` (AGPL-3.0), with the MCP bridge and dashboard inside it | One computer per person |
 | **`honcho-agent-bridge`** (this one) | Collector, installer, diagnostics, release builder, agent plugin | Every machine that runs an agent |
-| [`llm-proxy`](https://github.com/team-memory-system/llm-proxy) | Turns subscription accounts into OpenAI-compatible APIs, plus a router (AGPL-3.0) | Only the computer that runs Honcho |
+| [`subscription-gateway`](https://github.com/team-memory-system/subscription-gateway) | Turns the owner's own Codex and Claude logins into one OpenAI-compatible router, with its own login screen (AGPL-3.0) | Only the computer that runs Honcho; `server prepare` fetches it and runs its own install |
 
 **Topology.** One Honcho and one database per person; that person's several machines
 all feed the same one. Teammates do not share a database. What is shared is a single
@@ -31,7 +31,9 @@ gets an answer, without reading the underlying messages.
    people who do not open a terminal; `cli.mjs ui open` starts it detached and opens
    the browser, which is how `/memory-setup` shows it.
 3. **Run the local stack.** `server ...` drives the Honcho Docker stack;
-   `host ...` drives the LLM proxies and Ollama.
+   `host ...` installs the subscription gateway through its own CLI and supervises
+   Ollama. Every chat model Honcho uses goes through the gateway's router; the router
+   key comes from the gateway, not from the person installing.
 4. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server. Given
    `honcho.mcpBridgeUrl` in its config it stops implementing the tools itself and
    relays to that bridge instead, so the tool definitions live in one place and the
@@ -41,12 +43,26 @@ gets an answer, without reading the underlying messages.
 
 ### Things that will bite you
 
-- **No OS autostart.** Nothing is registered with launchd, the Windows task
-  scheduler or systemd. `host start` spawns the supervisor detached and finds it
-  again through its PID file. After a reboot the proxies stay down until someone
-  runs `host start` or opens the setup UI. While they are down, Honcho's deriver
-  gets `connection refused` and its queue grows; messages are still stored, only
-  derivation stops.
+- **This repository registers no OS autostart; the gateway registers its own.**
+  Nothing here touches launchd, the Windows task scheduler or registry, or systemd.
+  The gateway's own `install`, which `server prepare` and `host start` run, registers
+  the gateway's per-user autostart (launchd, the Windows Run key or systemd,
+  reported as `autostart`), so after a reboot its screen, adapters and router come
+  back by themselves. The Ollama supervisor does not: `host start` spawns it
+  detached and finds it again through its PID file, and after a reboot it stays down
+  until someone runs `host start` or presses start in the setup UI. Until then the
+  Qwen alias is not kept loaded, and Ollama answers only if its own app started it.
+  `host stop` and `server stop` leave the gateway running;
+  `node <app-dir>/runtime/subscription-gateway/gateway/cli.mjs uninstall` removes it.
+- **The gateway's logins are its own.** A Codex or Claude login made in the gateway
+  screen lives in the gateway's app directory (`SubscriptionGateway`), apart from the
+  user's own `codex` and `claude` logins; `codex login` and `~/.codex/auth.json` play
+  no part. Until one login is connected, `server prepare` stops with
+  `nextAction.kind: "gateway-login"` and the screen's address.
+- **`server start` prepares again, so it chooses the chat model again.** Without
+  `--model` that is the first of `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.5`,
+  `claude-haiku-4-5`, `claude-sonnet-5-5` the gateway offers. A model picked with
+  `server prepare --model` has to be passed to `server start` as well.
 - **The hook is what keeps collection alive.** Changing the hook command format has
   happened twice already; `LEGACY_HOOK_MARKERS` in `scripts/cli.mjs` exists so the
   installer can still recognise and clean up hooks it wrote under an older name.
@@ -55,6 +71,9 @@ gets an answer, without reading the underlying messages.
   are deliberately left at the old spelling: renaming them buys nothing and can
   stop live collection. The installed layout under
   `~/Library/Application Support/HonchoAgentBridge` is the one this code creates.
+  Its gateway runs from `~/dev/subscription-gateway` under the LaunchAgent
+  `subscription-gateway.ui`; `server prepare` or `host start` there would fetch a
+  second gateway into the app directory and run that copy's `install`.
 - **`setup` rebuilds `config.json` from scratch.** Anything it does not own must be
   carried through explicitly; `RELAY_FIELDS` in `scripts/cli.mjs` is that list for
   the shared bridge. Before it existed, installing hooks silently disconnected a
@@ -69,14 +88,16 @@ gets an answer, without reading the underlying messages.
   CLI through its environment.
 - **Secrets are never in this repository.** Tokens live in the installed private
   `config.json` and `.env`, and in 1Password. `assertNoSecretFields` rejects a host
-  profile that carries one.
+  profile that carries one. The gateway's router key comes from its `connect-info`,
+  is written only into the installed private `.env`, and appears in no result this
+  CLI prints; `scripts/gateway.mjs` hands it on as a non-enumerable property.
 - **`--profile personal` needs macOS or Windows.** Native Linux cannot reach the
   loopback-only host services from Docker; use `--profile portable` there.
 
 ### Verify a change
 
 ```sh
-npm test          # 114 tests, no network, no Docker
+npm test          # 135 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # setup screen on localhost
@@ -85,8 +106,9 @@ npm run ui        # setup screen on localhost
 Tests are the contract. Several of them exist specifically to fail when something
 drifts: the tool count in `tests/mcp-server.test.mjs`, the setup and connect forms'
 field names in `tests/ui.test.mjs`, the relay fields surviving `setup apply` in
-`tests/bridge-connect.test.mjs`, and the absence of any OS-registration call in
-`tests/host-manager.test.mjs`.
+`tests/bridge-connect.test.mjs`, the absence of any OS-registration call in
+`tests/host-manager.test.mjs`, and the gateway's router key never appearing in a
+returned result in `tests/gateway.test.mjs` and `tests/server-manager.test.mjs`.
 
 ### Licence
 
@@ -94,7 +116,9 @@ MIT. This repository contains no Honcho source: `scripts/build-distribution.mjs`
 copies the server into `server/honcho/` inside a release bundle at build time, and
 copies `HONCHO-LICENSE-AGPL-3.0.txt` next to it. A built bundle is therefore a
 combined work carrying AGPL-3.0 code; this repository on its own is not.
-`honcho-selfhost` and `llm-proxy` are AGPL-3.0 and separate.
+`honcho-selfhost` and `subscription-gateway` are AGPL-3.0 and separate. The gateway
+is fetched at install time into the app directory and runs as its own program; no
+release bundle contains it.
 
 ---
 
@@ -117,11 +141,11 @@ Company memory, folder-based sharing rules, and cross-device database synchroniz
 - Docker Desktop/Engine with Compose when installing the bundled local Honcho server, or an existing Honcho API at `http://127.0.0.1:8001`.
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
 
-The `personal` profile also requires macOS or Windows, a working Codex login, and Ollama on the host. It reuses the current user's `~/.codex/auth.json`; it never copies Codex credentials into the plugin, Docker image, release archive, or private server environment. Run `codex login` on a new computer before setup. The setup process validates only that usable access and refresh credentials exist. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
+The `personal` profile also requires macOS or Windows, git, Ollama on the host, and a Codex and/or Claude subscription. `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
 
-On Windows, Docker Desktop must use its WSL 2 backend, hardware virtualization and the WSL features must be enabled, and Ollama must be installed for the current user and available on `PATH`. `server plan` checks Docker CLI/Compose and engine health; personal preparation checks Codex authentication, npm/pnpm, Ollama and its local API, and the required base/alias/context. Docker engine readiness is the current gate for the WSL backend: setup does not independently enable WSL, clear a pending reboot, or preflight every port. If Docker reports that a WSL feature change requires a reboot, restart Windows and run the same plan again.
+On Windows, Docker Desktop must use its WSL 2 backend, hardware virtualization and the WSL features must be enabled, and Ollama must be installed for the current user and available on `PATH`. `server plan` checks Docker CLI/Compose and engine health and whether git can fetch the gateway; personal preparation installs the gateway (its own install brings its npm dependencies) and checks Ollama and its local API, and the required base/alias/context. Docker engine readiness is the current gate for the WSL backend: setup does not independently enable WSL, clear a pending reboot, or preflight every port. If Docker reports that a WSL feature change requires a reboot, restart Windows and run the same plan again.
 
-When Docker or Ollama is absent, the setup skill offers an explicitly confirmed installation through the detected platform's official package manager or vendor installer, then reruns the prerequisite checks. System software installation is never hidden inside the release archive.
+When Docker, Ollama or git is absent, the setup skill offers an explicitly confirmed installation through the detected platform's official package manager or vendor installer, then reruns the prerequisite checks. System software installation is never hidden inside the release archive.
 
 One setup run can enable conversation collection for every detected agent. Installing the plugin in each host is still required for that host to receive the skills and MCP tools.
 
@@ -152,10 +176,10 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 
 | Profile | What runs in Docker | What runs on the host | Model credentials | Intended use |
 | --- | --- | --- | --- | --- |
-| `personal` | Honcho API, Deriver, PostgreSQL/pgvector, Redis, dashboard | Codex OpenAI-compatible proxy, Ollama, `qwen3-embedding-honcho-8192`, collector and MCP bridge | Reuses the current `codex login`; the Docker-to-proxy shared secret is generated locally | macOS/Windows reproduction of this self-hosted topology with local 1536-dimensional, 8192-token embeddings |
+| `personal` | Honcho API, Deriver, PostgreSQL/pgvector, Redis, dashboard | Subscription gateway (router 11400, screen 11450), Ollama, `qwen3-embedding-honcho-8192`, collector and MCP bridge | A Codex and/or Claude login in the gateway's screen; the router key comes from the gateway and is written only into the installed private `.env` | macOS/Windows reproduction of this self-hosted topology with local 1536-dimensional, 8192-token embeddings |
 | `portable` | Honcho API, Deriver, PostgreSQL/pgvector, Redis, dashboard | Collector and MCP bridge only | External OpenAI-compatible API key entered in the installed private `.env` | Generic installation when the personal host topology is unavailable or unwanted |
 
-The `personal` profile requires `server/env.personal.example` and `server/host-profile.personal.json`. The LLM proxy is an independently installed service from `../llm-proxy`; this bundle neither includes its source nor starts/stops it by default (`codexProxy.enabled: false` means externally managed). Supply that service's existing shared key as `LLM_VLLM_API_KEY` in a private source or installed `.env` before preparing. No random proxy key is generated for an external service. `server prepare --profile personal` prepares Honcho and local Ollama; the host supervisor keeps the Qwen alias resident. Server stop leaves the independently managed proxy running. Legacy opt-in managed profiles must explicitly set `codexProxy.enabled: true` and may set `codexProxy.sourceDir` to an independently installed source directory.
+The `personal` profile requires `server/env.personal.example`, `server/host-profile.personal.json` and `server/gateway-source.json`. `server prepare --profile personal` fetches the gateway that `gateway-source.json` names into `runtime/subscription-gateway` under the app directory (and fetches it again when that pin changes, keeping the replaced copy as `.previous`), runs the gateway's `install`, and asks its `connect-info` for the router address and key. Until a login is connected it returns `ready: false` with `nextAction: {"kind": "gateway-login", "url": ...}` and changes nothing installed. Once one is, it writes the router address (its host replaced by `host.docker.internal`), the key, and the chosen chat model with `THINKING_EFFORT=low` into every chat setting of the installed `.env`; embeddings stay on Ollama, and other values the user edited are kept. The chat model is the first of `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.5`, `claude-haiku-4-5` and `claude-sonnet-5-5` the gateway offers, otherwise the first it lists; `--model <id>` picks another it offers. The host supervisor keeps the Qwen alias resident. `server stop` and `host stop` leave the gateway running.
 
 For development or recovery, the same deterministic workflow is available directly:
 
@@ -163,8 +187,9 @@ For development or recovery, the same deterministic workflow is available direct
 node scripts/cli.mjs detect
 node scripts/cli.mjs server plan --profile personal
 node scripts/cli.mjs server prepare --profile personal
-# If Codex authentication is missing or expired, run `codex login` locally,
-# then rerun prepare. Never paste or copy auth.json into the bundle.
+# If it returns nextAction "gateway-login": open the gateway screen, log in there
+# with Codex and/or Claude, then rerun prepare.
+node scripts/cli.mjs gateway open
 node scripts/cli.mjs server start --profile personal
 node scripts/cli.mjs server status --profile personal
 node scripts/cli.mjs server verify --profile personal
@@ -173,9 +198,9 @@ node scripts/cli.mjs setup apply --agents codex,claude --user-peer user_name
 node scripts/cli.mjs doctor
 ```
 
-For a portable install, replace `personal` with `portable`. `server prepare` reports the blank external LLM credential fields without printing their values; fill only those fields in the returned installed `.env` path before running `server start`. The collector and MCP bridge always remain on the host so they can read agent transcripts and integrate with the host tool cache. The Honcho API, dashboard, Codex proxy, and Ollama endpoints bind to localhost; database ports are not exposed.
+For a portable install, replace `personal` with `portable`. `server prepare` reports the blank external LLM credential fields without printing their values; fill only those fields in the returned installed `.env` path before running `server start`. The collector and MCP bridge always remain on the host so they can read agent transcripts and integrate with the host tool cache. The Honcho API, dashboard, gateway, and Ollama endpoints bind to localhost; database ports are not exposed.
 
-`server verify --profile personal` performs a production-shaped, non-destructive diagnostic: combined server status, a local Ollama embedding request proven to exceed 2048 evaluated tokens with truncation disabled and exactly 1536 output dimensions, Docker API-container access to both host services, and Honcho health. It does not call a Codex model by default. Add `--live-completion` only when an actual minimal Codex completion is intended; the command reads the installed proxy secret internally, never places it on a command line, returns only success and model, and discards the completion body.
+`server verify --profile personal` performs a production-shaped, non-destructive diagnostic: combined server status including the gateway's router health, a local Ollama embedding request proven to exceed 2048 evaluated tokens with truncation disabled and exactly 1536 output dimensions, Docker API-container access to both host services (Ollama and the router's `/health`), and Honcho health. It makes no model call by default. Add `--live-completion` only when an actual minimal completion through the router is intended; it uses the installed `.env`'s router address, key, model and effort, reads the key internally, never places it on a command line, sends it nowhere but this machine, returns only success and model, and discards the completion body.
 
 ## Building a distributable bundle
 
@@ -187,7 +212,7 @@ node scripts/build-distribution.mjs \
   --env-source /path/to/custom-honcho/.env
 ```
 
-The optional environment source becomes `server/env.personal.example`, and its non-secret host requirements become `server/host-profile.personal.json`. Model names, dimensions, context length, ports, and topology remain; keys, tokens, passwords, credentials, and secret-looking values are blank. The resulting bundle contains no conversations, database volume, Codex authentication, or Ollama model blobs. Run `server plan`, `prepare`, and `start` with `--profile personal` to reproduce the complete Docker-plus-host topology. Use `--profile portable` for the generic external OpenAI-compatible configuration.
+The optional environment source becomes `server/env.personal.example`, and its non-secret host requirements become `server/host-profile.personal.json`. Embedding model names, dimensions, context length and ports remain; every chat setting points at the gateway's router defaults (`host.docker.internal:11400`, `gpt-6-luna`, `low`), which `server prepare` replaces with what the installed gateway reports. Keys, tokens, passwords, credentials, and secret-looking values are blank. The resulting bundle contains no conversations, database volume, gateway source or logins, or Ollama model blobs. Run `server plan`, `prepare`, and `start` with `--profile personal` to reproduce the complete Docker-plus-host topology. Use `--profile portable` for the generic external OpenAI-compatible configuration.
 
 `setup apply` copies the runtime to a stable application-data directory, writes a private `config.json`, merges only the managed Codex Stop hook, and removes obsolete Honcho Agent Bridge hooks. Claude Code uses the hook bundled with the plugin. Existing unrelated hooks and settings are preserved.
 
@@ -199,7 +224,7 @@ The optional environment source becomes `server/env.personal.example`, and its n
 | Windows | `%LOCALAPPDATA%\HonchoAgentBridge` |
 | Linux | `$XDG_DATA_HOME/honcho-agent-bridge` or `~/.local/share/honcho-agent-bridge` |
 
-The directory contains the private configuration and data plus isolated runtime trees: `runtime/collector` for the replaceable collector/MCP bridge and, in the personal profile, `runtime/host` for the long-running proxy/Ollama supervisor. Collector rollback is retained beside it as `runtime/collector.previous`; server rollback uses `server.previous`. Override the application-data root for testing with `HONCHO_AGENT_BRIDGE_HOME`; override the detected user home with `HONCHO_AGENT_BRIDGE_USER_HOME`.
+The directory contains the private configuration and data plus isolated runtime trees: `runtime/collector` for the replaceable collector/MCP bridge and, in the personal profile, `runtime/host` for the long-running Ollama supervisor and `runtime/subscription-gateway` for the gateway's fetched source. The gateway keeps its logins in its own app directory, `SubscriptionGateway`. Collector rollback is retained beside it as `runtime/collector.previous`; server rollback uses `server.previous`. Override the application-data root for testing with `HONCHO_AGENT_BRIDGE_HOME`; override the detected user home with `HONCHO_AGENT_BRIDGE_USER_HOME`.
 
 ## Architecture
 
@@ -210,9 +235,10 @@ Claude plugin hook ──> main.mjs ─> queue.mjs ─> collector.mjs ─> Honch
 Agent host ──────┴─> bundled stdio MCP ─────────────────────────> Honcho API
 
 personal profile only:
-Honcho containers ──> host Codex proxy ──> existing Codex OAuth session
-Honcho containers ──> host Ollama ───────> Qwen3 1536d / 8192-token embeddings
-Native user service ─────────────────────> keeps proxy and Qwen resident
+Honcho containers ──> gateway router :11400 ──> the gateway's own Codex / Claude logins
+Honcho containers ──> host Ollama ────────────> Qwen3 1536d / 8192-token embeddings
+Gateway's own autostart ──────────────────────> gateway screen, adapters and router
+host start (detached supervisor) ─────────────> keeps Qwen resident
 ```
 
 The queue keeps failed imports and retries them on the next agent Stop hook or an explicit queue drain. Its personal local-server defaults drain every newly queued transcript immediately. Transcript parsing is provider-specific; storage, deduplication, peer configuration, and API writes are shared.
@@ -245,8 +271,8 @@ Installation rollback and memory backup are different:
 
 - Setup automatically rolls back the managed runtime, private configuration, and edited host hook files when an apply step fails. Updates retain `runtime/collector.previous` and `server.previous`; unrelated host settings and the running host supervisor are preserved.
 - Durable memory lives primarily in the Docker PostgreSQL `pgdata` volume. A machine-migration or disaster backup must contain a consistent PostgreSQL dump (or an offline copy of that volume) plus the Honcho Agent Bridge application-data directory containing `config.json`, the private server `.env`, MCP tool settings, and any pending collector spool/state. Include the Redis volume only when preserving in-flight Deriver jobs is important; Redis is not the authoritative long-term memory store.
-- Codex `auth.json`, Ollama model blobs, generated proxy dependencies, plugin caches, and hooks are deliberately outside the portable backup set. On a restored computer, install the prerequisites, run `codex login`, restore the database and private Honcho Agent Bridge files, then rerun `server prepare/start --profile personal`, `host start`, and `setup apply`. Qwen models are recreated when absent.
-- Keep backups encrypted because the private `.env` and Honcho Agent Bridge configuration can contain database passwords or API bearer tokens. The release builder never includes them.
+- The gateway (its source and its logins), Ollama model blobs, plugin caches, and hooks are deliberately outside the portable backup set. On a restored computer, install the prerequisites, restore the database and private Honcho Agent Bridge files, then rerun `server prepare --profile personal` (log in at the gateway screen when it asks; the restored router key is replaced with the new gateway's), `server start --profile personal`, and `setup apply`. Qwen models are recreated when absent.
+- Keep backups encrypted because the private `.env` and Honcho Agent Bridge configuration can contain database passwords, the gateway's router key, or API bearer tokens. The release builder never includes them.
 - `server stop --profile personal` preserves Docker volumes. Never use `docker compose down -v` unless permanently deleting the memory database is the explicit goal.
 
 ## Verification

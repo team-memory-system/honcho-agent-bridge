@@ -16,9 +16,14 @@ The setup CLI creates `.env`, generates a database password, and starts this
 project. API and dashboard ports bind only to `127.0.0.1`; PostgreSQL and Redis
 are not published to the host. Persistent memory lives in named Docker volumes.
 
-`env.personal.example`, when present, contains a sanitized copy of the release
-author's model topology. Secret-looking values are always blanked. It may rely
-on host-side OpenAI-compatible services and is therefore opt-in.
+`env.personal.example` is the personal profile's template. Every chat model
+points at the subscription gateway's router (`host.docker.internal:11400`) and
+embeddings at Ollama; secret-looking values are always blank. `server prepare
+--profile personal` writes the router address, key and chat model that the
+installed gateway reports over those defaults. `gateway-source.json` names the
+gateway's repository the way `honcho-source.json` names Honcho's, but the gateway
+is fetched into the app directory's `runtime/subscription-gateway`, not here: it
+runs as its own program, and its own autostart points at those files.
 
 Never add `.env`, database exports, Docker volumes, API keys, bearer tokens, or
 Cloudflare credentials to a release.
