@@ -18,6 +18,7 @@ import {
   gatewayOpen,
   gatewaySourceProbe,
   gatewayStatus,
+  installedChatModel,
   modelList,
   PREFERRED_CHAT_MODELS,
 } from "../scripts/gateway.mjs";
@@ -297,24 +298,41 @@ if (subcommand === "install") {
   assert.deepEqual(failed, { ok: false, error: "unknown subcommand: open" });
 });
 
-test("the chat model is the first preferred one offered, else the first listed, and --model must be offered", () => {
+test("the chat model is --model, else the installed one while offered, else the preference order", () => {
   assert.deepEqual(PREFERRED_CHAT_MODELS, ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5", "claude-haiku-4-5", "claude-sonnet-5-5"]);
-  assert.equal(chooseChatModel(["claude-sonnet-5-5", "gpt-5.5", "gpt-6-luna"]).model, "gpt-6-luna");
-  assert.equal(chooseChatModel(["claude-sonnet-5-5", "gpt-5.6-luna", "gpt-5.5"]).model, "gpt-5.6-luna");
-  assert.equal(chooseChatModel(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"]).model, "claude-haiku-4-5");
-  const fallback = chooseChatModel(["local-chat-1", "local-chat-2"]);
-  assert.deepEqual([fallback.model, fallback.source], ["local-chat-1", "first-offered"]);
+  const offered = ["claude-sonnet-5-5", "gpt-5.5", "gpt-6-luna"];
+  const pick = (models, choice) => {
+    const result = chooseChatModel(models, choice);
+    return result.ok ? [result.model, result.source] : [result.ok, result.error];
+  };
 
-  const requested = chooseChatModel(["gpt-6-luna", "claude-sonnet-5-5"], "claude-sonnet-5-5");
-  assert.deepEqual([requested.ok, requested.model, requested.source], [true, "claude-sonnet-5-5", "requested"]);
-  const refused = chooseChatModel(["gpt-6-luna"], "gpt-7");
+  // override: what was asked for, as long as the gateway offers it.
+  assert.deepEqual(pick(offered, { requested: "claude-sonnet-5-5", installed: "gpt-5.5" }), ["claude-sonnet-5-5", "override"]);
+  const refused = chooseChatModel(["gpt-6-luna"], { requested: "gpt-7" });
   assert.equal(refused.ok, false);
   assert.match(refused.error, /does not offer the model "gpt-7"\. It offers: gpt-6-luna/);
 
+  // kept: the installed model wins over the preference order while it is offered.
+  assert.deepEqual(pick(offered, { installed: "claude-sonnet-5-5" }), ["claude-sonnet-5-5", "kept"]);
+
+  // default: nothing installed, or an installed model the gateway no longer offers.
+  assert.deepEqual(pick(offered, {}), ["gpt-6-luna", "default"]);
+  assert.deepEqual(pick(offered, { installed: "claude-opus-5-5" }), ["gpt-6-luna", "default"]);
+  assert.deepEqual(pick(["claude-sonnet-5-5", "gpt-5.6-luna", "gpt-5.5"]), ["gpt-5.6-luna", "default"]);
+  assert.deepEqual(pick(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"]), ["claude-haiku-4-5", "default"]);
+  assert.deepEqual(pick(["local-chat-1", "local-chat-2"]), ["local-chat-1", "default"]);
   assert.equal(chooseChatModel([]).ok, false);
-  // An id that could break a .env line is never offered, so it can never be chosen.
+
+  // An id that could break a .env line is never offered, so it can never be chosen or kept.
   assert.deepEqual(modelList(["gpt-5.5\nAUTH_USE_AUTH=false", "gpt-5.5", "gpt-5.5", 7, "a b"]), ["gpt-5.5"]);
-  assert.equal(chooseChatModel(["x\ny", "gpt-5.5"], "x\ny").ok, false);
+  assert.equal(chooseChatModel(["x\ny", "gpt-5.5"], { requested: "x\ny" }).ok, false);
+  assert.deepEqual(pick(["x\ny", "gpt-5.5"], { installed: "x\ny" }), ["gpt-5.5", "default"]);
+});
+
+test("the installed chat model is read from the first chat setting that names one", () => {
+  assert.equal(installedChatModel({}), "");
+  assert.equal(installedChatModel({ DERIVER_MODEL_CONFIG__MODEL: " gpt-5.5 ", SUMMARY_MODEL_CONFIG__MODEL: "gpt-6-luna" }), "gpt-5.5");
+  assert.equal(installedChatModel({ EMBEDDING_MODEL_CONFIG__MODEL: "qwen3-embedding-honcho-8192", SUMMARY_MODEL_CONFIG__MODEL: "claude-haiku-4-5" }), "claude-haiku-4-5");
 });
 
 test("the gateway's values point every chat model at the router through the Docker host alias", () => {

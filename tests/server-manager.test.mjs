@@ -1300,7 +1300,7 @@ test("personal prepare writes the gateway's router, key and chosen model into th
   assert.equal(result.ok, true, result.issues?.join(", "));
   assert.equal(result.ready, true);
   assert.equal(result.chatModel, "gpt-6-luna");
-  assert.equal(result.gateway.modelChoice, "preferred");
+  assert.equal(result.chatModelSource, "default");
   assert.equal(result.gateway.routerUrl, "http://127.0.0.1:11400/v1");
   assert.equal(result.gateway.autostart, "launchd");
   assert.equal(result.gateway.routerKeyUpdated, true);
@@ -1356,7 +1356,7 @@ test("re-running prepare updates the key and model and keeps what the user edite
   const second = await prepare(fakeGateway({ apiKey: rotatedKey }), { model: "claude-sonnet-5-5" });
   assert.equal(second.ready, true, second.issues?.join(", "));
   assert.equal(second.chatModel, "claude-sonnet-5-5");
-  assert.equal(second.gateway.modelChoice, "requested");
+  assert.equal(second.chatModelSource, "override");
   assert.equal(second.gateway.routerKeyUpdated, true);
   assert.equal(second.environment.updated, true);
   assert.equal(JSON.stringify(second).includes(rotatedKey), false);
@@ -1369,12 +1369,77 @@ test("re-running prepare updates the key and model and keeps what the user edite
   assert.equal(updated.LOG_LEVEL, "DEBUG");
   assert.equal(updated.POSTGRES_PASSWORD, first.POSTGRES_PASSWORD, "the database password is never regenerated");
 
-  // Nothing changed at the gateway: nothing changes in the file.
-  const third = await prepare(fakeGateway({ apiKey: rotatedKey }), { model: "claude-sonnet-5-5" });
+  // Nothing changed at the gateway: nothing changes in the file, and the model
+  // chosen last time stays without being asked for again.
+  const third = await prepare(fakeGateway({ apiKey: rotatedKey }));
   assert.equal(third.ready, true);
+  assert.equal(third.chatModel, "claude-sonnet-5-5");
+  assert.equal(third.chatModelSource, "kept");
   assert.equal(third.environment.updated, false);
   assert.equal(third.gateway.routerKeyUpdated, false);
   assert.equal(await fsp.readFile(envPath, "utf8"), secondText);
+});
+
+test("prepare keeps the installed chat model while the gateway offers it, and goes back to the default when it does not", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-kept-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const envPath = path.join(destination, ".env");
+  await fsp.mkdir(destination, { recursive: true });
+  const prepare = () => serverPrepare({
+    profile: "personal",
+    hostRuntime: { status: async () => ({ running: false }), prepare: async () => ({ ok: true, ready: true }) },
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
+    ...fakeGateway({ models: ["gpt-6-luna", "claude-sonnet-5-5"] }).options,
+    serverDirectory: destination,
+  });
+
+  // Chosen on an earlier run; gpt-6-luna would win the preference order.
+  await fsp.writeFile(envPath, "DERIVER_MODEL_CONFIG__MODEL=claude-sonnet-5-5\n", { mode: 0o600 });
+  const kept = await prepare();
+  assert.equal(kept.ready, true, kept.issues?.join(", "));
+  assert.deepEqual([kept.chatModel, kept.chatModelSource], ["claude-sonnet-5-5", "kept"]);
+  const environment = parseEnv(await fsp.readFile(envPath, "utf8"));
+  for (const prefix of CHAT_PREFIXES) assert.equal(environment[`${prefix}__MODEL`], "claude-sonnet-5-5", prefix);
+
+  // A model the gateway stopped offering is not kept.
+  await fsp.writeFile(envPath, "DERIVER_MODEL_CONFIG__MODEL=claude-opus-5-5\n", { mode: 0o600 });
+  const replaced = await prepare();
+  assert.equal(replaced.ready, true, replaced.issues?.join(", "));
+  assert.deepEqual([replaced.chatModel, replaced.chatModelSource], ["gpt-6-luna", "default"]);
+});
+
+test("server start keeps an earlier --model without being given it again", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-start-kept-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  const hostRuntime = {
+    status: async () => ({ running: false }),
+    prepare: async () => ({ ok: true, ready: true }),
+    start: async () => ({ ok: true, running: true }),
+  };
+  const common = {
+    profile: "personal",
+    hostRuntime,
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
+    serverDirectory: destination,
+  };
+  const prepared = await serverPrepare({ ...common, ...gatewayStub(), model: "claude-sonnet-5-5" });
+  assert.equal(prepared.chatModelSource, "override");
+
+  const started = await serverStart({
+    ...common,
+    ...gatewayStub(),
+    composeRunner: async () => ({ stdout: "started\n", stderr: "" }),
+    healthWaiter: async () => ({ ok: true, status: 200 }),
+  });
+  assert.equal(started.ok, true);
+  const environment = parseEnv(await fsp.readFile(path.join(destination, ".env"), "utf8"));
+  for (const prefix of CHAT_PREFIXES) assert.equal(environment[`${prefix}__MODEL`], "claude-sonnet-5-5", prefix);
 });
 
 test("a requested model the gateway does not offer, or a failed gateway install, stops prepare before the bundle", async (t) => {

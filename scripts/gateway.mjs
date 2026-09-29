@@ -435,25 +435,41 @@ export function gatewayLoginAction(uiUrl, then) {
 // ------------------------------------------------------------- model and .env
 
 /**
- * The chat model for every Honcho chat setting: `requested` when the gateway offers
- * it, otherwise the first of PREFERRED_CHAT_MODELS it offers, otherwise the first
- * model it lists.
+ * The chat model for every Honcho chat setting, and where it came from:
+ *   override  `requested`, which the gateway has to offer
+ *   kept      `installed`, the model the installed .env already uses, while the
+ *             gateway still offers it
+ *   default   the first of PREFERRED_CHAT_MODELS the gateway offers, otherwise the
+ *             first model it lists
+ * Keeping the installed model is what lets `server start`, which prepares again,
+ * keep an earlier --model without being given it again.
  */
-export function chooseChatModel(models, requested = "") {
+export function chooseChatModel(models, { requested = "", installed = "" } = {}) {
   const offered = modelList(models);
   const wanted = String(requested || "").trim();
   if (wanted) {
-    if (offered.includes(wanted)) return { ok: true, model: wanted, source: "requested", offered };
+    if (offered.includes(wanted)) return { ok: true, model: wanted, source: "override", offered };
     return {
       ok: false,
       offered,
       error: `The gateway does not offer the model "${wanted.slice(0, 200)}". It offers: ${offered.join(", ") || "none yet"}`,
     };
   }
+  const current = String(installed || "").trim();
+  if (current && offered.includes(current)) return { ok: true, model: current, source: "kept", offered };
   const preferred = PREFERRED_CHAT_MODELS.find((model) => offered.includes(model));
-  if (preferred) return { ok: true, model: preferred, source: "preferred", offered };
-  if (offered.length) return { ok: true, model: offered[0], source: "first-offered", offered };
+  if (preferred) return { ok: true, model: preferred, source: "default", offered };
+  if (offered.length) return { ok: true, model: offered[0], source: "default", offered };
   return { ok: false, offered, error: "The gateway offers no model yet" };
+}
+
+/** The chat model an installed .env uses now, or "". */
+export function installedChatModel(environment = {}) {
+  for (const prefix of CHAT_MODEL_PREFIXES) {
+    const model = String(environment[`${prefix}__MODEL`] || "").trim();
+    if (model) return model;
+  }
+  return "";
 }
 
 /** The router as the Honcho containers reach it. */

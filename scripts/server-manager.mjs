@@ -17,6 +17,7 @@ import {
   gatewayEnvironment,
   gatewayLoginAction,
   gatewaySourceProbe,
+  installedChatModel,
   loopbackUrl,
   prepareGateway,
 } from "./gateway.mjs";
@@ -846,7 +847,10 @@ async function connectGateway({ plan, installed, model, sourceFetcher, runner, e
       stop: { ...stopped, ok: true, gateway: { ...report, reason: connection.reason }, nextAction, next: nextAction.message },
     };
   }
-  const choice = chooseChatModel(connection.models, model);
+  // The model the installed .env already uses is kept while the gateway offers it,
+  // so `server start`, which prepares again, does not undo an earlier --model.
+  const previous = await readEnvironmentFile(path.join(installed, ".env"));
+  const choice = chooseChatModel(connection.models, { requested: model, installed: installedChatModel(previous) });
   if (!choice.ok) {
     return {
       stop: {
@@ -859,15 +863,13 @@ async function connectGateway({ plan, installed, model, sourceFetcher, runner, e
       },
     };
   }
-  const previous = await readEnvironmentFile(path.join(installed, ".env"));
   return {
     values: gatewayEnvironment({ routerUrl: connection.baseUrl, apiKey: connection.apiKey, model: choice.model }),
     model: choice.model,
+    modelSource: choice.source,
     report: {
       ...report,
       routerUrl: connection.baseUrl,
-      chatModel: choice.model,
-      modelChoice: choice.source,
       routerKeyUpdated: previous.LLM_VLLM_API_KEY !== connection.apiKey,
     },
   };
@@ -1129,6 +1131,7 @@ async function serverPrepareUnlocked({
     environment,
     missingSecretFields,
     chatModel: gateway.model,
+    chatModelSource: gateway.modelSource,
     gateway: gateway.report,
     ...(committed.issues.length ? { issues: committed.issues, retainedPaths: committed.retainedPaths } : {}),
     next: committed.ok
@@ -1181,8 +1184,8 @@ async function serverStartUnlocked({
 } = {}) {
   requireServerProfile(profile);
   const installed = path.resolve(serverDirectory || installedServerDir());
-  // Start prepares again, so the chat model is chosen again: an explicit --model has
-  // to come along.
+  // Start prepares again. The installed chat model is kept; a --model given here
+  // replaces it.
   const prepared = preparedServer || await serverPrepareUnlocked({
     profile,
     hostRuntime,

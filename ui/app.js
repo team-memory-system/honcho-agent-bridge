@@ -162,9 +162,18 @@ function serverSummary(payload, retry) {
   if (payload?.nextAction?.kind === "gateway-login") {
     return `게이트웨이 화면(${payload.nextAction.url})에서 Codex나 Claude로 로그인한 뒤 ${retry} 버튼을 다시 누르세요.\n\n`;
   }
-  if (payload?.chatModel) return `대화 정리 모델: ${payload.chatModel}\n\n`;
+  if (payload?.chatModel) {
+    const source = CHAT_MODEL_SOURCES[payload.chatModelSource];
+    return `대화 정리 모델: ${payload.chatModel}${source ? ` (${source})` : ""}\n\n`;
+  }
   return "";
 }
+
+const CHAT_MODEL_SOURCES = {
+  override: "직접 고른 모델",
+  kept: "쓰던 모델을 그대로",
+  default: "기본 순서로 고름",
+};
 
 for (const button of document.querySelectorAll("[data-server]")) {
   button.addEventListener("click", async () => {

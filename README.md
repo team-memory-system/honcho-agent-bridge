@@ -59,10 +59,13 @@ gets an answer, without reading the underlying messages.
   user's own `codex` and `claude` logins; `codex login` and `~/.codex/auth.json` play
   no part. Until one login is connected, `server prepare` stops with
   `nextAction.kind: "gateway-login"` and the screen's address.
-- **`server start` prepares again, so it chooses the chat model again.** Without
-  `--model` that is the first of `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.5`,
-  `claude-haiku-4-5`, `claude-sonnet-5-5` the gateway offers. A model picked with
-  `server prepare --model` has to be passed to `server start` as well.
+- **The chat model sticks until `--model` changes it.** Every prepare, including the
+  one `server start` runs, keeps the model the installed `.env` already uses while
+  the gateway offers it (`chatModelSource: "kept"`). Only a fresh install, or a model
+  the gateway stopped offering, goes back to the first of `gpt-6-luna`,
+  `gpt-5.6-luna`, `gpt-5.5`, `claude-haiku-4-5`, `claude-sonnet-5-5` it offers
+  (`"default"`). Logging in to another subscription later does not switch it;
+  `server prepare --model <id>` does (`"override"`).
 - **The hook is what keeps collection alive.** Changing the hook command format has
   happened twice already; `LEGACY_HOOK_MARKERS` in `scripts/cli.mjs` exists so the
   installer can still recognise and clean up hooks it wrote under an older name.
@@ -97,7 +100,7 @@ gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 135 tests, no network, no Docker
+npm test          # 138 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # setup screen on localhost
@@ -179,7 +182,7 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 | `personal` | Honcho API, Deriver, PostgreSQL/pgvector, Redis, dashboard | Subscription gateway (router 11400, screen 11450), Ollama, `qwen3-embedding-honcho-8192`, collector and MCP bridge | A Codex and/or Claude login in the gateway's screen; the router key comes from the gateway and is written only into the installed private `.env` | macOS/Windows reproduction of this self-hosted topology with local 1536-dimensional, 8192-token embeddings |
 | `portable` | Honcho API, Deriver, PostgreSQL/pgvector, Redis, dashboard | Collector and MCP bridge only | External OpenAI-compatible API key entered in the installed private `.env` | Generic installation when the personal host topology is unavailable or unwanted |
 
-The `personal` profile requires `server/env.personal.example`, `server/host-profile.personal.json` and `server/gateway-source.json`. `server prepare --profile personal` fetches the gateway that `gateway-source.json` names into `runtime/subscription-gateway` under the app directory (and fetches it again when that pin changes, keeping the replaced copy as `.previous`), runs the gateway's `install`, and asks its `connect-info` for the router address and key. Until a login is connected it returns `ready: false` with `nextAction: {"kind": "gateway-login", "url": ...}` and changes nothing installed. Once one is, it writes the router address (its host replaced by `host.docker.internal`), the key, and the chosen chat model with `THINKING_EFFORT=low` into every chat setting of the installed `.env`; embeddings stay on Ollama, and other values the user edited are kept. The chat model is the first of `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.5`, `claude-haiku-4-5` and `claude-sonnet-5-5` the gateway offers, otherwise the first it lists; `--model <id>` picks another it offers. The host supervisor keeps the Qwen alias resident. `server stop` and `host stop` leave the gateway running.
+The `personal` profile requires `server/env.personal.example`, `server/host-profile.personal.json` and `server/gateway-source.json`. `server prepare --profile personal` fetches the gateway that `gateway-source.json` names into `runtime/subscription-gateway` under the app directory (and fetches it again when that pin changes, keeping the replaced copy as `.previous`), runs the gateway's `install`, and asks its `connect-info` for the router address and key. Until a login is connected it returns `ready: false` with `nextAction: {"kind": "gateway-login", "url": ...}` and changes nothing installed. Once one is, it writes the router address (its host replaced by `host.docker.internal`), the key, and the chosen chat model with `THINKING_EFFORT=low` into every chat setting of the installed `.env`; embeddings stay on Ollama, and other values the user edited are kept. The chat model is `--model <id>` when given (it must be one the gateway offers), otherwise the model the installed `.env` already uses while the gateway still offers it, otherwise the first of `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.5`, `claude-haiku-4-5` and `claude-sonnet-5-5` the gateway offers, otherwise the first it lists; `chatModelSource` says which (`override`, `kept`, `default`). The host supervisor keeps the Qwen alias resident. `server stop` and `host stop` leave the gateway running.
 
 For development or recovery, the same deterministic workflow is available directly:
 
