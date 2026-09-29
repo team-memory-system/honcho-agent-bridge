@@ -11,6 +11,7 @@ import test from "node:test";
 import {
   chooseChatModel,
   ensureGatewaySource,
+  prepareGateway,
   gatewayConnectInfo,
   gatewayDirectory,
   gatewayEnvironment,
@@ -68,10 +69,19 @@ test("the gateway lives beside runtime/host, outside the server bundle that upda
   assert.equal(gatewayDirectory(server), path.join(os.tmpdir(), "HonchoAgentBridge", "runtime", "subscription-gateway"));
 });
 
+// The old copy's CLI, answering `uninstall` the way the real one does.
+function uninstallingCli(calls = []) {
+  return async (command, args, options) => {
+    calls.push({ command, args: [...args], cwd: options?.cwd, env: options?.env });
+    return { code: 0, stdout: `${JSON.stringify({ ok: true, stopped: ["router"] })}\n` };
+  };
+}
+
 test("the gateway source is fetched once, recorded, and replaced only when its pin changes", async (t) => {
   const { pinDirectory, directory, writePin } = await gatewayFixture(t);
   const calls = [];
   const runner = fakeGit(calls);
+  const cliRunner = uninstallingCli();
 
   assert.equal((await gatewaySourceProbe({ pinDirectory, directory, runner })).state, "missing");
   const first = await ensureGatewaySource({ pinDirectory, directory, runner });
@@ -92,7 +102,7 @@ test("the gateway source is fetched once, recorded, and replaced only when its p
   // A changed pin replaces the copy and keeps the one the running gateway started from.
   await writePin({ repo: REPO, ref: "release-2" });
   assert.equal((await gatewaySourceProbe({ pinDirectory, directory, runner })).state, "stale");
-  const updated = await ensureGatewaySource({ pinDirectory, directory, runner });
+  const updated = await ensureGatewaySource({ pinDirectory, directory, runner, cliRunner });
   assert.equal(updated.ok, true, updated.error);
   assert.equal(updated.updated, true);
   assert.equal(updated.ref, "release-2");
@@ -105,7 +115,7 @@ test("the gateway source is fetched once, recorded, and replaced only when its p
   calls.length = 0;
   const commit = "c".repeat(40);
   await writePin({ repo: REPO, ref: "release-2", commit });
-  const pinned = await ensureGatewaySource({ pinDirectory, directory, runner });
+  const pinned = await ensureGatewaySource({ pinDirectory, directory, runner, cliRunner });
   assert.equal(pinned.ok, true, pinned.error);
   const pinnedClone = calls.find((call) => call[1] === "clone");
   assert.equal(pinnedClone.includes("--depth"), false);
@@ -130,9 +140,16 @@ test("a failed gateway update leaves the working copy and no staging behind", as
   const { root, pinDirectory, directory, writePin } = await gatewayFixture(t);
   assert.equal((await ensureGatewaySource({ pinDirectory, directory, runner: fakeGit([]) })).ok, true);
   await writePin({ repo: REPO, ref: "release-2" });
-  const failed = await ensureGatewaySource({ pinDirectory, directory, runner: fakeGit([], { failClone: true }) });
+  const uninstalls = [];
+  const failed = await ensureGatewaySource({
+    pinDirectory,
+    directory,
+    runner: fakeGit([], { failClone: true }),
+    cliRunner: uninstallingCli(uninstalls),
+  });
   assert.equal(failed.ok, false);
   assert.match(failed.error, /unable to access the repository/);
+  assert.deepEqual(uninstalls, [], "a copy whose replacement never arrived keeps running");
   assert.equal(await fsp.readFile(path.join(directory, "gateway", "cli.mjs"), "utf8"), "// clone 1\n");
   const runtime = await fsp.readdir(path.dirname(directory));
   assert.deepEqual(runtime, ["subscription-gateway"], "no .fetching or .previous is left behind");
@@ -143,6 +160,151 @@ test("a failed gateway update leaves the working copy and no staging behind", as
   assert.equal(noGit.state, "missing");
   assert.equal(noGit.fetchable, false);
   assert.match(noGit.reason, /git is not installed/);
+});
+
+test("replacing a copy runs the old copy's own uninstall first, then the swap, then the new copy's install", async (t) => {
+  const { pinDirectory, directory, writePin } = await gatewayFixture(t);
+  const git = fakeGit([]);
+  assert.equal((await ensureGatewaySource({ pinDirectory, directory, runner: git })).ok, true);
+  await writePin({ repo: REPO, ref: "release-2" });
+
+  const env = { PATH: process.env.PATH, GATEWAY_HOME: path.join(pinDirectory, "gateway-home") };
+  const nodePath = "/opt/stand-in/bin/node";
+  const seen = [];
+  const cliRunner = async (command, args, options) => {
+    seen.push({
+      command,
+      args: [...args],
+      cwd: options.cwd,
+      env: options.env,
+      copyInPlace: await fsp.readFile(path.join(directory, "gateway", "cli.mjs"), "utf8"),
+      newCopyStaged: await exists(path.join(`${directory}.fetching`, "gateway", "cli.mjs")),
+      previousYet: await exists(`${directory}.previous`),
+    });
+    const answer = args[1] === "uninstall"
+      ? { ok: true, stopped: ["router", "codex-1"] }
+      : { ok: true, autostart: "launchd", uiUrl: "http://127.0.0.1:11450", routerUrl: "http://127.0.0.1:11400/v1" };
+    return { code: 0, stdout: `${JSON.stringify(answer)}\n` };
+  };
+
+  const prepared = await prepareGateway({
+    pinDirectory,
+    directory,
+    sourceFetcher: (options) => ensureGatewaySource({ ...options, runner: git }),
+    runner: cliRunner,
+    env,
+    nodePath,
+  });
+  assert.equal(prepared.ok, true, prepared.error);
+  assert.deepEqual(seen.map((call) => call.args[1]), ["uninstall", "install"]);
+  const [uninstall, install] = seen;
+  assert.deepEqual(uninstall.args, [path.join(directory, "gateway", "cli.mjs"), "uninstall"]);
+  assert.equal(uninstall.copyInPlace, "// clone 1\n", "the old copy uninstalls itself, from where it is");
+  assert.equal(uninstall.newCopyStaged, true, "only once the new copy is on disk");
+  assert.equal(uninstall.previousYet, false, "and before the rename");
+  assert.equal(install.copyInPlace, "// clone 2\n", "the new copy installs itself");
+  for (const call of seen) {
+    assert.equal(call.command, nodePath, "the same node for both");
+    assert.equal(call.env, env, "the same environment for both");
+    assert.equal(call.cwd, directory);
+  }
+  assert.deepEqual(prepared.source.uninstall, { ok: true, stopped: ["router", "codex-1"] });
+  assert.equal(prepared.source.updated, true);
+  assert.equal(await fsp.readFile(path.join(`${directory}.previous`, "gateway", "cli.mjs"), "utf8"), "// clone 1\n");
+});
+
+test("a current copy, a copy this installer did not fetch, and a copy without a CLI are never uninstalled", async (t) => {
+  const calls = [];
+  const cliRunner = uninstallingCli(calls);
+
+  const current = await gatewayFixture(t);
+  const git = fakeGit([]);
+  assert.equal((await ensureGatewaySource({ pinDirectory: current.pinDirectory, directory: current.directory, runner: git, cliRunner })).fetched, true);
+  const again = await ensureGatewaySource({ pinDirectory: current.pinDirectory, directory: current.directory, runner: git, cliRunner });
+  assert.equal(again.state, "current");
+
+  const external = await gatewayFixture(t);
+  await fsp.mkdir(path.join(external.directory, "gateway"), { recursive: true });
+  await fsp.writeFile(path.join(external.directory, "gateway", "cli.mjs"), "// somebody's own checkout\n");
+  await external.writePin({ repo: REPO, ref: "release-2" });
+  const untouched = await ensureGatewaySource({ pinDirectory: external.pinDirectory, directory: external.directory, runner: fakeGit([]), cliRunner });
+  assert.equal(untouched.state, "external");
+  assert.equal(await fsp.readFile(path.join(external.directory, "gateway", "cli.mjs"), "utf8"), "// somebody's own checkout\n");
+
+  assert.deepEqual(calls, [], "neither was asked to uninstall");
+
+  // A copy fetched before the gateway had a CLI has nothing to run; it is replaced as before.
+  const old = await gatewayFixture(t);
+  const oldGit = fakeGit([]);
+  assert.equal((await ensureGatewaySource({ pinDirectory: old.pinDirectory, directory: old.directory, runner: oldGit })).ok, true);
+  await fsp.rm(path.join(old.directory, "gateway"), { recursive: true, force: true });
+  await old.writePin({ repo: REPO, ref: "release-2" });
+  const replaced = await ensureGatewaySource({ pinDirectory: old.pinDirectory, directory: old.directory, runner: oldGit, cliRunner });
+  assert.equal(replaced.updated, true, replaced.error);
+  assert.equal("uninstall" in replaced, false);
+  assert.deepEqual(calls, []);
+});
+
+test("a failed uninstall still lets the swap be tried, and a failed swap reports both", async (t) => {
+  const renameFailure = (directory) => new Proxy(fsp, {
+    get(target, property) {
+      if (property !== "rename") return target[property];
+      return async (from, to) => {
+        if (path.resolve(from) === path.resolve(directory) && path.resolve(to) === path.resolve(`${directory}.previous`)) {
+          throw Object.assign(new Error("resource busy or locked"), { code: "EBUSY" });
+        }
+        return fsp.rename(from, to);
+      };
+    },
+  });
+  const staleCopy = async () => {
+    const fixture = await gatewayFixture(t);
+    const git = fakeGit([]);
+    assert.equal((await ensureGatewaySource({ ...fixture, runner: git })).ok, true);
+    await fixture.writePin({ repo: REPO, ref: "release-2" });
+    return { ...fixture, git };
+  };
+
+  // Uninstall fails, then the rename fails: both reasons, and the old copy stays.
+  const failing = await staleCopy();
+  const bothFailed = await ensureGatewaySource({
+    pinDirectory: failing.pinDirectory,
+    directory: failing.directory,
+    runner: failing.git,
+    cliRunner: async () => ({ code: 1, stdout: `${JSON.stringify({ ok: false, error: "launchctl bootout failed" })}\n` }),
+    fileSystem: renameFailure(failing.directory),
+  });
+  assert.equal(bothFailed.ok, false);
+  assert.match(bothFailed.error, /could not be put in place \(EBUSY\)/);
+  assert.match(bothFailed.error, /before that, the old copy's uninstall failed: launchctl bootout failed/);
+  assert.deepEqual(bothFailed.uninstall, { ok: false, error: "launchctl bootout failed" });
+  assert.equal(await fsp.readFile(path.join(failing.directory, "gateway", "cli.mjs"), "utf8"), "// clone 1\n");
+  assert.deepEqual(await fsp.readdir(path.dirname(failing.directory)), ["subscription-gateway"], "no staging or .previous left behind");
+
+  // Uninstall fails, the swap works: the update goes ahead and says what happened.
+  const partly = await staleCopy();
+  const swapped = await ensureGatewaySource({
+    pinDirectory: partly.pinDirectory,
+    directory: partly.directory,
+    runner: partly.git,
+    cliRunner: async () => ({ code: 1, stdout: `${JSON.stringify({ ok: false, error: "launchctl bootout failed" })}\n` }),
+  });
+  assert.equal(swapped.ok, true, swapped.error);
+  assert.deepEqual(swapped.uninstall, { ok: false, error: "launchctl bootout failed" });
+  assert.equal(await fsp.readFile(path.join(partly.directory, "gateway", "cli.mjs"), "utf8"), "// clone 2\n");
+
+  // Uninstall works, the swap fails: the old copy is back in place but no longer running.
+  const stopped = await staleCopy();
+  const down = await ensureGatewaySource({
+    pinDirectory: stopped.pinDirectory,
+    directory: stopped.directory,
+    runner: stopped.git,
+    cliRunner: uninstallingCli(),
+    fileSystem: renameFailure(stopped.directory),
+  });
+  assert.equal(down.ok, false);
+  assert.match(down.error, /uninstalled before the swap and is not running now/);
+  assert.equal(await fsp.readFile(path.join(stopped.directory, "gateway", "cli.mjs"), "utf8"), "// clone 1\n");
 });
 
 async function installedGateway(t) {

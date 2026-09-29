@@ -136,11 +136,26 @@ export async function gatewaySourceProbe({ pinDirectory, directory, runner = exe
  * another pin. Idempotent: a current copy is left alone and git is not run.
  *
  * The clone is staged beside the target and renamed into place, so an interrupted
- * fetch never leaves a half-populated tree behind. A replaced copy is kept as
- * `<directory>.previous` until the next replacement, because the running gateway
- * was started from those files.
+ * fetch never leaves a half-populated tree behind. Before a copy this installer
+ * fetched is replaced, its own `gateway/cli.mjs uninstall` runs - through
+ * `cliRunner`, with the `env` and `nodePath` the caller installs with - because
+ * what it started runs from that folder, and on Windows a running process keeps a
+ * folder from being renamed. The replaced copy is then kept as
+ * `<directory>.previous` until the next replacement, and the caller installs the
+ * new one. A copy that is current, or that this installer did not fetch, is never
+ * uninstalled.
+ *
+ * `runner` runs git; `fileSystem` is replaceable so tests can make the swap fail.
  */
-export async function ensureGatewaySource({ pinDirectory, directory, runner = execFileAsync } = {}) {
+export async function ensureGatewaySource({
+  pinDirectory,
+  directory,
+  runner = execFileAsync,
+  cliRunner,
+  env,
+  nodePath,
+  fileSystem = fsp,
+} = {}) {
   const probe = await gatewaySourceProbe({ pinDirectory, directory, runner });
   if (probe.state === "current" || probe.state === "external") {
     return { ok: true, fetched: false, updated: false, state: probe.state, directory };
@@ -166,24 +181,37 @@ export async function ensureGatewaySource({ pinDirectory, directory, runner = ex
       error: String(error?.stderr || "").trim() || error?.message || String(error),
     };
   }
+  // Only now that the new copy is on disk is the old one taken down. A failed
+  // uninstall does not stop the swap; if the swap fails too, both are reported.
+  const uninstall = probe.present && await exists(gatewayCliPath(directory))
+    ? await gatewayUninstall({ directory, runner: cliRunner, env, nodePath })
+    : null;
   let displaced = false;
   try {
     if (probe.present) {
-      await fsp.rm(previous, { recursive: true, force: true });
-      await fsp.rename(directory, previous);
+      await fileSystem.rm(previous, { recursive: true, force: true });
+      await fileSystem.rename(directory, previous);
       displaced = true;
     }
-    await fsp.rename(staging, directory);
+    await fileSystem.rename(staging, directory);
   } catch (error) {
-    if (displaced && !(await exists(directory))) await fsp.rename(previous, directory).catch(() => {});
-    await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
+    if (displaced && !(await exists(directory))) await fileSystem.rename(previous, directory).catch(() => {});
+    await fileSystem.rm(staging, { recursive: true, force: true }).catch(() => {});
+    const reasons = [
+      `the gateway source could not be put in place (${error?.code || error?.message || error}); a gateway running from ${directory} can hold it open`,
+    ];
+    if (uninstall && !uninstall.ok) reasons.push(`before that, the old copy's uninstall failed: ${uninstall.error}`);
+    if (uninstall?.ok) {
+      reasons.push("the old copy was uninstalled before the swap and is not running now; run server prepare or host start again once nothing holds the folder");
+    }
     return {
       ok: false,
       fetched: false,
       updated: false,
       state: probe.state,
       directory,
-      error: `the gateway source could not be put in place (${error?.code || error?.message || error}); a gateway running from ${directory} can hold it open`,
+      ...(uninstall ? { uninstall } : {}),
+      error: reasons.join("; "),
     };
   }
   return {
@@ -195,6 +223,7 @@ export async function ensureGatewaySource({ pinDirectory, directory, runner = ex
     ...probe.pin,
     commit,
     ...(displaced ? { previous } : {}),
+    ...(uninstall ? { uninstall } : {}),
   };
 }
 
@@ -372,6 +401,19 @@ export async function gatewayConnectInfo({ directory, runner, env, nodePath } = 
   return result;
 }
 
+/**
+ * The gateway's own uninstall: its autostart removed and what it started stopped.
+ * Its logins and state stay. `stopped` names what it stopped, when it says.
+ */
+export async function gatewayUninstall({ directory, runner, env, nodePath } = {}) {
+  const run = await runGatewayCli(directory, "uninstall", { runner, env, nodePath, timeout: 120_000 });
+  if (!run.ok) return { ok: false, error: run.error };
+  const stopped = (Array.isArray(run.document.stopped) ? run.document.stopped : [])
+    .filter((item) => typeof item === "string" && ACCOUNT_FIELD.test(item))
+    .slice(0, 100);
+  return { ok: true, stopped };
+}
+
 export async function gatewayOpen({ directory, runner, env, nodePath } = {}) {
   const run = await runGatewayCli(directory, "open", { runner, env, nodePath, timeout: 30_000 });
   if (!run.ok) return { ok: false, error: run.error };
@@ -380,7 +422,7 @@ export async function gatewayOpen({ directory, runner, env, nodePath } = {}) {
 
 function publicSource(source) {
   if (!source || typeof source !== "object") return null;
-  const fields = ["ok", "fetched", "updated", "state", "repo", "ref", "commit", "previous"];
+  const fields = ["ok", "fetched", "updated", "state", "repo", "ref", "commit", "previous", "uninstall"];
   return Object.fromEntries(fields.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]));
 }
 
@@ -394,7 +436,9 @@ export async function prepareGateway({
   nodePath,
 } = {}) {
   let source;
-  try { source = await sourceFetcher({ pinDirectory, directory }); }
+  // A copy being replaced is uninstalled with the same runner, environment and node
+  // that install the new one.
+  try { source = await sourceFetcher({ pinDirectory, directory, cliRunner: runner, env, nodePath }); }
   catch (error) { source = { ok: false, error: error?.message || String(error) }; }
   if (!source?.ok) {
     return {
