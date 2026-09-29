@@ -57,6 +57,7 @@ export const CHAT_MODEL_PREFIXES = Object.freeze([
 export const CHAT_THINKING_EFFORT = "low";
 
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,199}$/;
+const EMBEDDING_MODEL = /embed/i;
 // The key lands in a .env that Compose both reads and interpolates, so it has to be
 // one token with nothing Compose or a shell would reinterpret.
 const ROUTER_KEY = /^[A-Za-z0-9._~+\/=-]{16,4096}$/;
@@ -422,13 +423,13 @@ export async function prepareGateway({
   };
 }
 
-/** What the user has to do when the gateway has no login yet, and where. */
-export function gatewayLoginAction(uiUrl, then) {
+/** What the user has to do when the gateway has no usable login yet, and where. */
+export function gatewayLoginAction(uiUrl, then, reason = "") {
   const url = loopbackUrl(uiUrl, { keepPath: true }) || DEFAULT_GATEWAY_UI_URL;
   return {
     kind: "gateway-login",
     url,
-    message: `Open ${url} and log in with Codex and/or Claude in the gateway screen, then ${then}.`,
+    message: `${reason ? `${reason}. ` : ""}Open ${url} and log in with Codex and/or Claude in the gateway screen, then ${then}.`,
   };
 }
 
@@ -440,9 +441,11 @@ export function gatewayLoginAction(uiUrl, then) {
  *   kept      `installed`, the model the installed .env already uses, while the
  *             gateway still offers it
  *   default   the first of PREFERRED_CHAT_MODELS the gateway offers, otherwise the
- *             first model it lists
+ *             first model it lists that is not an embedding model
  * Keeping the installed model is what lets `server start`, which prepares again,
- * keep an earlier --model without being given it again.
+ * keep an earlier --model without being given it again. When nothing it offers can
+ * chat, the result is `noChatModel` with a `reason`, not an error: the user has a
+ * login to add.
  */
 export function chooseChatModel(models, { requested = "", installed = "" } = {}) {
   const offered = modelList(models);
@@ -459,8 +462,17 @@ export function chooseChatModel(models, { requested = "", installed = "" } = {})
   if (current && offered.includes(current)) return { ok: true, model: current, source: "kept", offered };
   const preferred = PREFERRED_CHAT_MODELS.find((model) => offered.includes(model));
   if (preferred) return { ok: true, model: preferred, source: "default", offered };
-  if (offered.length) return { ok: true, model: offered[0], source: "default", offered };
-  return { ok: false, offered, error: "The gateway offers no model yet" };
+  // The router lists what Ollama serves as well, and an embedding model cannot chat.
+  const chat = offered.find((model) => !EMBEDDING_MODEL.test(model));
+  if (chat) return { ok: true, model: chat, source: "default", offered };
+  return {
+    ok: false,
+    noChatModel: true,
+    offered,
+    reason: offered.length
+      ? `The gateway offers no chat model, only embedding models (${offered.join(", ")})`
+      : "The gateway offers no model yet",
+  };
 }
 
 /** The chat model an installed .env uses now, or "". */

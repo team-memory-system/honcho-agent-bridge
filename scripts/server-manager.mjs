@@ -851,15 +851,20 @@ async function connectGateway({ plan, installed, model, sourceFetcher, runner, e
   // so `server start`, which prepares again, does not undo an earlier --model.
   const previous = await readEnvironmentFile(path.join(installed, ".env"));
   const choice = chooseChatModel(connection.models, { requested: model, installed: installedChatModel(previous) });
+  if (choice.noChatModel) {
+    // Ready, but with nothing that can chat: the fix is the same login step.
+    const nextAction = gatewayLoginAction(report.uiUrl, "run server prepare --profile personal again", choice.reason);
+    return {
+      stop: { ...stopped, ok: true, gateway: { ...report, reason: choice.reason }, nextAction, next: nextAction.message },
+    };
+  }
   if (!choice.ok) {
     return {
       stop: {
         ...stopped,
         gateway: report,
         issues: [choice.error],
-        next: model
-          ? "Choose one of the models the gateway offers with --model, or leave --model out"
-          : "Log in to an account in the gateway screen that offers a chat model, then run server prepare again",
+        next: "Choose one of the models the gateway offers with --model, or leave --model out",
       },
     };
   }

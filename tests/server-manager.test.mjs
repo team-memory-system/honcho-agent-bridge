@@ -1411,6 +1411,31 @@ test("prepare keeps the installed chat model while the gateway offers it, and go
   assert.deepEqual([replaced.chatModel, replaced.chatModelSource], ["gpt-6-luna", "default"]);
 });
 
+test("a gateway that offers only embedding models stops prepare with the reason and the login step", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-embeddings-only-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "installed");
+  let hostCalled = false;
+  const result = await serverPrepare({
+    profile: "personal",
+    hostRuntime: new Proxy({}, { get: () => async () => { hostCalled = true; return { ok: true, ready: true }; } }),
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
+    ...fakeGateway({ models: ["qwen3-embedding-honcho-8192", "qwen3-embedding:8b"] }).options,
+    serverDirectory: destination,
+  });
+  assert.equal(result.ready, false);
+  assert.equal(result.nextAction.kind, "gateway-login");
+  const reason = "The gateway offers no chat model, only embedding models (qwen3-embedding-honcho-8192, qwen3-embedding:8b)";
+  assert.equal(result.gateway.reason, reason);
+  assert.equal(result.nextAction.message.startsWith(`${reason}. Open http://127.0.0.1:11450 and log in`), true, result.nextAction.message);
+  assert.equal(result.next, result.nextAction.message);
+  assert.equal("chatModel" in result, false);
+  assert.equal(hostCalled, false);
+  await assert.rejects(fsp.access(destination), "nothing was installed");
+});
+
 test("server start keeps an earlier --model without being given it again", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-gateway-start-kept-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));

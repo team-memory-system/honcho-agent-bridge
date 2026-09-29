@@ -321,12 +321,29 @@ test("the chat model is --model, else the installed one while offered, else the 
   assert.deepEqual(pick(["claude-sonnet-5-5", "gpt-5.6-luna", "gpt-5.5"]), ["gpt-5.6-luna", "default"]);
   assert.deepEqual(pick(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"]), ["claude-haiku-4-5", "default"]);
   assert.deepEqual(pick(["local-chat-1", "local-chat-2"]), ["local-chat-1", "default"]);
-  assert.equal(chooseChatModel([]).ok, false);
 
   // An id that could break a .env line is never offered, so it can never be chosen or kept.
   assert.deepEqual(modelList(["gpt-5.5\nAUTH_USE_AUTH=false", "gpt-5.5", "gpt-5.5", 7, "a b"]), ["gpt-5.5"]);
   assert.equal(chooseChatModel(["x\ny", "gpt-5.5"], { requested: "x\ny" }).ok, false);
   assert.deepEqual(pick(["x\ny", "gpt-5.5"], { installed: "x\ny" }), ["gpt-5.5", "default"]);
+});
+
+test("the fallback skips embedding models, and with nothing left there is a reason instead of a model", () => {
+  const fallback = chooseChatModel(["qwen3-embedding-honcho-8192", "text-embedding-3-small", "local-chat-1"]);
+  assert.deepEqual([fallback.model, fallback.source], ["local-chat-1", "default"]);
+  // A preferred model still wins wherever it is listed.
+  assert.equal(chooseChatModel(["qwen3-embedding:8b", "claude-haiku-4-5"]).model, "claude-haiku-4-5");
+
+  const onlyEmbeddings = chooseChatModel(["qwen3-embedding:8b", "nomic-embed-text"]);
+  assert.equal(onlyEmbeddings.ok, false);
+  assert.equal(onlyEmbeddings.noChatModel, true);
+  assert.equal(onlyEmbeddings.reason, "The gateway offers no chat model, only embedding models (qwen3-embedding:8b, nomic-embed-text)");
+
+  const nothing = chooseChatModel([]);
+  assert.deepEqual([nothing.ok, nothing.noChatModel, nothing.reason], [false, true, "The gateway offers no model yet"]);
+
+  // Only the fallback skips them: asking for one by name still works.
+  assert.deepEqual([chooseChatModel(["nomic-embed-text"], { requested: "nomic-embed-text" }).source], ["override"]);
 });
 
 test("the installed chat model is read from the first chat setting that names one", () => {
