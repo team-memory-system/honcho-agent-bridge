@@ -3,9 +3,9 @@
 // Ollama embedding model). Building or restarting it is a deployment, so every
 // button that does that says so first.
 import { cli, gateway, post } from "../lib/api.js";
-import { h, clear } from "../lib/dom.js";
+import { h, clear, copyText } from "../lib/dom.js";
 import { api, app, go, loadContext, refreshStatus } from "../lib/state.js";
-import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, tag } from "../lib/ui.js";
+import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, tag, toast } from "../lib/ui.js";
 
 const CHECK_NAMES = {
   status: "서버와 컨테이너",
@@ -107,7 +107,7 @@ export default {
       } else if (!server.docker?.installed) {
         nodes.push(notice("warn", h("b", {}, "Docker가 없습니다."), " 이 컴퓨터를 기억 서버로 쓰려면 Docker Desktop을 먼저 설치하세요."));
       } else if (server.installed) {
-        nodes.push(serverSection(server), hostSection(hostStatus), verifySection());
+        nodes.push(serverSection(server), shareSection(), hostSection(hostStatus), verifySection());
       } else {
         nodes.push(section({ title: "기억 서버" },
           external
@@ -164,6 +164,106 @@ export default {
         )),
       ),
       h("p", { class: "muted", style: { fontSize: "12.5px", marginTop: "10px" } }, `설치 위치 ${server.directory}`),
+      );
+    }
+
+    // 다른 컴퓨터에서 쓰기: a token gate in front of the API and a Cloudflare tunnel
+    // to it. The owner makes the tunnel in the Cloudflare dashboard and pastes its
+    // token; other computers get this server's address and its server token.
+    function shareSection() {
+      const box = h("div", {}, h("div", { class: "empty" }, spinner()));
+      const drawShare = async (check = false) => {
+        let share;
+        try {
+          share = await cli("/api/server/share/status", { check });
+        } catch (error) {
+          clear(box, errorNotice(error));
+          return;
+        }
+        clear(box, share.enabled ? shareOn(share, drawShare) : shareOff(share, drawShare));
+      };
+      drawShare(false);
+      return section({ id: "share", title: "다른 컴퓨터에서 쓰기", note: "회사 맥북 같은 내 다른 컴퓨터가 대화를 이 서버로 보내게 합니다. Cloudflare 통로로만 열고, 서버 토큰이 없는 요청은 받지 않습니다." }, box);
+    }
+
+    const PUBLIC_STATES = {
+      ok: ["ok", "밖에서 닿습니다", "다른 컴퓨터에서 이 주소와 서버 토큰으로 연결하면 됩니다."],
+      access: ["ok", "Cloudflare Access가 지키고 있습니다", "이 컴퓨터는 Access를 통과하지 못해 안쪽까지는 확인하지 못했습니다. WARP를 켠 다른 컴퓨터에서 연결해 보세요."],
+      token: ["bad", "서버 토큰이 맞지 않습니다", "통로는 열렸지만 문지기가 토큰을 받지 않았습니다. 서버를 다시 시작해 보세요."],
+      unreachable: ["bad", "밖에서 닿지 않습니다", "Cloudflare 대시보드에서 통로의 공개 주소가 이 주소이고, 서비스가 http://localhost:게이트 포트인지 확인하세요."],
+      error: ["bad", "확인하지 못했습니다", ""],
+    };
+
+    function shareOn(share, redraw) {
+      const check = share.publicCheck;
+      const state = check ? PUBLIC_STATES[check.state] || PUBLIC_STATES.error : null;
+      return h("div", {},
+        h("div", { class: "rows" },
+          h("div", { class: "row" },
+            h("div", {}, h("div", { class: "title" }, statusTag(share.tunnel?.running, ["열림", "통로 꺼짐"]), "공개 주소"), h("div", { class: "sub mono" }, share.publicUrl || "")),
+            h("div", { class: "end" },
+              button("", { kind: "small icon-only", iconName: "copy", title: "주소 복사", onClick: async () => { await copyText(share.publicUrl); toast("주소를 복사했습니다"); } }),
+              button("밖에서 확인", { kind: "small", onClick: (event) => busy(event.currentTarget, () => redraw(true)) }),
+            ),
+          ),
+          h("div", { class: "row" },
+            h("div", {}, h("div", { class: "title" }, statusTag(share.gate?.running, ["지키는 중", "멈춤"]), "문지기"), h("div", { class: "sub" }, "서버 토큰이 있는 요청만 기억 서버로 넘깁니다.", share.gate?.localUrl ? ` ${share.gate.localUrl}` : "")),
+            h("div", { class: "end" },
+              button("서버 토큰 복사", { kind: "small primary", onClick: (event) => busy(event.currentTarget, async () => {
+                const result = await cli("/api/server/share/token", {});
+                await copyText(result.token);
+                toast("서버 토큰을 복사했습니다. 다른 컴퓨터의 연결 화면에 붙여 넣으세요.");
+              }) }),
+            ),
+          ),
+        ),
+        state ? h("div", { style: { marginTop: "12px" } }, notice(state[0], h("b", {}, state[1]), state[2] ? ` ${state[2]}` : "", check.error ? h("div", { class: "muted" }, check.error) : null)) : null,
+        h("div", { class: "form-actions" },
+          button("서버 토큰 바꾸기", { kind: "small quiet", onClick: async (event) => {
+            const ok = await confirmSheet({ title: "서버 토큰을 바꿀까요?", text: "지금 토큰을 쓰는 다른 컴퓨터는 모두 끊깁니다. 각 컴퓨터의 연결 화면에 새 토큰을 넣어야 다시 모입니다. 끊긴 동안의 대화는 다시 연결하면 이어서 보냅니다.", confirm: "바꾸기", danger: true });
+            if (!ok) return;
+            await busy(event.currentTarget, async () => { await cli("/api/server/share/rotate", {}); await redraw(false); }, { done: "새 서버 토큰을 만들었습니다" });
+          } }),
+          button("닫기", { kind: "small quiet danger", onClick: async (event) => {
+            const ok = await confirmSheet({ title: "다른 컴퓨터에서 쓰지 않게 닫을까요?", text: "통로와 문지기를 멈춥니다. 다른 컴퓨터의 대화는 다시 열 때까지 그 컴퓨터에 쌓여 있다가 이어서 옵니다. 토큰은 그대로 두니 다시 열면 설정을 바꿀 필요가 없습니다.", confirm: "닫기", danger: true });
+            if (!ok) return;
+            await busy(event.currentTarget, async () => { await cli("/api/server/share/disable", {}); await redraw(false); }, { done: "닫았습니다" });
+          } }),
+        ),
+      );
+    }
+
+    function shareOff(share, redraw) {
+      const address = h("input", { class: "input", type: "url", placeholder: "https://memory.example.com", value: share.publicUrl || "" });
+      const token = h("input", { class: "input", type: "password", autocomplete: "off", placeholder: share.tunnel?.tokenSaved ? "저장된 통로 토큰을 그대로 씁니다" : "Cloudflare에서 복사한 통로 토큰" });
+      const port = share.gate?.port || 8010;
+      return h("div", {},
+        h("div", { class: "notice share-guide" }, h("div", {},
+          h("b", {}, "먼저 Cloudflare에서 통로를 만듭니다."),
+          h("ol", {},
+            h("li", {}, "Cloudflare Zero Trust 대시보드 → Networks → Tunnels → Create a tunnel → Cloudflared를 고르고 이름을 붙입니다."),
+            h("li", {}, "설치 명령이 나오면 명령은 실행하지 말고, 그 안의 긴 토큰만 복사해 아래에 붙여 넣습니다."),
+            h("li", {}, `Public hostname에 쓸 주소(예: memory.내도메인)를 정하고, Service는 HTTP, URL은 localhost:${port}로 둡니다.`),
+            h("li", {}, "Access → Applications에서 그 주소를 등록하고, 내 팀 WARP 사용자만 들어오게 정책을 겁니다. WARP를 못 켜는 컴퓨터가 있으면 서비스 토큰도 하나 만듭니다."),
+          ),
+          h("p", { class: "muted", style: { margin: "8px 0 0" } }, "팀원이라면 관리자에게 통로 토큰과 주소를 받아 넣기만 하면 됩니다."),
+        )),
+        h("div", { class: "form-grid", style: { marginTop: "14px" } },
+          h("label", { class: "field wide" }, h("span", {}, "공개 주소"), address, h("small", {}, "Cloudflare에서 정한 Public hostname을 https://와 함께 넣습니다.")),
+          h("label", { class: "field wide" }, h("span", {}, "통로 토큰"), token, h("small", {}, "이 컴퓨터에만 저장되고, 화면이나 기록에 다시 나오지 않습니다.")),
+        ),
+        h("div", { class: "form-actions" },
+          button("열기", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
+            const publicUrl = address.value.trim();
+            if (!/^https:\/\/[^/?#]+\/?$/.test(publicUrl)) throw new Error("공개 주소는 https://로 시작하는 주소만 넣습니다. 뒤에 경로는 붙이지 않습니다.");
+            if (!token.value.trim() && !share.tunnel?.tokenSaved) throw new Error("Cloudflare에서 복사한 통로 토큰을 넣으세요.");
+            const body = { publicUrl: publicUrl.replace(/\/$/, "") };
+            if (token.value.trim()) body.tunnelToken = token.value.trim();
+            await cli("/api/server/share/enable", body);
+            token.value = "";
+            await redraw(true);
+          }, { done: "열었습니다" }) }),
+        ),
       );
     }
 

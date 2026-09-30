@@ -23,6 +23,8 @@ const WARNINGS = [
   [/(\w+) collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in (\w+)/, (m) => `${m[2] === "codex" ? "Codex" : "Claude Code"}에 팀 메모리 플러그인이 켜져 있지 않습니다. 플러그인을 켜야 대화가 모입니다.`],
   [/A Honcho server answers at (\S+), but it is not the server this plugin installed/, (m) => `${m[1]}에 기억 서버가 있지만 이 앱이 설치한 서버는 아닙니다. 내 서버가 맞는지 확인하세요.`],
   [/requires an API token/, () => "이 서버는 토큰이 필요합니다. 서버 토큰 칸을 채우세요."],
+  [/is behind Cloudflare Access and refused this computer/, () => "Cloudflare Access가 이 컴퓨터를 막았습니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜거나, 아래에 Access 서비스 토큰을 넣으세요."],
+  [/Cloudflare Access (?:client id|service token).*(?:both|together)/i, () => "Access 서비스 토큰은 ID와 비밀을 함께 넣어야 합니다."],
   [/rejected the API token/, () => "서버가 이 토큰을 받지 않습니다. 서버를 둔 컴퓨터의 토큰이 맞는지 확인하세요."],
   [/at least one detected agent must be selected/, () => "대화를 모을 에이전트를 하나 이상 고르세요. 이 컴퓨터에 설치된 Claude Code나 Codex만 고를 수 있습니다."],
   [/The API token saved for (\S+) is not carried to (\S+)/, (m) => `${m[1]}에 쓰던 토큰은 ${m[2]}로 옮기지 않습니다. 새 서버의 토큰을 넣으세요.`],
@@ -115,6 +117,10 @@ export default {
         for (const box of form.querySelectorAll('input[name="agents"]')) box.checked = Boolean(detect.agents?.[box.value]?.detected);
       }
       if (context?.honcho?.hasToken) form.elements.apiToken.placeholder = "저장된 토큰을 그대로 씁니다";
+      if (context?.honcho?.hasAccess) {
+        form.elements.accessClientId.placeholder = "저장된 값을 그대로 씁니다";
+        form.elements.accessClientSecret.placeholder = "저장된 값을 그대로 씁니다";
+      }
       const result = h("div", {});
 
       const preview = async (control) => busy(control, async () => {
@@ -156,7 +162,7 @@ export default {
         h("div", { class: "panel", style: { marginTop: "16px" } },
           h("div", { style: { display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "12px" } },
             h("b", {}, context?.configured ? "수집 설정 바꾸기" : "수집 설정하기"),
-            h("span", { class: "muted", style: { fontSize: "12.5px" } }, context?.configured ? `지금 ${context.honcho.url}로 보내는 중${context.honcho.hasToken ? " · 토큰 있음" : ""}` : "아직 설정하지 않았습니다."),
+            h("span", { class: "muted", style: { fontSize: "12.5px" } }, context?.configured ? `지금 ${context.honcho.url}로 보내는 중${context.honcho.hasToken ? " · 토큰 있음" : ""}${context.honcho.hasAccess ? " · Access 서비스 토큰 있음" : ""}` : "아직 설정하지 않았습니다."),
           ),
           template,
           h("div", { class: "form-actions" },
@@ -179,6 +185,8 @@ export default {
       if (hook) return `${agent(hook[1])}에 대화 수집 훅이 없거나 예전 것입니다. 설정을 다시 적용하세요.`;
       if (check.name === "configuration") return "수집 설정이 없습니다.";
       if (check.name === "runtime") return `수집 프로그램이 ${check.actualVersion ? `예전 판(${check.actualVersion})` : "설치돼 있지 않습니다"}. 설정을 다시 적용하면 새로 설치합니다.`;
+      if (check.name === "honcho-health" && check.code === "cloudflare-access") return "Cloudflare Access가 이 컴퓨터를 막았습니다. WARP를 팀 계정으로 켜거나 Access 서비스 토큰을 넣으세요.";
+      if (check.name === "honcho-health" && check.status === 401) return "기억 서버가 토큰을 받지 않습니다. 서버를 둔 컴퓨터에서 서버 토큰을 다시 복사해 넣으세요.";
       if (check.name === "honcho-health") return "기억 서버가 답하지 않습니다.";
       if (check.name === "honcho-workspaces") return "기억 서버에 닿았지만 작업공간을 읽지 못했습니다. 토큰이 맞는지 확인하세요.";
       if (check.name === "mcp") return "에이전트용 기억 도구(MCP)가 시작되지 않습니다.";

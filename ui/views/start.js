@@ -16,7 +16,7 @@ const PATHS = [
   {
     key: "remote",
     title: "내 다른 컴퓨터의 서버로 보내기",
-    text: "서버는 이미 집 컴퓨터 같은 곳에 있고, 이 컴퓨터의 대화도 거기로 모읍니다. Docker는 필요 없습니다.",
+    text: "서버는 이미 집 컴퓨터 같은 곳에 있고, 이 컴퓨터의 대화도 거기로 모읍니다. Docker는 필요 없습니다. 서버 컴퓨터에서 받은 주소와 서버 토큰, 그리고 Cloudflare WARP가 필요합니다.",
   },
   {
     key: "ask-only",
@@ -68,13 +68,14 @@ export default {
           { title: "기억 서버 준비", done: Boolean(server?.installed), text: server?.installed ? "이 컴퓨터에 설치돼 있습니다." : server && !server.docker?.installed ? "Docker Desktop을 먼저 설치하세요." : "서버 소스와 게이트웨이를 설치합니다.", action: ["서버 화면에서 준비", () => go("server")] },
           { title: "구독 계정 로그인", done: gatewayReady, text: gatewayReady ? app.status.gateway.text : "기억 서버가 생각할 모델을 쓰려면 Codex나 Claude 계정이 필요합니다.", action: ["게이트웨이에서 로그인", () => go("models/add/codex")] },
           { title: "기억 서버 시작", done: Boolean(server?.running && server?.health?.ok), text: server?.running ? "답하는 중입니다." : "로그인 뒤 서버 화면에서 준비를 한 번 더 누르고 시작합니다.", action: ["서버 화면으로", () => go("server")] },
+          { title: "다른 컴퓨터에서 쓰게 열기 (선택)", done: Boolean(server?.share?.enabled), text: server?.share?.enabled ? `${server.share.publicUrl}로 열려 있습니다.` : "회사 맥북 같은 다른 컴퓨터의 대화도 여기로 모으려면 Cloudflare 통로를 엽니다. 이 컴퓨터 하나만 쓰면 건너뜁니다.", action: ["서버 화면에서 열기", () => go("server")], optional: true },
         );
       }
       if (choice.key === "server" || choice.key === "remote") {
         steps.push({
           title: "에이전트 대화 수집",
           done: Boolean(context?.configured),
-          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : choice.key === "remote" ? "내 서버 주소(와 토큰)를 넣고 모을 에이전트를 고릅니다." : "내 이름과 모을 에이전트를 고릅니다.",
+          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : choice.key === "remote" ? "서버 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두세요." : "내 이름과 모을 에이전트를 고릅니다.",
           action: ["연결 화면에서 설정", () => go("connect/collect")],
         });
         // Only a conversation from an agent this computer collects, after setup, proves it works.
@@ -102,7 +103,7 @@ export default {
         );
       }
 
-      const firstOpen = steps.findIndex((step) => !step.done);
+      const firstOpen = steps.findIndex((step) => !step.done && !step.optional);
       clear(list, steps.map((step, index) => h("div", { class: `step ${step.done ? "done" : index === firstOpen ? "current" : ""}` },
         h("span", { class: "step-num" }),
         h("div", {},

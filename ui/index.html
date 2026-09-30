@@ -56,8 +56,23 @@
       </label>
       <label class="field wide">
         <span>서버 토큰</span>
-        <input class="input" name="apiToken" type="password" placeholder="서버가 토큰을 요구할 때만">
+        <input class="input" name="apiToken" type="password" placeholder="다른 컴퓨터의 서버로 보낼 때">
+        <small>서버를 둔 컴퓨터의 앱에서 서버 → 다른 컴퓨터에서 쓰기 → 서버 토큰 복사로 받습니다.</small>
       </label>
+      <details class="field wide access-fields">
+        <summary>Cloudflare WARP를 켤 수 없는 컴퓨터라면</summary>
+        <p class="muted">보통은 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두면 됩니다. WARP를 켤 수 없으면 서버 주인에게 Access 서비스 토큰을 받아 넣습니다.</p>
+        <div class="form-grid">
+          <label class="field">
+            <span>Access 서비스 토큰 ID</span>
+            <input class="input" name="accessClientId" type="password" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Access 서비스 토큰 비밀</span>
+            <input class="input" name="accessClientSecret" type="password" autocomplete="off">
+          </label>
+        </div>
+      </details>
       <div class="field wide">
         <span>대화를 모을 에이전트</span>
         <div class="checks">
