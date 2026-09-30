@@ -1,7 +1,8 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -32,6 +33,21 @@ import {
   hostStop,
 } from "./host-manager.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
+import {
+  clearDockerFirstRun,
+  DOCKER_LICENSE_WARNING,
+  dockerDesktopDownload,
+  dockerFirstRunAction,
+  dockerFirstRunPending,
+  dockerPathEnvironment,
+  launchDockerDesktop,
+  locateOllama,
+  ollamaDownload,
+  ollamaRuntimeDir,
+  prepareRuntime,
+  resolveDockerCli,
+  runtimeRoot,
+} from "./runtime-installer.mjs";
 import { cloneSource, gitAvailable, readSourcePin } from "./source-pin.mjs";
 import { isWrappedHoncho, prepareHonchoTree } from "./honcho-source.mjs";
 
@@ -143,14 +159,28 @@ export async function withServerLifecycleLock(directory, operation, callback) {
   finally { await releaseFileLock(lock); }
 }
 
-async function dockerProbe() {
+/**
+ * Whether Docker's CLI and engine answer. The CLI is the one on PATH, else the one
+ * inside Docker Desktop (see resolveDockerCli), so a just-installed Docker Desktop
+ * is seen before its first run links the CLI onto PATH.
+ */
+export async function dockerProbe({
+  platform = process.platform,
+  env = process.env,
+  resolver = resolveDockerCli,
+  exec = execFileAsync,
+} = {}) {
+  const cli = resolver({ platform, env });
+  if (!cli) return { installed: false, running: false, error: "docker was not found on PATH or inside Docker Desktop" };
+  const runEnv = dockerPathEnvironment(cli, env, platform);
+  const found = { cli: cli.path, cliSource: cli.source };
   try {
-    const { stdout: version } = await execFileAsync("docker", ["compose", "version", "--short"], { timeout: 5_000 });
-    await execFileAsync("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 5_000 });
-    return { installed: true, running: true, composeVersion: version.trim() };
+    const { stdout: version } = await exec(cli.path, ["compose", "version", "--short"], { timeout: 5_000, env: runEnv });
+    await exec(cli.path, ["info", "--format", "{{.ServerVersion}}"], { timeout: 5_000, env: runEnv });
+    return { installed: true, running: true, composeVersion: String(version).trim(), ...found };
   } catch (error) {
     const message = String(error?.stderr || error?.message || error).trim();
-    return { installed: !/ENOENT|not found/i.test(message), running: false, error: message };
+    return { installed: !/ENOENT/i.test(message), running: false, error: message, ...found };
   }
 }
 
@@ -159,17 +189,13 @@ export async function dockerDesktopApp({ platform = process.platform, env = proc
   const candidates = platform === "darwin"
     ? ["/Applications/Docker.app", path.join(home, "Applications", "Docker.app")]
     : platform === "win32"
-      ? [path.join(env.ProgramFiles || "C:\\Program Files", "Docker", "Docker", "Docker Desktop.exe")]
+      ? [
+        path.join(env.ProgramFiles || "C:\\Program Files", "Docker", "Docker", "Docker Desktop.exe"),
+        ...(env.LOCALAPPDATA ? [path.join(env.LOCALAPPDATA, "Programs", "DockerDesktop", "Docker Desktop.exe")] : []),
+      ]
       : [];
   for (const candidate of candidates) if (candidate && await exists(candidate)) return candidate;
   return "";
-}
-
-function launchDockerDesktop(app, platform) {
-  const [command, args] = platform === "darwin" ? ["open", ["-g", "-a", app]] : [app, []];
-  const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
-  child.on("error", () => {});
-  child.unref();
 }
 
 /**
@@ -341,8 +367,9 @@ export async function ensureHonchoSource(directory = sourceServerDir(), { runner
 export async function dockerCliEnvironment(directory, {
   platform = process.platform,
   env = process.env,
+  cli = null,
 } = {}) {
-  const result = { ...env, COMPOSE_PROJECT_NAME: "honcho-agent-bridge" };
+  const result = { ...dockerPathEnvironment(cli, env, platform), COMPOSE_PROJECT_NAME: "honcho-agent-bridge" };
   if (platform !== "win32") return result;
   const configDirectory = path.join(path.dirname(path.resolve(directory)), "runtime", "docker-cli");
   const configFile = path.join(configDirectory, "config.json");
@@ -357,13 +384,15 @@ export async function dockerCliEnvironment(directory, {
 }
 
 export async function compose(directory, args, options = {}) {
-  const env = await dockerCliEnvironment(directory);
+  // The docker on PATH, else Docker Desktop's own copy (see resolveDockerCli).
+  const cli = options.dockerCli === undefined ? resolveDockerCli() : options.dockerCli;
+  const env = await dockerCliEnvironment(directory, { cli });
   // Which optional services run (the share gate) is the installed .env's to say,
   // not whatever the shell that started this happened to export.
   const profiles = (await readEnvironmentFile(path.join(directory, ".env"))).COMPOSE_PROFILES;
   if (profiles) env.COMPOSE_PROFILES = profiles;
   else delete env.COMPOSE_PROFILES;
-  return execFileAsync("docker", ["compose", "--project-directory", directory, ...args], {
+  return (options.exec || execFileAsync)(cli?.path || "docker", ["compose", "--project-directory", directory, ...args], {
     cwd: directory,
     timeout: options.timeout || 900_000,
     maxBuffer: 8 * 1024 * 1024,
@@ -574,11 +603,61 @@ function personalOperations({ honchoSource, gateway, bundle, installDirectory, e
   return operations;
 }
 
+/**
+ * What the personal profile has to download before anything else: Docker Desktop
+ * when neither its CLI nor its app is here, and Ollama when no copy is found. Each
+ * is null when it is already here, and `unavailable` when there is no download for
+ * this machine.
+ */
+export async function personalRuntimeNeeds({
+  platform = process.platform,
+  arch = os.arch(),
+  env = process.env,
+  installDirectory = installedServerDir(),
+  docker,
+  dockerAppFinder = dockerDesktopApp,
+  ollamaLocator = null,
+} = {}) {
+  const runtimeDir = runtimeRoot(installDirectory);
+  const ollamaDir = ollamaRuntimeDir(installDirectory);
+  let dockerNeed = null;
+  let dockerApp = "";
+  if (!docker.running) dockerApp = await dockerAppFinder({ platform, env });
+  if (!docker.installed && !dockerApp) {
+    const download = dockerDesktopDownload({ platform, arch, env, runtimeDir });
+    dockerNeed = download
+      ? {
+        type: "install-docker-desktop",
+        url: download.url,
+        destination: download.destination,
+        download: download.download,
+        note: platform === "win32"
+          ? "Windows asks for administrator approval (UAC) to install it; Docker's first-run window may follow"
+          : "copied into /Applications; Docker's first-run window then asks to accept its terms and, for the recommended settings, your macOS password",
+      }
+      : { unavailable: true };
+  }
+  const found = await (ollamaLocator
+    ? ollamaLocator({ platform, env, ollamaDir })
+    : locateOllama({ platform, env, homeDir: env.HONCHO_AGENT_BRIDGE_USER_HOME || env.HOME || env.USERPROFILE || os.homedir(), ollamaDir }));
+  let ollamaNeed = null;
+  if (!found) {
+    const download = ollamaDownload({ platform, arch, ollamaDir });
+    ollamaNeed = download
+      ? { type: "install-ollama", url: download.url, destination: download.destination, checksums: download.checksums }
+      : { unavailable: true };
+  }
+  return { runtimeDir, dockerApp, docker: dockerNeed, ollama: ollamaNeed, ollamaFound: found || null };
+}
+
 export async function serverPlan({
   profile = "portable",
   platform = process.platform,
+  arch = os.arch(),
+  env = process.env,
   dockerInspector = dockerProbe,
   dockerAppFinder = dockerDesktopApp,
+  ollamaLocator = null,
   bundleInspector = bundleProbe,
   honchoSourceInspector = honchoSourceProbe,
   gatewaySourceInspector = null,
@@ -588,10 +667,32 @@ export async function serverPlan({
   const [docker, bundle, honchoSource] = await Promise.all([dockerInspector(), bundleInspector(), honchoSourceInspector()]);
   const issues = [];
   const warnings = [];
-  const dockerApp = docker.installed && !docker.running ? await dockerAppFinder({ platform }) : "";
-  if (!docker.installed) issues.push("Docker CLI is not installed");
-  else if (!docker.running && dockerApp) warnings.push(`Docker Desktop is not running; server prepare starts it (${dockerApp}) and waits for its engine`);
+  // The personal profile gets Docker Desktop and Ollama itself on macOS and
+  // Windows; a missing one is then an operation, not an issue.
+  const installsRuntime = profile === "personal" && (platform === "darwin" || platform === "win32");
+  const runtime = installsRuntime
+    ? await personalRuntimeNeeds({ platform, arch, env, installDirectory: installedServerDir(), docker, dockerAppFinder, ollamaLocator })
+    : null;
+  const dockerApp = runtime
+    ? runtime.dockerApp
+    : (docker.installed && !docker.running ? await dockerAppFinder({ platform }) : "");
+  const runtimeOperations = [];
+  if (runtime?.docker && !runtime.docker.unavailable) {
+    runtimeOperations.push(runtime.docker);
+    warnings.push(`Docker Desktop is not installed; server prepare downloads it from ${runtime.docker.url} and installs it (${runtime.docker.note})`);
+    warnings.push(DOCKER_LICENSE_WARNING);
+  } else if (!docker.installed && !(runtime && dockerApp)) {
+    issues.push(runtime?.docker?.unavailable
+      ? `Docker CLI is not installed, and Docker Desktop has no download for ${platform} on ${arch}`
+      : "Docker CLI is not installed");
+  } else if (!docker.running && dockerApp) warnings.push(`Docker Desktop is not running; server prepare starts it (${dockerApp}) and waits for its engine`);
   else if (!docker.running) issues.push("Docker is installed but the engine is not running");
+  if (runtime?.ollama?.unavailable) {
+    issues.push(`Ollama is not installed, and this app has no Ollama download for ${platform} on ${arch}; install Ollama so that it is on PATH`);
+  } else if (runtime?.ollama) {
+    runtimeOperations.push(runtime.ollama);
+    warnings.push(`Ollama is not installed; server prepare downloads it from ${runtime.ollama.url} into ${runtime.ollama.destination} and checks it against ${runtime.ollama.checksums}`);
+  }
   if (!bundle.ok) {
     // Everything under honcho/ is fetched by prepare when a source pin is bundled,
     // so report the download instead of failing the plan over an absent directory.
@@ -653,6 +754,8 @@ export async function serverPlan({
     ? personalOperations({ honchoSource, gateway, bundle, installDirectory, embedding: await plannedEmbedding(bundle.directory, installDirectory) })
     : null;
   if (operations && dockerApp && !docker.running) operations.unshift({ type: "start-docker-desktop", app: dockerApp });
+  // Downloads come first: nothing else can run without them.
+  if (operations && runtimeOperations.length) operations.unshift(...runtimeOperations);
   return {
     ok: issues.length === 0,
     ready: issues.length === 0,
@@ -663,6 +766,7 @@ export async function serverPlan({
     installDirectory,
     honchoSource,
     ...(gateway ? { gateway, operations } : {}),
+    ...(runtime ? { ollama: runtime.ollamaFound } : {}),
     ...serverUrls(ports),
     issues,
     warnings,
@@ -1089,10 +1193,70 @@ async function serverPrepareUnlocked({
   model = "",
   dockerStarter = ensureDockerRunning,
   portChooser = chooseServerPorts,
+  arch = os.arch(),
+  dockerInspector = dockerProbe,
+  dockerAppFinder = dockerDesktopApp,
+  ollamaLocator = null,
+  runtimeInstaller = prepareRuntime,
+  runtimeOptions = {},
 } = {}) {
   requireServerProfile(profile);
+  const installedDirectory = path.resolve(serverDirectory || installedServerDir());
+  // Docker Desktop and Ollama come first when this computer has neither: nothing
+  // else prepare does is any use without them. A plan handed in says what to get;
+  // otherwise the same check the plan makes is made here.
+  let runtime = null;
+  if (profile === "personal" && (platform === "darwin" || platform === "win32")) {
+    let operations;
+    if (preparedPlan) operations = (preparedPlan.operations || []).filter((item) => /^install-(?:docker-desktop|ollama)$/.test(item.type));
+    else {
+      const needs = await personalRuntimeNeeds({
+        platform,
+        arch,
+        env,
+        installDirectory: installedDirectory,
+        docker: await dockerInspector(),
+        dockerAppFinder,
+        ollamaLocator,
+      });
+      operations = [needs.docker, needs.ollama].filter((item) => item && !item.unavailable);
+    }
+    if (operations.length) {
+      runtime = await runtimeInstaller({
+        operations,
+        platform,
+        arch,
+        env,
+        runtimeDir: runtimeRoot(installedDirectory),
+        dockerInspector: () => dockerInspector({ platform, env }),
+        ...runtimeOptions,
+      });
+      if (!runtime.ok || !runtime.ready) {
+        return {
+          ok: Boolean(runtime.ok),
+          ready: false,
+          mode: "local-docker",
+          profile,
+          runtime,
+          actions: runtime.actions || [],
+          ...(runtime.issues?.length ? { issues: runtime.issues } : {}),
+          ...(runtime.nextAction ? { nextAction: runtime.nextAction, next: runtime.nextAction.message } : { next: "Resolve the issue above, then run server prepare --profile personal again" }),
+        };
+      }
+    }
+  }
   // Plan reports a closed Docker Desktop as something prepare fixes, not as a stop.
-  if (!preparedPlan) await dockerStarter({ platform });
+  const dockerStart = preparedPlan ? null : await dockerStarter({ platform });
+  if (profile === "personal" && dockerStart && platform !== "linux") {
+    const runtimeDir = runtimeRoot(installedDirectory);
+    if (dockerStart.running) await clearDockerFirstRun(runtimeDir);
+    else if (dockerStart.installed !== false && await dockerFirstRunPending(runtimeDir)) {
+      // Docker Desktop was installed by an earlier prepare and its first-run window
+      // is still waiting for the user. Nothing else changes until it is done.
+      const nextAction = dockerFirstRunAction(dockerStart.app || (await dockerAppFinder({ platform, env })), platform);
+      return { ok: true, ready: false, mode: "local-docker", profile, docker: dockerStart, nextAction, next: nextAction.message };
+    }
+  }
   // The download happens here and never in `server plan`, which must not mutate.
   const honchoSource = await honchoSourceFetcher();
   if (!honchoSource.ok) {
@@ -1106,7 +1270,7 @@ async function serverPrepareUnlocked({
       next: "Make the Honcho source repository reachable, or install a release bundle that already contains server/honcho",
     };
   }
-  const plan = preparedPlan || await serverPlan({ profile, portChooser });
+  const plan = preparedPlan || await serverPlan({ profile, portChooser, platform, arch, env, dockerInspector, dockerAppFinder, ollamaLocator });
   if (!plan.ready) return plan;
   const installed = path.resolve(serverDirectory || installedServerDir());
   const privateFileOptions = {
@@ -1344,6 +1508,7 @@ async function serverPrepareUnlocked({
       : "Remove the retained retired-backup path reported by cleanup before starting the server",
     host,
     hostStoppedForUpdate,
+    ...(runtime ? { runtime } : {}),
   };
   return result;
 }

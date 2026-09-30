@@ -23,13 +23,13 @@
 // cloudflared, launchctl, reg or systemctl.
 import { execFile, spawn as nodeSpawn } from "node:child_process";
 import crypto from "node:crypto";
-import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 
 import { embeddingAliasBase } from "./host-manager.mjs";
+import { findOnPath } from "./runtime-installer.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import {
   chooseGatePort,
@@ -76,24 +76,8 @@ async function defaultRun(command, args, options = {}) {
   });
 }
 
-/** The first executable of that name on PATH, or null. */
-export function findOnPath(tool, env = process.env, platform = process.platform) {
-  const delimiter = platform === "win32" ? ";" : ":";
-  const names = platform === "win32" ? [`${tool}.exe`, tool] : [tool];
-  const folders = String(env.PATH || env.Path || "").split(delimiter).filter(Boolean);
-  for (const folder of folders) {
-    for (const name of names) {
-      const candidate = path.join(folder, name);
-      try {
-        fs.accessSync(candidate, platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
-        if (!fs.statSync(candidate).isDirectory()) return candidate;
-      } catch {
-        // not here
-      }
-    }
-  }
-  return null;
-}
+// Shared with the Docker and Ollama finders; still exported from here for callers.
+export { findOnPath };
 
 /** Where everything sharing uses lives, beside the installed server. */
 export function sharePaths({ serverDirectory, platform = process.platform, runtimeDirectory } = {}) {

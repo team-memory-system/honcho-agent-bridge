@@ -11,9 +11,16 @@
 //     server/host/supervisor.mjs. `host start` spawns that supervisor detached and
 //     finds it again through its PID file.
 //
+// Ollama is whichever copy is found first: on PATH, the macOS app's CLI, the
+// Windows installer's copy, or the app's own copy in <app home>/runtime/ollama,
+// which prepare downloads when there is none (scripts/runtime-installer.mjs). The
+// app's own copy has no service of its own, so `ollama serve` is always started by
+// this app for it: by prepare, by `host start`, and by the supervisor whenever the
+// API stops answering.
+//
 // This repository registers nothing with launchd, the Windows task scheduler or
-// registry, or systemd. After a reboot the supervisor stays down until the app or
-// `host start` runs again.
+// registry, or systemd. After a reboot the supervisor, and with it the app's own
+// `ollama serve`, stays down until the app or `host start` runs again.
 import { execFile, spawn as nodeSpawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -32,6 +39,7 @@ import {
   prepareGateway,
 } from "./gateway.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
+import { installOllama, locateOllama, ollamaDownload, ollamaRuntimeDir } from "./runtime-installer.mjs";
 
 const execFileAsync = promisify(execFile);
 const FORMAT_VERSION = 1;
@@ -111,6 +119,8 @@ export function resolveHostPaths({
     pidFile,
     logDir,
     gatewayDir: gatewayDirectory(serverDir),
+    // The app's own Ollama, when this computer had none.
+    ollamaDir: ollamaRuntimeDir(serverDir),
     supervisorFile: path.join(serverDir, "host", "supervisor.mjs"),
     // Generated right before `ollama create`, from the alias's own base model.
     modelfileFor: (model) => path.join(runtimeDir, `${String(model).replace(/[^A-Za-z0-9._-]/g, "_")}.Modelfile`),
@@ -243,7 +253,11 @@ export function deriveHostTopology({
       dimensions,
       keepAlive: keepAliveOption(ollamaInput.keepAlive),
       warmIntervalMs: numberOption(ollamaInput.warmIntervalMs, 300_000, { min: 15_000, max: 86_400_000 }),
+      // How often the supervisor checks that `ollama serve` answers, and starts it when not.
+      serviceCheckIntervalMs: numberOption(ollamaInput.serviceCheckIntervalMs, 15_000, { min: 1_000, max: 3_600_000 }),
       manageService: ollamaInput.manageService !== false,
+      // True when the executable is the app's own download, which nothing else starts.
+      owned: false,
     },
     state: {
       configFile: paths.configFile,
@@ -382,6 +396,8 @@ export async function hostPlan({
   run = defaultRun,
   fetchImpl = globalThis.fetch,
   gatewaySourceInspector = null,
+  arch = os.arch(),
+  ollamaLocator = null,
 } = {}) {
   const resolved = resolveHostPaths({ installedServerDir, platform, env, homeDir });
   const paths = { ...resolved, homeDir, env };
@@ -414,8 +430,26 @@ export async function hostPlan({
     warnings.push(`${topology.gateway.directory} was not fetched by this installer; it is used as it is and never replaced`);
   }
 
-  const ollamaExecutable = topology.ollama.enabled ? await resolveExecutable(topology.ollama.executable, platform, run, env) : "";
-  if (ollamaExecutable) topology.ollama.executable = ollamaExecutable;
+  let ollamaExecutable = topology.ollama.enabled ? await resolveExecutable(topology.ollama.executable, platform, run, env) : "";
+  let ollamaSource = ollamaExecutable ? "path" : "";
+  if (topology.ollama.enabled && !ollamaExecutable && topology.ollama.executable === "ollama") {
+    // Not on PATH: the Ollama apps' own CLIs, then the app's own copy.
+    const located = await (ollamaLocator
+      ? ollamaLocator({ platform, env, homeDir, ollamaDir: paths.ollamaDir })
+      : locateOllama({ platform, env, homeDir, ollamaDir: paths.ollamaDir, which: () => null }));
+    if (located) {
+      ollamaExecutable = path.resolve(located.path);
+      ollamaSource = located.source;
+    }
+  }
+  if (ollamaExecutable) {
+    topology.ollama.executable = ollamaExecutable;
+    topology.ollama.owned = ollamaSource === "runtime"
+      || path.dirname(ollamaExecutable) === path.resolve(paths.ollamaDir);
+  }
+  const ollamaInstall = topology.ollama.enabled && !ollamaExecutable
+    ? ollamaDownload({ platform, arch, ollamaDir: paths.ollamaDir })
+    : null;
   let ollama = { installed: false, running: false, version: "", models: [], baseModelPresent: false, aliasPresent: false, aliasMatches: false };
   if (topology.ollama.enabled) {
     const cli = ollamaExecutable
@@ -441,7 +475,13 @@ export async function hostPlan({
       aliasPresent,
       aliasMatches,
     };
-    if (!ollama.installed) issues.push("Ollama is not installed or is not available on PATH");
+    if (!ollama.installed && ollamaInstall) {
+      warnings.push(`Ollama is not installed; prepare downloads it from ${ollamaInstall.url} into ${ollamaInstall.destination}`);
+    } else if (!ollama.installed && ollamaExecutable) {
+      issues.push(`Ollama at ${ollamaExecutable} did not run (ollama --version failed)`);
+    } else if (!ollama.installed) {
+      issues.push(`Ollama is not installed, and this app has no Ollama download for ${platform} on ${arch}; install Ollama so that it is on PATH`);
+    }
     if (topology.ollama.contextLength !== 8192 || !KNOWN_EMBEDDING_BASES.has(topology.ollama.baseModel)) {
       issues.push(`The personal host profile requires ${[...KNOWN_EMBEDDING_BASES].join(" or ")} with an 8192-token context`);
     }
@@ -450,6 +490,9 @@ export async function hostPlan({
   if (!(await exists(paths.supervisorFile))) issues.push("The bundled host supervisor is missing");
 
   const operations = [];
+  if (ollamaInstall) {
+    operations.push({ type: "install-ollama", url: ollamaInstall.url, destination: ollamaInstall.destination, checksums: ollamaInstall.checksums });
+  }
   if (gatewaySource.fetchable) {
     operations.push({
       type: gatewaySource.state === "stale" ? "update-gateway-source" : "fetch-gateway-source",
@@ -474,7 +517,7 @@ export async function hostPlan({
       installed: await exists(gatewayCliPath(topology.gateway.directory)),
     },
     ollama,
-    executables: { node: path.resolve(process.execPath), ollama: ollamaExecutable || null },
+    executables: { node: path.resolve(process.execPath), ollama: ollamaExecutable || null, ollamaOwned: topology.ollama.owned },
     issues,
     warnings,
     operations,
@@ -550,6 +593,27 @@ export async function hostPrepare(options = {}) {
     actions.push({ type: "gateway-install", autostart: gateway.autostart, changed: true });
   }
 
+  const installOperation = topology.ollama.enabled && plan.operations.find((item) => item.type === "install-ollama");
+  if (installOperation) {
+    const installed = await (options.ollamaInstaller || installOllama)({
+      platform: options.platform || process.platform,
+      arch: options.arch || os.arch(),
+      env: options.env || process.env,
+      ollamaDir: installOperation.destination,
+      fetchImpl: options.downloadFetch || fetchImpl,
+      run,
+    });
+    if (!installed.ok) {
+      return { ok: false, ready: false, profile: plan.profile, issues: installed.issues, warnings: plan.warnings, actions };
+    }
+    actions.push(installed.action);
+    plan = await hostPlan({ ...options, run, fetchImpl });
+    if (!plan.ready || !plan.executables?.ollama) {
+      return { ok: false, ready: false, profile: plan.profile, issues: plan.issues?.length ? plan.issues : ["The downloaded Ollama was not found after installing it"], warnings: plan.warnings, actions };
+    }
+    Object.assign(topology.ollama, plan._internal.topology.ollama);
+  }
+
   if (topology.ollama.enabled) {
     if (!plan.ollama.running) {
       try {
@@ -565,7 +629,7 @@ export async function hostPrepare(options = {}) {
       }
       actions.push({ type: "ollama-serve", changed: true });
       const refreshed = await hostPlan({ ...options, run, fetchImpl });
-      if (refreshed.ready) plan = refreshed;
+      if (refreshed.ready && !refreshed.operations.some((item) => item.type === "install-ollama")) plan = refreshed;
     }
     if (!plan.ollama.baseModelPresent) {
       const pulled = await runWith(run, topology.ollama.executable, ["pull", topology.ollama.baseModel], { env: options.env || process.env, timeout: 3_600_000 });
@@ -661,6 +725,24 @@ export async function hostStart(options = {}) {
   const spawnImpl = options.spawnImpl || nodeSpawn;
   const existing = await pidState(config.state.pidFile);
   let started = false;
+  let ollamaRestarted = false;
+  // The app's own Ollama has nothing else to start it. A supervisor that is already
+  // running brings it back on its next check; this brings it back now. A supervisor
+  // about to be started starts it itself.
+  if (existing.running && config.ollama?.enabled && config.ollama.owned && config.ollama.manageService !== false) {
+    const fetchImpl = options.fetchImpl || globalThis.fetch;
+    if (!(await probeJson(fetchImpl, `${config.ollama.baseUrl}/api/version`)).ok) {
+      try {
+        spawnDetached(spawnImpl, config.ollama.executable, ["serve"], {
+          env: { ...(options.env || process.env), OLLAMA_HOST: new URL(config.ollama.baseUrl).host },
+          cwd: paths.runtimeDir,
+        });
+        ollamaRestarted = true;
+      } catch {
+        // The supervisor's own check tries again.
+      }
+    }
+  }
   if (!existing.running) {
     await fsp.mkdir(config.state.logDir, { recursive: true });
     try {
@@ -686,6 +768,7 @@ export async function hostStart(options = {}) {
     prepared: true,
     started,
     alreadyRunning: existing.running,
+    ...(ollamaRestarted ? { ollamaRestarted } : {}),
     timedOut: !status.ok && !loginNeeded,
     ...(loginNeeded
       ? { nextAction: gatewayLoginAction(status.gateway.ui?.url || config.gateway?.uiUrl, "run host start again") }

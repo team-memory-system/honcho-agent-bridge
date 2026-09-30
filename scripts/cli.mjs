@@ -47,6 +47,7 @@ import {
   TUNNEL_TOKEN_ENV,
 } from "./share-manager.mjs";
 import { gatewayDirectory, gatewayOpen } from "./gateway.mjs";
+import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
@@ -298,12 +299,14 @@ function managedByThisInstall(url) {
   if (!isLoopbackHostname(parsed.hostname)) return null;
   const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
   try {
-    const published = execFileSync("docker", [
+    // The docker on PATH, else Docker Desktop's own copy.
+    const cli = resolveDockerCli();
+    const published = execFileSync(cli?.path || "docker", [
       "ps",
       "--filter", "label=com.docker.compose.project=honcho-agent-bridge",
       "--filter", "label=com.docker.compose.service=api",
       "--format", "{{.Ports}}",
-    ], { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] });
+    ], { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"], env: dockerPathEnvironment(cli) });
     return new RegExp(`(?:127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::\\]|::):${port}->`).test(published);
   } catch {
     return null;
