@@ -311,7 +311,11 @@ test("every server route the screens call exists", async () => {
   const relayed = ["/api/honcho/", "/api/dashboard/", "/api/gw/"];
   for (const route of called) {
     if (relayed.some((prefix) => route.startsWith(prefix) || `${route}/` === prefix)) continue;
-    assert.ok(server.includes(`"${route}"`), `the page calls ${route}, which ui.mjs does not serve`);
+    // The target routes are made from one table: `/api/targets/${action}` for each key of TARGET_TIMEOUTS.
+    const family = /^\/api\/targets\/([a-z]+)$/.exec(route);
+    const served = server.includes(`"${route}"`)
+      || (family && server.includes("`/api/targets/${action}`") && new RegExp(`TARGET_TIMEOUTS = \\{[^}]*\\b${family[1]}:`).test(server));
+    assert.ok(served, `the page calls ${route}, which ui.mjs does not serve`);
   }
 });
 

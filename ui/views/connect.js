@@ -64,8 +64,10 @@ export default {
     const collect = h("div", {}, spinner());
     const share = h("div", {}, spinner());
     const importer = h("div", {});
+    const targets = h("div", {}, spinner());
     clear(body,
       section({ id: "collect", title: "에이전트 대화 수집", note: "에이전트와 나눈 대화가 끝날 때마다 내 기억 서버로 보냅니다. 내 컴퓨터가 여러 대여도 모두 같은 서버로 모읍니다." }, collect),
+      section({ id: "targets", title: "회사 서버에도 보내기", note: "정한 폴더에서 한 대화만 회사 서버 같은 다른 기억 서버에도 보냅니다. 내 서버에는 지금처럼 모든 대화가 가고, 다른 서버가 꺼져 있어도 내 서버는 멈추지 않습니다." }, targets),
       section({ id: "share", title: "다른 사람의 기억에 묻기", note: "팀원이 열어 준 공유 창구에 연결하면, 에이전트가 그 사람의 기억에 질문할 수 있습니다. 원문은 볼 수 없고 답만 받습니다." }, share),
       section({ id: "import", title: "ChatGPT 기록 가져오기", note: "ChatGPT 설정 → 데이터 제어 → 내보내기로 받은 파일 안의 conversations.json을 올립니다. 같은 파일을 다시 올려도 겹쳐 쌓이지 않습니다." }, importer),
     );
@@ -286,8 +288,135 @@ export default {
       clear(importer, h("div", { class: "panel" }, h("div", { style: { display: "grid", gridTemplateColumns: "1fr auto", gap: "10px", alignItems: "center" } }, file, upload), result));
     }
 
+    // ── Other servers ─────────────────────────────────────
+
+    async function drawTargets(banner = null) {
+      let list;
+      try {
+        list = await cli("/api/targets", {});
+      } catch (error) {
+        clear(targets, errorNotice(error));
+        return;
+      }
+      const items = list.targets || [];
+      if (!app.context?.configured) {
+        clear(targets, notice("", "먼저 위에서 대화 수집을 설정하세요. 그다음에 다른 서버를 더할 수 있습니다."));
+        return;
+      }
+      clear(targets,
+        banner,
+        items.length ? h("div", { class: "rows" }, items.map(targetRow)) : null,
+        addTargetForm(items.length === 0),
+      );
+    }
+
+    function targetRow(target) {
+      const status = h("div", {});
+      const sent = target.lastSentAt ? `마지막으로 보낸 때 ${new Date(target.lastSentAt).toLocaleString("ko-KR")}` : "아직 보낸 대화 없음";
+      return h("div", { class: "row", style: { alignItems: "flex-start" } },
+        h("div", { style: { minWidth: "0" } },
+          h("div", { class: "title" }, target.enabled ? tag("보내는 중", "ok") : tag("멈춤"), target.label || target.id, target.pending ? tag(`기다리는 대화 ${target.pending}`, "warn") : null),
+          h("div", { class: "sub mono" }, target.url || ""),
+          h("div", { class: "sub" }, `폴더: ${(target.folders || []).join(", ")}`),
+          h("div", { class: "sub" }, [`작업공간 ${target.workspace}`, `이름 ${target.userPeerId}`, target.hasToken ? "토큰 있음" : null, target.hasAccess ? "Access 서비스 토큰 있음" : null, sent].filter(Boolean).join(" · ")),
+          status,
+        ),
+        h("div", { class: "end", style: { flexWrap: "wrap", justifyContent: "flex-end" } },
+          button("시험", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+            const result = await post("/api/targets/test", { id: target.id });
+            clear(status, result.ok
+              ? notice("ok", "서버가 답하고 작업공간을 읽을 수 있습니다.")
+              : notice("bad", explainWarning(result.health?.error || result.workspace?.error || result.error || "서버가 답하지 않습니다.")));
+          }) }),
+          button("폴더 바꾸기", { kind: "small quiet", onClick: async () => {
+            const next = window.prompt("보낼 폴더를 쉼표로 나눠 적으세요.", (target.folders || []).join(", "));
+            if (next === null) return;
+            try { await cli("/api/targets/set", { id: target.id, folders: next.split(",").map((item) => item.trim()).filter(Boolean) }); toast("폴더를 바꿨습니다"); drawTargets(); } catch (error) { toast(error.message, "bad"); }
+          } }),
+          button(target.enabled ? "멈추기" : "다시 보내기", { kind: "small quiet", onClick: (event) => busy(event.currentTarget, async () => { await cli("/api/targets/set", { id: target.id, enabled: !target.enabled }); await drawTargets(); }) }),
+          button("지난 대화 보내기", { kind: "small quiet", onClick: async (event) => {
+            const since = window.prompt("언제부터의 대화를 보낼까요? (예: 2026-09-01) 비워 두면 그 폴더의 모든 지난 대화를 보냅니다.", "");
+            if (since === null) return;
+            if (since && !/^\d{4}-\d{2}-\d{2}$/.test(since.trim())) { toast("날짜는 2026-09-01처럼 적습니다.", "bad"); return; }
+            const ok = await confirmSheet({ title: `${target.label || target.id}에 지난 대화를 보낼까요?`, text: `${(target.folders || []).join(", ")} 폴더에서 한 대화${since ? `(${since.trim()} 이후)` : ""}를 보냅니다. 이미 보낸 것은 다시 보내지 않습니다. 한 번에 500개까지 보내고, 남으면 다시 누르면 이어서 보냅니다.`, confirm: "보내기" });
+            if (!ok) return;
+            await busy(event.currentTarget, async () => {
+              const body = { id: target.id };
+              if (since.trim()) body.since = since.trim();
+              const result = await post("/api/targets/backfill", body);
+              const counts = [`대화 ${number(result.sent_sessions || 0)}개`, `새 메시지 ${number(result.new_messages || 0)}개`, result.remaining ? `남은 것 ${number(result.remaining)}개 (다시 누르면 이어서)` : null, result.failed ? `실패 ${number(result.failed)}개` : null].filter(Boolean).join(" · ");
+              clear(status, notice(result.ok ? "ok" : "warn", h("b", {}, result.ok ? "보냈습니다." : "일부만 보냈습니다."), ` ${counts}`, result.stopped ? h("div", {}, "서버가 계속 답하지 않아 멈췄습니다. 서버가 돌아오면 다시 누르세요.") : null));
+              await loadContext();
+            });
+          } }),
+          button("", { kind: "small icon-only quiet danger", iconName: "trash", title: "빼기", onClick: async (event) => {
+            const ok = await confirmSheet({ title: `${target.label || target.id}를 뺄까요?`, text: "이제부터 이 서버로 보내지 않습니다. 이미 보낸 대화는 그 서버에 그대로 남습니다. 아직 못 보낸 대화는 버립니다.", confirm: "빼기", danger: true });
+            if (!ok) return;
+            await busy(event.currentTarget, async () => { await cli("/api/targets/remove", { id: target.id }); await drawTargets(); }, { done: "뺐습니다" });
+          } }),
+        ),
+      );
+    }
+
+    function addTargetForm(open) {
+      const field = (label, input, hint) => h("label", { class: "field" }, h("span", {}, label), input, hint ? h("small", {}, hint) : null);
+      const wide = (label, input, hint) => h("label", { class: "field wide" }, h("span", {}, label), input, hint ? h("small", {}, hint) : null);
+      const inputs = {
+        label: h("input", { class: "input", placeholder: "예: 회사" }),
+        url: h("input", { class: "input", type: "url", placeholder: "https://memory.company.com" }),
+        folders: h("textarea", { class: "input", rows: "2", placeholder: "/Users/me/work, /Users/me/dev/company-app" }),
+        apiToken: h("input", { class: "input", type: "password", autocomplete: "off" }),
+        workspace: h("input", { class: "input", placeholder: app.context?.workspace || "memory" }),
+        userPeer: h("input", { class: "input", placeholder: app.context?.user?.peerId || "" }),
+        accessClientId: h("input", { class: "input", type: "password", autocomplete: "off" }),
+        accessClientSecret: h("input", { class: "input", type: "password", autocomplete: "off" }),
+      };
+      const outcome = h("div", {});
+      const form = h("div", { class: "panel" },
+        h("div", { class: "form-grid" },
+          field("이름", inputs.label, "화면에 보일 이름입니다."),
+          field("서버 주소", inputs.url),
+          wide("보낼 폴더", inputs.folders, "이 폴더 안에서 연 에이전트 대화만 보냅니다. 쉼표나 줄바꿈으로 여러 개를 적습니다."),
+          wide("서버 토큰", inputs.apiToken, "그 서버 관리자에게 받습니다."),
+          field("그 서버의 작업공간", inputs.workspace, "비우면 내 서버와 같게 둡니다."),
+          field("그 서버에서 쓸 내 이름", inputs.userPeer, "비우면 내 서버와 같게 둡니다."),
+          h("details", { class: "field wide access-fields" },
+            h("summary", {}, "Cloudflare WARP를 켤 수 없는 컴퓨터라면"),
+            h("div", { class: "form-grid" }, field("Access 서비스 토큰 ID", inputs.accessClientId), field("Access 서비스 토큰 비밀", inputs.accessClientSecret)),
+          ),
+        ),
+        h("div", { class: "form-actions" },
+          button("더하기", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
+            const label = inputs.label.value.trim() || "회사";
+            const body = {
+              id: slug(label),
+              label,
+              url: inputs.url.value.trim(),
+              folders: inputs.folders.value.split(/[,\n]/).map((item) => item.trim()).filter(Boolean),
+            };
+            for (const key of ["workspace", "userPeer", "apiToken", "accessClientId", "accessClientSecret"]) if (inputs[key].value.trim()) body[key] = inputs[key].value.trim();
+            const result = await post("/api/targets/add", body);
+            if (!result.ok) {
+              clear(outcome, notice("bad", h("b", {}, "더하지 못했습니다."), h("ul", {}, (result.issues || [result.error]).filter(Boolean).map((issue) => h("li", {}, explainWarning(issue))))));
+              return;
+            }
+            await drawTargets(notice("ok", h("b", {}, `${label}에도 보냅니다.`), " 지금부터 끝나는 대화가 갑니다. 지난 대화도 보내려면 지난 대화 보내기를 누르세요.",
+              result.warnings?.length ? h("ul", {}, result.warnings.map((warning) => h("li", {}, explainWarning(warning)))) : null));
+          }) }),
+        ),
+        outcome,
+      );
+      return open ? form : h("details", { class: "raw", style: { marginTop: "12px" } }, h("summary", {}, "다른 서버 더하기"), h("div", { style: { marginTop: "10px" } }, form));
+    }
+
+    function slug(text) {
+      if (/회사/.test(text)) return "company";
+      const ascii = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      return ascii || `server-${Date.now().toString(36).slice(-4)}`;
+    }
+
     drawImport();
-    await Promise.all([drawCollect(), drawShare()]);
+    await Promise.all([drawCollect(), drawShare(), drawTargets()]);
     return {
       update: (next) => { if (next[0]) document.getElementById(next[0])?.scrollIntoView({ block: "start" }); },
     };
