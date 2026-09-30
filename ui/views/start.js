@@ -11,7 +11,7 @@ const PATHS = [
   {
     key: "server",
     title: "이 컴퓨터를 내 기억 서버로",
-    text: "내 대화가 이 컴퓨터에 쌓입니다. Docker Desktop과 디스크 몇 GB, Codex나 Claude 구독이 필요합니다.",
+    text: "내 대화가 이 컴퓨터에 쌓입니다. 디스크 몇 GB와 Codex나 Claude 구독이 필요합니다. Docker Desktop과 Ollama는 없으면 이 앱이 설치합니다.",
   },
   {
     key: "remote",
@@ -65,7 +65,7 @@ export default {
         const server = await post("/api/server/status", { profile: "personal" }).catch(() => null);
         const gatewayReady = app.status.gateway.state === "on";
         steps.push(
-          { title: "기억 서버 준비", done: Boolean(server?.installed), text: server?.installed ? "이 컴퓨터에 설치돼 있습니다." : server && !server.docker?.installed ? "Docker Desktop을 먼저 설치하세요." : "서버 소스와 게이트웨이를 설치합니다.", action: ["서버 화면에서 준비", () => go("server")] },
+          { title: "기억 서버 준비", done: Boolean(server?.installed), text: server?.installed ? "이 컴퓨터에 설치돼 있습니다." : server && !server.docker?.installed ? "Docker Desktop과 Ollama부터 이 앱이 받아서 설치합니다." : "서버 소스와 게이트웨이를 설치합니다.", action: ["서버 화면에서 준비", () => go("server")] },
           { title: "구독 계정 로그인", done: gatewayReady, text: gatewayReady ? app.status.gateway.text : "기억 서버가 생각할 모델을 쓰려면 Codex나 Claude 계정이 필요합니다.", action: ["게이트웨이에서 로그인", () => go("models/add/codex")] },
           { title: "기억 서버 시작", done: Boolean(server?.running && server?.health?.ok), text: server?.running ? "답하는 중입니다." : "로그인 뒤 서버 화면에서 준비를 한 번 더 누르고 시작합니다.", action: ["서버 화면으로", () => go("server")] },
           { title: "다른 컴퓨터에서 쓰게 열기 (선택)", done: Boolean(server?.share?.enabled), text: server?.share?.enabled ? `${server.share.publicUrl}로 열려 있습니다.` : "회사 맥북 같은 다른 컴퓨터의 대화도 여기로 모으려면 Cloudflare 통로를 엽니다. 이 컴퓨터 하나만 쓰면 건너뜁니다.", action: ["서버 화면에서 열기", () => go("server")], optional: true },

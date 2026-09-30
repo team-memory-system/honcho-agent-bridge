@@ -23,6 +23,8 @@ function statusTag(on, labels = ["실행 중", "멈춤"]) {
 function planStep(op) {
   const size = /qwen3-embedding:(\w+)/.exec(op.note || "")?.[1];
   switch (op.type) {
+    case "install-docker-desktop": return "Docker Desktop 받아서 설치하기 (약 600MB). 처음 켤 때 Docker 창에서 약관 동의와 암호 입력이 한 번 필요함";
+    case "install-ollama": return "Ollama 받기 (이 앱이 따로 관리, 관리자 권한 필요 없음)";
     case "start-docker-desktop": return "Docker Desktop을 켜고 엔진이 뜰 때까지 기다리기";
     case "fetch-honcho-source": return `Honcho 소스 받기 (${op.repo}, ${String(op.ref || "").slice(0, 7)})`;
     case "fetch-gateway-source": return `구독 게이트웨이 받기 (${op.repo}, ${String(op.ref || "").slice(0, 7)})`;
@@ -41,6 +43,7 @@ const WARNING_WORDS = [
   [/^Honcho source will be downloaded from (\S+)/, (m) => `Honcho 소스를 ${m[1]}에서 받습니다.`],
   [/^Subscription gateway source will be (replaced from|downloaded from) (\S+)/, (m) => `구독 게이트웨이를 ${m[2]}에서 ${m[1].startsWith("replaced") ? "다시 받습니다" : "받습니다"}.`],
   [/^Docker Desktop is not running/, () => "Docker Desktop이 꺼져 있어 준비할 때 켭니다."],
+  [/^Docker Desktop is free for/, () => "Docker Desktop은 개인, 교육, 비영리 오픈소스, 작은 회사(직원 250명 미만이고 연 매출 1천만 달러 미만)에서는 무료입니다. 그보다 큰 회사나 정부 기관에서는 유료 구독이 필요합니다."],
   [/was not fetched by this installer/, () => "게이트웨이 폴더를 이 설치기가 받은 것이 아니라서 바꾸지 않고 그대로 씁니다."],
 ];
 
@@ -63,7 +66,17 @@ function planView(plan) {
   );
 }
 
+const NEXT_ACTIONS = {
+  "docker-first-run": ["Docker Desktop 창에서 처음 설정을 마쳐 주세요.", navigator.platform?.startsWith("Mac")
+    ? "화면에 뜬 Docker Desktop 창에서 약관에 동의하고 권장 설정을 고르세요. macOS가 암호를 묻습니다. Docker가 엔진이 켜졌다고 하면 아래에서 이어서 준비를 누르세요."
+    : "화면에 뜬 Docker Desktop 창에서 약관에 동의하고 처음 설정을 마치세요. 엔진이 켜졌다고 하면 아래에서 이어서 준비를 누르세요."],
+  "restart-required": ["Windows를 다시 시작해야 합니다.", "Docker Desktop이 쓰는 WSL 2를 마저 설치하려면 다시 시작이 필요합니다. 다시 켠 뒤 이 앱을 열고 이어서 준비를 누르세요."],
+  "docker-install-approval": ["관리자 허락이 필요합니다.", "Docker Desktop을 설치하려면 Windows가 묻는 창에서 예를 눌러야 합니다. 이어서 준비를 다시 누르세요."],
+};
+
 function prepareOutcome(result) {
+  const action = NEXT_ACTIONS[result.nextAction?.kind];
+  if (action) return notice("warn", h("b", {}, action[0]), h("div", {}, action[1]));
   if (result.nextAction?.kind === "gateway-login") {
     return notice("warn", h("b", {}, "구독 계정 로그인이 필요합니다."),
       h("div", {}, "기억 서버가 생각할 모델을 쓰려면 Codex나 Claude 계정이 있어야 합니다. 아래 3단계에서 로그인한 뒤 기억 서버 준비를 누르세요."),
@@ -85,6 +98,7 @@ export default {
     );
 
     const outcome = h("div", {});
+    let planCache = null;
 
     async function draw() {
       clear(body, h("div", { class: "empty" }, spinner()));
@@ -96,6 +110,7 @@ export default {
       const gatewayReport = gatewayStatus.status === "fulfilled" ? gatewayStatus.value : null;
       const server = status.status === "fulfilled" ? status.value : null;
       const hostStatus = host.status === "fulfilled" ? host.value : null;
+      planCache = !server?.installed ? await post("/api/server/plan", { profile: "personal" }).catch(() => null) : null;
       const context = app.context;
       // A memory server on another computer: this one must not get a second one.
       const answering = await api().get("/queue/status").then(() => true, () => false);
@@ -104,8 +119,6 @@ export default {
       const nodes = [outcome];
       if (!server) {
         nodes.push(errorNotice(status.reason));
-      } else if (!server.docker?.installed) {
-        nodes.push(notice("warn", h("b", {}, "Docker가 없습니다."), " 이 컴퓨터를 기억 서버로 쓰려면 Docker Desktop을 먼저 설치하세요."));
       } else if (server.installed) {
         nodes.push(serverSection(server), shareSection(), hostSection(hostStatus), verifySection());
       } else {
@@ -330,6 +343,10 @@ export default {
           refreshStatus();
         });
       };
+      // The plan knows what is missing: it lists an install for Docker Desktop and Ollama only when they are.
+      const ops = new Set((planCache?.operations || []).map((op) => op.type));
+      const dockerReady = Boolean(server.docker?.installed && server.docker?.running);
+      const ollamaReady = planCache ? !ops.has("install-ollama") : false;
       const steps = [
         {
           title: "무엇을 설치할지 보기",
@@ -341,12 +358,20 @@ export default {
           }) }), planBox],
         },
         {
+          title: "Docker와 Ollama 준비",
+          text: dockerReady && ollamaReady
+            ? "둘 다 이 컴퓨터에 있습니다."
+            : `${[!server.docker?.installed ? "Docker Desktop" : null, !ollamaReady ? "Ollama" : null].filter(Boolean).join("과 ") || "Docker Desktop"}을 이 앱이 받아서 설치합니다.${!server.docker?.installed ? " Docker는 처음 켤 때 약관 동의와 암호 입력이 한 번 필요합니다." : server.docker?.running ? "" : " Docker Desktop이 꺼져 있으면 켭니다."}`,
+          done: dockerReady && ollamaReady,
+          body: dockerReady && ollamaReady ? [] : [button(server.docker?.installed ? "이어서 준비" : "받아서 설치", { kind: "small primary", onClick: prepare({ title: "Docker와 Ollama를 설치할까요?", text: "Docker Desktop(약 600MB)과 Ollama를 받아 설치합니다. Docker Desktop 창이 뜨면 약관에 동의하고 권장 설정을 고르세요.", confirm: "설치" }) })],
+        },
+        {
           title: "구독 게이트웨이 설치",
           text: gatewayUp
             ? `설치돼 있고 ${gatewayReport.endpoint || "라우터"}에서 답합니다.`
             : "Honcho 소스와 게이트웨이를 받고, 게이트웨이를 이 컴퓨터에 설치해 자동 시작하게 합니다. 몇 분 걸립니다.",
           done: gatewayUp,
-          body: gatewayUp ? [] : [button("설치", { kind: "small primary", onClick: prepare({ title: "구독 게이트웨이를 설치할까요?", text: "Honcho 소스와 게이트웨이를 받고 게이트웨이를 설치합니다. 계정 로그인이 필요해지면 거기서 멈춥니다.", confirm: "설치" }) })],
+          body: gatewayUp || !dockerReady ? [] : [button("설치", { kind: "small primary", onClick: prepare({ title: "구독 게이트웨이를 설치할까요?", text: "Honcho 소스와 게이트웨이를 받고 게이트웨이를 설치합니다. 계정 로그인이 필요해지면 거기서 멈춥니다.", confirm: "설치" }) })],
         },
         {
           title: "게이트웨이에 구독 계정 로그인",
