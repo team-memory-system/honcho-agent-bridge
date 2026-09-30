@@ -6,9 +6,9 @@ person's Honcho.
 
 ## Read this first (for agents)
 
-The memory system uses the following repositories. Team Memory System maintains
-the server and agent bridge; the subscription gateway is an independently released
-dependency maintained by `chenjingdev`.
+This is one of three repositories that make up the memory system, all in the
+`team-memory-system` organization. Any of them can be the place you landed, so
+here is the whole map.
 
 `honcho-selfhost` keeps official Honcho in a submodule and its core changes in
 patches. This installer (0.3.5+) prepares that source before installing it, so the
@@ -20,14 +20,7 @@ the installed Honcho source records the official commit and patch checksums.
 |---|---|---|
 | [`honcho-selfhost`](https://github.com/team-memory-system/honcho-selfhost) | The memory server. A fork of `plastic-labs/honcho` (AGPL-3.0), with the MCP bridge and dashboard inside it | One computer per person |
 | **`honcho-agent-bridge`** (this one) | Collector, installer, diagnostics, release builder, agent plugin | Every machine that runs an agent |
-| [`subscription-gateway`](https://github.com/chenjingdev/subscription-gateway) | Independent subscription-to-API gateway with its own login screen (AGPL-3.0) | The computer that runs Honcho; `server prepare` fetches the pinned source revision and runs the gateway's own install |
-
-The repository's [`subscription-gateway/`](subscription-gateway) directory is a Git
-submodule pointing to that independent project. GitHub shows it as a linked folder.
-Run `git submodule update --init subscription-gateway` to check out its source for
-development. Its commit must match `server/gateway-source.json`; update both when
-adopting a new gateway revision. Plugin and archive installations use that JSON pin
-to fetch the runtime even when submodules were not checked out.
+| [`subscription-gateway`](https://github.com/team-memory-system/subscription-gateway) | Subscription-to-API gateway with its own login screen, also usable on its own (AGPL-3.0) | The computer that runs Honcho; `server prepare` fetches the pinned source revision and runs the gateway's own install |
 
 **Topology.** One Honcho and one database per person; that person's several machines
 all feed the same one. Teammates do not share a database. What is shared is a single

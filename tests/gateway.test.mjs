@@ -24,7 +24,7 @@ import {
   PREFERRED_CHAT_MODELS,
 } from "../scripts/gateway.mjs";
 
-const REPO = "https://github.com/chenjingdev/subscription-gateway";
+const REPO = "https://github.com/team-memory-system/subscription-gateway";
 const ROUTER_KEY = "0123456789abcdef".repeat(4);
 
 async function exists(target) {

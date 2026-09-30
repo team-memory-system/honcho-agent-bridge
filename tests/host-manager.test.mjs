@@ -206,12 +206,12 @@ test("personal host prepare fetches and installs the gateway, creates the Qwen a
     fetchImpl: async () => response({ version: "1.0" }),
     gatewaySourceInspector: async () => (await fsp.access(fixture.gatewayDir).then(() => true, () => false))
       ? { state: "current", present: true, fetchable: false, directory: fixture.gatewayDir }
-      : { state: "missing", present: false, fetchable: true, directory: fixture.gatewayDir, pin: { repo: "https://github.com/chenjingdev/subscription-gateway", ref: "main" } },
+      : { state: "missing", present: false, fetchable: true, directory: fixture.gatewayDir, pin: { repo: "https://github.com/team-memory-system/subscription-gateway", ref: "main" } },
     gatewaySourceFetcher: async ({ pinDirectory, directory }) => {
       events.push("gateway-fetch");
       fetched.push({ pinDirectory, directory });
       await placeGatewayCli(directory);
-      return { ok: true, fetched: true, updated: false, state: "current", directory, repo: "https://github.com/chenjingdev/subscription-gateway", ref: "main", commit: "a".repeat(40) };
+      return { ok: true, fetched: true, updated: false, state: "current", directory, repo: "https://github.com/team-memory-system/subscription-gateway", ref: "main", commit: "a".repeat(40) };
     },
     gatewayRunner: async (command, args, runOptions) => { events.push(`gateway:${args[1]}`); return runner(command, args, runOptions); },
   };
@@ -285,7 +285,7 @@ test("host prepare fails closed when the gateway cannot be fetched or installed"
 
   const installFails = await hostPrepare({
     ...base,
-    gatewaySourceInspector: async () => ({ state: "missing", present: false, fetchable: true, pin: { repo: "https://github.com/chenjingdev/subscription-gateway", ref: "main" } }),
+    gatewaySourceInspector: async () => ({ state: "missing", present: false, fetchable: true, pin: { repo: "https://github.com/team-memory-system/subscription-gateway", ref: "main" } }),
     gatewaySourceFetcher: async ({ directory }) => { await placeGatewayCli(directory); return { ok: true, fetched: true, directory }; },
     gatewayRunner: async () => ({ code: 1, stdout: JSON.stringify({ ok: false, error: "npm install failed with Bearer sk-private-token" }) }),
   });

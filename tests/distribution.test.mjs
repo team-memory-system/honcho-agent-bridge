@@ -165,7 +165,7 @@ test("distribution includes source and topology but excludes state and secrets",
   for (const gone of ["codexProxy", "claudeProxy", "router", "llmProxyRoot"]) assert.equal(gone in hostProfile, false, gone);
   assert.equal(hostProfileText.includes("11435"), false);
   const gatewayPin = JSON.parse(await fsp.readFile(path.join(bundle, "server", "gateway-source.json"), "utf8"));
-  assert.equal(gatewayPin.repo, "https://github.com/chenjingdev/subscription-gateway");
+  assert.equal(gatewayPin.repo, "https://github.com/team-memory-system/subscription-gateway");
   for (const name of ["codex-openai-proxy", "claude-print-proxy"]) {
     await assert.rejects(fsp.access(path.join(bundle, "server", "honcho", name)));
   }
