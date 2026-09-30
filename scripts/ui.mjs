@@ -196,6 +196,45 @@ function connectBridge(body) {
   return runCli(["bridge", "connect", "--url", url], { timeout: 90_000, env });
 }
 
+/**
+ * Sharing this server with the owner's other computers. The tunnel token, like
+ * every other secret here, reaches the CLI through its environment and never its
+ * arguments; left blank, the CLI keeps the token it saved before.
+ */
+const SHARE_SECRET_FIELDS = Object.freeze({ tunnelToken: "HONCHO_TUNNEL_TOKEN" });
+
+function secretEnvironment(body, fields) {
+  const env = { ...process.env };
+  for (const [field, name] of Object.entries(fields)) {
+    delete env[name];
+    const value = typeof body?.[field] === "string" ? body[field].trim() : "";
+    if (value) env[name] = value;
+  }
+  return env;
+}
+
+/** What `/api/server/share/enable` runs: only the address is an argument. */
+export function shareEnableInvocation(body) {
+  const publicUrl = typeof body?.publicUrl === "string" ? body.publicUrl.trim() : "";
+  return {
+    args: ["server", "share", "enable", "--public-url", publicUrl],
+    env: secretEnvironment(body, SHARE_SECRET_FIELDS),
+  };
+}
+
+// POST only, so a cross-site GET can never read the gate token; the Host and
+// Origin checks above apply as they do to every route.
+const SHARE_ROUTES = {
+  "/api/server/share/status": async (body) => runCli(["server", "share", "status", ...(body?.check === true ? ["--check"] : [])], { timeout: 60_000 }),
+  "/api/server/share/enable": async (body) => {
+    const { args, env } = shareEnableInvocation(body);
+    return runCli(args, { timeout: 900_000, env });
+  },
+  "/api/server/share/disable": async () => runCli(["server", "share", "disable"], { timeout: 300_000 }),
+  "/api/server/share/token": async () => runCli(["server", "share", "token"], { timeout: 30_000 }),
+  "/api/server/share/rotate": async () => runCli(["server", "share", "rotate"], { timeout: 300_000 }),
+};
+
 const ROUTES = {
   "/api/bridge/status": async () => runCli(["bridge", "status"], { timeout: 30_000 }),
   "/api/bridge/connect": async (body) => connectBridge(body),
@@ -213,6 +252,7 @@ const ROUTES = {
   "/api/server/stop": async (body) => runCli(["server", "stop", ...profileOption(body)]),
   "/api/server/status": async (body) => runCli(["server", "status", ...profileOption(body)]),
   "/api/server/verify": async (body) => runCli(["server", "verify", ...profileOption(body, "personal")]),
+  ...SHARE_ROUTES,
 };
 
 /**
@@ -401,6 +441,9 @@ export function createUiServer() {
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];
     if (!route && !hostRoute) return json(res, 404, { error: "Not found" });
+    if (Object.hasOwn(SHARE_ROUTES, url.pathname) && req.method !== "POST") {
+      return json(res, 405, { ok: false, error: "Method not allowed" });
+    }
     let body = {};
     if (req.method === "POST") {
       try { body = await readJsonBody(req); }

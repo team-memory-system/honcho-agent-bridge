@@ -15,7 +15,7 @@ import {
 } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
-import { formatJson, publicUrl, sanitizeUrlsInText } from "./redact.mjs";
+import { formatJson, formatRevealedToken, publicUrl, sanitizeUrlsInText } from "./redact.mjs";
 import {
   ACCESS_CODE,
   ACCESS_ENV,
@@ -38,6 +38,14 @@ import {
   serverVerify,
 } from "./server-manager.mjs";
 import { hostPlan, hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
+import {
+  shareDisable,
+  shareEnable,
+  shareRotate,
+  shareStatus,
+  shareToken,
+  TUNNEL_TOKEN_ENV,
+} from "./share-manager.mjs";
 import { gatewayDirectory, gatewayOpen } from "./gateway.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -88,6 +96,10 @@ function parseOptions(items) {
   }
   return options;
 }
+
+// Marks the one result whose purpose is to show a secret: `server share token`,
+// which the local app shows so the owner can copy it to another computer.
+const REVEALS_TOKEN = Symbol("reveals-token");
 
 function printJson(value) {
   process.stdout.write(formatJson(value));
@@ -1171,6 +1183,11 @@ function usage() {
       "server status [--profile portable|personal]",
       "server stop [--profile portable|personal]",
       "server verify [--profile personal] [--live-completion]",
+      "server share status [--check]",
+      "server share enable --public-url <https://host> (the tunnel token in HONCHO_TUNNEL_TOKEN)",
+      "server share disable",
+      "server share token",
+      "server share rotate",
       "host plan [--profile personal]",
       "host prepare [--profile personal]",
       "host start [--profile personal]",
@@ -1189,6 +1206,29 @@ function usage() {
   };
 }
 
+/**
+ * `server share <action>`: this server, reachable from the owner's other computers
+ * through a Cloudflare tunnel and the gate. The tunnel token is read from
+ * HONCHO_TUNNEL_TOKEN only; a command line is visible to every process here.
+ */
+async function serverShare(args) {
+  const action = args[0] && !args[0].startsWith("--") ? args[0] : "status";
+  const options = parseOptions(args[0] === action ? args.slice(1) : args);
+  const onCommandLine = Object.keys(options).filter((key) => /token|secret/i.test(key));
+  if (onCommandLine.length) {
+    return { ok: false, error: `pass the tunnel token through ${TUNNEL_TOKEN_ENV}, not the command line` };
+  }
+  if (action === "status") return shareStatus({ check: options.check === true });
+  if (action === "enable") return shareEnable({ publicUrl: optionString(options.publicUrl, "") });
+  if (action === "disable") return shareDisable();
+  if (action === "rotate") return shareRotate();
+  if (action === "token") {
+    const result = await shareToken();
+    return result.ok ? { ...result, [REVEALS_TOKEN]: true } : result;
+  }
+  return { ok: false, error: `Unknown share action: ${action}. Expected status, enable, disable, token or rotate.` };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   // `setup apply --help` ran apply in the 2026-09-30 install test. Help never acts.
@@ -1199,6 +1239,8 @@ async function main() {
   if (command === "hook") return runHook((args.shift() || "").trim().toLowerCase());
   if (command === "server") {
     const subcommand = args.shift() || "status";
+    // Sharing is for the personal server only; it takes no --profile.
+    if (subcommand === "share") return serverShare(args);
     const options = parseOptions(args);
     const profile = optionString(options.profile, "portable");
     // The chat model is chosen from what the gateway offers, so it only means
@@ -1261,7 +1303,8 @@ async function main() {
 
 try {
   const result = await main();
-  if (!process.argv.includes("hook")) printJson(result);
+  if (result?.[REVEALS_TOKEN]) process.stdout.write(formatRevealedToken(result));
+  else if (!process.argv.includes("hook")) printJson(result);
   process.exitCode = result.ok ? 0 : 1;
 } catch (error) {
   printJson({ ok: false, error: String(error?.message || error) });
