@@ -81,7 +81,7 @@ function prepareOutcome(result) {
   if (action) return notice("warn", h("b", {}, action[0]), h("div", {}, action[1]));
   if (result.nextAction?.kind === "gateway-login") {
     return notice("warn", h("b", {}, "구독 계정 로그인이 필요합니다."),
-      h("div", {}, "기억 서버가 생각할 모델을 쓰려면 Codex나 Claude 계정이 있어야 합니다. 아래 3단계에서 로그인한 뒤 기억 서버 준비를 누르세요."),
+      h("div", {}, "기억 서버가 생각할 모델을 쓰려면 Codex나 Claude 계정이 있어야 합니다. 아래 “게이트웨이에 구독 계정 로그인” 단계에서 로그인한 뒤 “기억 서버 준비”를 누르세요."),
       h("div", { class: "form-actions" }, button("게이트웨이에서 로그인", { kind: "primary small", onClick: () => go("models") })));
   }
   if (result.issues?.length) return notice("bad", h("b", {}, "준비하지 못했습니다."), h("ul", {}, result.issues.map((issue) => h("li", {}, issue))), result.next ? h("div", {}, result.next) : null);
@@ -101,6 +101,8 @@ export default {
 
     const outcome = h("div", {});
     let planCache = null;
+    // The install steps stay open across redraws once someone opened them.
+    let installOpen = false;
 
     async function draw() {
       clear(body, h("div", { class: "empty" }, spinner()));
@@ -131,7 +133,7 @@ export default {
         ));
         // Installing a second server beside one that already answers would split a person's memories.
         nodes.push(external
-          ? h("details", { class: "raw", style: { marginTop: "-8px" } }, h("summary", { class: "muted" }, "그래도 이 컴퓨터에 새 서버를 설치하려면"), h("div", { style: { marginTop: "12px" } }, notice("warn", "한 사람의 기억은 서버 하나에 모아야 합니다. 지금 서버를 옮기려는 게 아니라면 설치하지 마세요."), installSection(server, gatewayReport)))
+          ? h("details", { class: "raw", style: { marginTop: "-8px" }, open: installOpen ? true : null, ontoggle: (event) => { installOpen = event.currentTarget.open; } }, h("summary", { class: "muted" }, "그래도 이 컴퓨터에 새 서버를 설치하려면"), h("div", { style: { marginTop: "12px" } }, notice("warn", "한 사람의 기억은 서버 하나에 모아야 합니다. 지금 서버를 옮기려는 게 아니라면 설치하지 마세요."), installSection(server, gatewayReport)))
           : installSection(server, gatewayReport));
         if (hostStatus?.installed) nodes.push(hostSection(hostStatus));
       }
