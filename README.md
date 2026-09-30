@@ -110,11 +110,25 @@ gets an answer, without reading the underlying messages.
   2026-09-30, so a portable install could not see which keys to fill in.
 - **`--profile personal` needs macOS or Windows.** Native Linux cannot reach the
   loopback-only host services from Docker; use `--profile portable` there.
+- **Codex also reads a plugin's `hooks/hooks.json`.** Codex 0.157 loaded the Claude
+  Stop hook from there and offered it for approval next to its own, so the Claude
+  hook lives in `hooks/claude-hooks.json` and only `.claude-plugin/plugin.json`
+  names it. Codex's hook is the one `setup apply` writes into `~/.codex/hooks.json`;
+  Codex asks the user to approve it before it runs. `main.mjs` also drops a Stop
+  payload whose transcript belongs to the other host.
+- **A new server does not assume 8001 and 4173 are free.** `server prepare` picks the
+  first free port from each (another Honcho or an SSH tunnel often holds 8001) and
+  writes `HONCHO_API_PORT` / `HONCHO_DASHBOARD_PORT` into the installed `.env`; an
+  installed server keeps its ports. `start`, `status`, `verify`, `detect` and
+  `setup`'s default `--honcho-url` all read them from there.
+- **A Honcho answering on loopback is not necessarily this install's.** `detect` and
+  `setup plan` report `managedByThisInstall: false` / `connect-unknown-existing` when
+  the port is not published by this plugin's Compose project.
 
 ### Verify a change
 
 ```sh
-npm test          # 149 tests, no network, no Docker
+npm test          # 159 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # setup screen on localhost
@@ -146,7 +160,7 @@ The repository bundles the conversation collectors, setup/diagnostic workflow, a
 ## Current scope
 
 - Capture Codex and Claude Code conversations into one personal Honcho workspace.
-- Recall memory through the 31 Honcho tools exposed by the bundled MCP server.
+- Recall memory through the Honcho tools exposed by the bundled MCP server: 19 recall tools by default, and 12 memory-changing tools once enabled.
 - Detect installed agents, preview setup changes, preserve unrelated settings, and create backups.
 - Run on macOS, Windows, and Linux wherever a recent Node.js runtime is available.
 
@@ -155,7 +169,7 @@ Company memory, folder-based sharing rules, and cross-device database synchroniz
 ## Prerequisites
 
 - Node.js 18 or newer.
-- Docker Desktop/Engine with Compose when installing the bundled local Honcho server, or an existing Honcho API at `http://127.0.0.1:8001`.
+- Docker Desktop/Engine with Compose when installing the bundled local Honcho server (`server prepare` starts a closed Docker Desktop on macOS and Windows and waits for its engine), or an existing Honcho API. For your own server on another computer, give its address with `--honcho-url` and, when it requires one, its token in the `HONCHO_API_TOKEN` environment variable; setup refuses a token on the command line.
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
 
 The `personal` profile also requires macOS or Windows, git, Ollama on the host, and a Codex and/or Claude subscription. `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
@@ -187,7 +201,7 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 3. Offer the OS-default storage location or a custom path.
 4. Show the exact installation plan without changing files.
 5. Apply only after confirmation.
-6. Run the diagnostic checks and explain whether a host reload is needed.
+6. Run the diagnostic checks and pass on `nextSteps` from `setup apply`: Codex asks the user to approve the new Stop hook (or `/hooks`), and Claude Code sessions opened before setup need `/reload-plugins`.
 
 ### Server profiles
 
@@ -264,11 +278,11 @@ The queue keeps failed imports and retries them on the next agent Stop hook or a
 
 Codex loads `.mcp.json`; Claude Code loads `.mcp.claude.json`. Both start `scripts/mcp-server.mjs` through stdio and read the same external `config.json`, so no credentials or mutable state live inside a plugin cache.
 
-All 31 bridge tools are available by default. To hide tools, write this file under the configured data directory as `mcp-tools.json`:
+`setup apply` writes `mcp-tools.json` under the configured data directory with the 12 tools that change memory turned off (`scripts/mcp-tool-defaults.mjs`); an install without that file behaves the same. Recall needs none of them. The file is the whole truth once it exists: list what should stay off, for example
 
 ```json
 {
-  "disabled_tools": ["delete_session", "create_conclusions"]
+  "disabled_tools": ["delete_session", "delete_conclusion", "remove_peers_from_session"]
 }
 ```
 
@@ -299,4 +313,4 @@ npm test
 claude plugin validate .
 ```
 
-The tests exercise isolated installation, hook preservation and cleanup, transcript edge cases, all 31 MCP definitions, REST forwarding, and per-tool disabling without touching the live user configuration.
+The tests exercise isolated installation, hook preservation and cleanup, transcript edge cases, all 31 MCP definitions and the read-only default, REST forwarding, per-tool disabling, port selection and Docker Desktop start-up without touching the live user configuration.
