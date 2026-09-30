@@ -11,7 +11,7 @@ the server and agent bridge; the subscription gateway is an independently releas
 dependency maintained by `chenjingdev`.
 
 `honcho-selfhost` keeps official Honcho in a submodule and its core changes in
-patches. This installer (0.3.4+) prepares that source before installing it, so the
+patches. This installer (0.3.5+) prepares that source before installing it, so the
 installed server keeps the same flat Docker build layout. Both source downloads
 are pinned to full commits in `server/*-source.json`; `.honcho-source.json` inside
 the installed Honcho source records the official commit and patch checksums.
