@@ -983,7 +983,7 @@ test("personal status combines Docker and host health", async (t) => {
   const result = await serverStatus({
     profile: "personal",
     serverDirectory: root,
-    hostRuntime: { status: async () => ({ ok: true, running: true, gateway: { ok: true, router: { ok: true } } }) },
+    hostRuntime: { status: async () => ({ ok: true, running: true, gateway: { ok: true, router: { ok: true } }, autostart: { registered: true, kind: "launchd" } }) },
     dockerInspector: async () => ({ installed: true, running: true }),
     composeRunner: async () => ({ stdout: `${JSON.stringify({ Service: "api", State: "running" })}\n` }),
     healthWaiter: async () => ({ ok: true, status: 200 }),
@@ -991,6 +991,7 @@ test("personal status combines Docker and host health", async (t) => {
   assert.equal(result.ok, true);
   assert.equal(result.running, true);
   assert.equal(result.host.gateway.router.ok, true);
+  assert.deepEqual(result.autostart, { registered: true, kind: "launchd" }, "the host supervisor's login autostart");
 });
 
 test("personal stop orders Compose before host shutdown and still stops host without a Compose bundle", async (t) => {

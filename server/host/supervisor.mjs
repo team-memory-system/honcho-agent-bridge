@@ -1,14 +1,30 @@
 // Keeps the personal profile's embedding model resident in Ollama.
 //
-// `host start` spawns this detached and finds it again through its PID file. It
+// `host start` registers a per-user login autostart for this (launchd, the HKCU
+// Run key or systemd --user; see host-manager.mjs) and starts it; every copy finds
+// the running one through the PID file, and a second copy exits 0 at once. It
 // starts `ollama serve` when nothing answers on the configured address - at start,
 // and again on every service check (`serviceCheckIntervalMs`, 15 s by default) -
 // and warms the Qwen3 alias on an interval so an embedding after an idle stretch
-// does not wait for a model load. Nothing registers this with the OS, so after a
-// reboot it, and the `ollama serve` it started, stay down until `host start` runs. The subscription gateway is not supervised here: it has
-// its own lifecycle and registers its own autostart.
+// does not wait for a model load. The subscription gateway is not supervised here:
+// it has its own lifecycle and registers its own autostart.
+//
+// At login this can start before Ollama's own app or service, and before Docker;
+// it never exits for that. It does not use Docker at all. An Ollama this app did
+// not download gets `startupGraceMs` (60 s) to come up by itself before this starts
+// `ollama serve`, and a failed warmup is retried with backoff (`warmRetryMs`, 5 s, doubling, up to
+// the warm interval) instead of waiting out the whole interval.
+//
+// Exit codes are what the autostarts restart on: 0 for a deliberate stop (SIGTERM,
+// SIGINT, SIGHUP), for "another supervisor already runs", and for a missing or
+// invalid config, which no restart can fix; 1 for a crash. launchd's KeepAlive
+// {SuccessfulExit: false} and systemd's Restart=on-failure restart only the 1.
+//
+// `--log <file>` appends the JSON log lines to that file (owner-only, rotated to
+// <file>.1 past 10 MB) instead of stdout.
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
@@ -39,9 +55,38 @@ function sanitize(value) {
     .slice(0, 2_000);
 }
 
+const LOG_LIMIT_BYTES = 10 * 1024 * 1024;
+const logFile = option("--log") ? path.resolve(option("--log")) : "";
+let logBytes = -1;
+
+function writeLogLine(line) {
+  if (!logFile) {
+    process.stdout.write(line);
+    return;
+  }
+  try {
+    if (logBytes < 0) {
+      fs.mkdirSync(path.dirname(logFile), { recursive: true });
+      try { logBytes = fs.statSync(logFile).size; } catch { logBytes = 0; }
+    }
+    if (logBytes > 0 && logBytes + line.length > LOG_LIMIT_BYTES) {
+      fs.renameSync(logFile, `${logFile}.1`);
+      logBytes = 0;
+    }
+    fs.appendFileSync(logFile, line, { mode: 0o600 });
+    logBytes += Buffer.byteLength(line);
+  } catch {
+    // A log that cannot be written never stops the supervisor.
+  }
+}
+
 function log(event, detail = {}) {
   const clean = Object.fromEntries(Object.entries(detail).map(([key, value]) => [key, typeof value === "string" ? sanitize(value) : value]));
-  process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), event, ...clean })}\n`);
+  writeLogLine(`${JSON.stringify({ timestamp: new Date().toISOString(), event, ...clean })}\n`);
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function processAlive(pid) {
@@ -168,19 +213,48 @@ async function ollamaHealthy(config) {
 
 function startOllama(config) {
   if (stopping || ollamaChild || !config.ollama.manageService) return;
-  ollamaChild = spawn(config.ollama.executable, ["serve"], {
-    env: safeEnvironment({ OLLAMA_HOST: new URL(config.ollama.baseUrl).host }),
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
+  let child;
+  try {
+    child = spawn(config.ollama.executable, ["serve"], {
+      env: safeEnvironment({ OLLAMA_HOST: new URL(config.ollama.baseUrl).host }),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  } catch (error) {
+    log("ollama-error", { message: error?.message || error });
+    return;
+  }
+  ollamaChild = child;
+  pipeLines(child.stdout, "ollama");
+  pipeLines(child.stderr, "ollama-error");
+  child.once("spawn", () => log("ollama-started", { pid: child.pid }));
+  // A spawn that fails (the executable is missing, say, on a volume not mounted
+  // yet) emits "error" and no "exit"; the next service check tries again.
+  child.once("error", (error) => {
+    if (ollamaChild === child) ollamaChild = null;
+    log("ollama-error", { message: error?.message || error });
   });
-  pipeLines(ollamaChild.stdout, "ollama");
-  pipeLines(ollamaChild.stderr, "ollama-error");
-  ollamaChild.once("spawn", () => log("ollama-started", { pid: ollamaChild.pid }));
-  ollamaChild.once("error", (error) => log("ollama-error", { message: error?.message || error }));
-  ollamaChild.once("exit", (code, signal) => {
-    ollamaChild = null;
+  child.once("exit", (code, signal) => {
+    if (ollamaChild === child) ollamaChild = null;
     log("ollama-exited", { code, signal });
   });
+}
+
+function startupGrace(config) {
+  const value = Number(config.ollama?.startupGraceMs);
+  return Number.isInteger(value) && value >= 0 ? value : 60_000;
+}
+
+/** Waits for Ollama's API, polling with backoff, for at most `timeoutMs`. */
+async function waitForOllama(config, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let delay = 500;
+  while (!stopping && Date.now() < deadline) {
+    if (await ollamaHealthy(config)) return true;
+    await sleep(Math.max(0, Math.min(delay, deadline - Date.now())));
+    delay = Math.min(delay * 2, 5_000);
+  }
+  return !stopping && ollamaHealthy(config);
 }
 
 function serviceCheckInterval(config) {
@@ -209,14 +283,15 @@ async function keepOllamaServing(config) {
 }
 
 async function warmEmbedding(config) {
-  if (stopping || !config.ollama.enabled) return;
+  if (stopping || !config.ollama.enabled) return false;
   if (!(await ollamaHealthy(config))) {
     startOllama(config);
     for (let attempt = 0; attempt < 20 && !stopping; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await sleep(500);
       if (await ollamaHealthy(config)) break;
     }
   }
+  if (stopping) return false;
   const result = await embeddingRequest(config, "memory warmup");
   if (result.ok) log("embedding-resident", { model: config.ollama.model, dimensions: result.dimensions });
   else log("embedding-warmup-failed", {
@@ -226,6 +301,29 @@ async function warmEmbedding(config) {
     status: result.status || null,
     message: result.error || "embedding response did not match the configured dimensions",
   });
+  return result.ok;
+}
+
+function firstWarmRetry(config) {
+  const value = Number(config.ollama?.warmRetryMs);
+  return Number.isInteger(value) && value >= 100 ? value : 5_000;
+}
+
+let warmRetryMs = 0;
+
+/** Warms now, then again after the warm interval, or sooner with backoff after a failure. */
+async function warmLoop(config) {
+  const ok = await warmEmbedding(config);
+  if (stopping) return;
+  const interval = config.ollama.warmIntervalMs;
+  warmRetryMs = ok ? 0 : Math.min(warmRetryMs ? warmRetryMs * 2 : firstWarmRetry(config), interval);
+  const next = ok ? interval : warmRetryMs;
+  if (!ok) log("embedding-warmup-retry", { inMs: next });
+  const timer = setTimeout(() => {
+    timers.delete(timer);
+    warmLoop(config);
+  }, next);
+  timers.add(timer);
 }
 
 async function removeOwnPid(config) {
@@ -233,11 +331,11 @@ async function removeOwnPid(config) {
   if (record?.pid === process.pid) await fsp.rm(config.state.pidFile, { force: true });
 }
 
-async function shutdown(config, reason) {
+async function shutdown(config, reason, exitCode = 0) {
   if (stopping) return;
   stopping = true;
   log("supervisor-stopping", { reason });
-  for (const timer of timers) clearInterval(timer);
+  for (const timer of timers) clearTimeout(timer);
   const child = ollamaChild;
   if (child && child.exitCode === null && child.signalCode === null) {
     child.kill();
@@ -254,13 +352,22 @@ async function shutdown(config, reason) {
     }
   }
   await removeOwnPid(config);
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 async function main() {
-  const configFile = path.resolve(option("--config") || "");
-  if (!configFile) throw new Error("--config is required");
-  const config = validateConfig(await readJson(configFile), configFile);
+  const configOption = option("--config");
+  let config;
+  try {
+    if (!configOption) throw new Error("--config is required");
+    const configFile = path.resolve(configOption);
+    config = validateConfig(await readJson(configFile), configFile);
+  } catch (error) {
+    // Exit 0: no restart can fix a missing or invalid config, so an autostart must
+    // not loop on it. `host start` writes the config again.
+    log("supervisor-config-invalid", { message: error?.message || error });
+    return;
+  }
   const pid = await acquirePid(config);
   if (!pid.acquired) {
     log("supervisor-already-running", { pid: pid.owner });
@@ -273,14 +380,19 @@ async function main() {
   process.on("SIGHUP", () => shutdown(config, "SIGHUP"));
   process.on("uncaughtException", (error) => {
     log("uncaught-exception", { message: error?.message || error });
-    shutdown(config, "uncaught-exception");
+    shutdown(config, "uncaught-exception", 1);
   });
   process.on("unhandledRejection", (error) => log("unhandled-rejection", { message: error?.message || error }));
 
   if (config.ollama?.enabled) {
-    await warmEmbedding(config);
-    const warmer = setInterval(() => warmEmbedding(config), config.ollama.warmIntervalMs);
-    timers.add(warmer);
+    // At login, Ollama's own app or service may still be starting; give it time
+    // before starting a second `ollama serve` on its port. The app's own copy has
+    // nothing else to start it, so it gets no grace.
+    if (config.ollama.manageService && !config.ollama.owned && !(await ollamaHealthy(config))) {
+      log("ollama-waiting", { baseUrl: config.ollama.baseUrl, graceMs: startupGrace(config) });
+      await waitForOllama(config, startupGrace(config));
+    }
+    await warmLoop(config);
     if (config.ollama.manageService) {
       const checker = setInterval(() => keepOllamaServing(config), serviceCheckInterval(config));
       timers.add(checker);

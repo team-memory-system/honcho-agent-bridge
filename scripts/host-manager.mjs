@@ -8,8 +8,9 @@
 //     which registers the gateway's own per-user autostart, so it comes back after
 //     a reboot by itself.
 //   - Ollama with the Qwen3 embedding alias, kept resident by
-//     server/host/supervisor.mjs. `host start` spawns that supervisor detached and
-//     finds it again through its PID file.
+//     server/host/supervisor.mjs. `host start` registers a per-user login autostart
+//     for that supervisor and starts it; every copy finds the running one through
+//     its PID file.
 //
 // Ollama is whichever copy is found first: on PATH, the macOS app's CLI, the
 // Windows installer's copy, or the app's own copy in <app home>/runtime/ollama,
@@ -18,9 +19,16 @@
 // this app for it: by prepare, by `host start`, and by the supervisor whenever the
 // API stops answering.
 //
-// This repository registers nothing with launchd, the Windows task scheduler or
-// registry, or systemd. After a reboot the supervisor, and with it the app's own
-// `ollama serve`, stays down until the app or `host start` runs again.
+// The supervisor's autostart (through autostart.mjs; no admin rights):
+//   launchd      ~/Library/LaunchAgents/team-memory-system.host.plist
+//                (RunAtLoad, KeepAlive {SuccessfulExit: false})
+//   windows-run  the value "TeamMemoryHost" under HKCU\...\CurrentVersion\Run, which
+//                runs <runtime>/host/supervisor.vbs through a hidden wscript at logon
+//   systemd      ~/.config/systemd/user/team-memory-host.service (Restart=on-failure)
+// Each runs exactly what `host start` would spawn: this node, the supervisor, and
+// `--config <host-config.json> --log <logs>/supervisor.log`. `host stop` (and so
+// `server stop`) removes it first, so nothing starts the supervisor again. After a
+// reboot the supervisor comes back at login, and with it the app's own `ollama serve`.
 import { execFile, spawn as nodeSpawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -38,11 +46,29 @@ import {
   loopbackUrl,
   prepareGateway,
 } from "./gateway.mjs";
+import {
+  autostartRegistered,
+  installLaunchAgent,
+  installSystemdUnit,
+  kickstartLaunchAgent,
+  launchAgent,
+  registerWindowsRun,
+  runCommand,
+  systemdUnit,
+  UNDER_TEST_ERROR,
+  uninstallLaunchAgent,
+  uninstallSystemdUnit,
+  unregisterWindowsRun,
+  windowsRun,
+} from "./autostart.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 import { installOllama, locateOllama, ollamaDownload, ollamaRuntimeDir } from "./runtime-installer.mjs";
 
 const execFileAsync = promisify(execFile);
 const FORMAT_VERSION = 1;
+export const HOST_LAUNCHD_LABEL = "team-memory-system.host";
+export const HOST_RUN_VALUE = "TeamMemoryHost";
+export const HOST_SYSTEMD_UNIT = "team-memory-host.service";
 
 /**
  * The Ollama aliases the personal profile knows, each with the one base model it
@@ -704,15 +730,179 @@ function gatewayNeedsLogin(status) {
   return status?.gateway?.installed === true && status.gateway.ok === false && status.gateway.loggedIn === false;
 }
 
+// ---------------------------------------------------------------- autostart
+
+/** What follows node on the supervisor's command line, for `host start` and every autostart. */
+export function supervisorArguments({ supervisorFile, configFile, logDir }) {
+  return [supervisorFile, "--config", configFile, "--log", path.join(logDir, "supervisor.log")];
+}
+
+function autostartContext(options) {
+  const env = options.env || process.env;
+  return {
+    platform: options.platform || process.platform,
+    env,
+    homeDir: path.resolve(options.homeDir || homeFor(env)),
+    uid: options.uid ?? (typeof process.getuid === "function" ? process.getuid() : 0),
+    // {code, stdout, stderr} like share-manager's `run`; `run` here is the Ollama runner.
+    run: options.autostartRunner || runCommand,
+    sleep: options.sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
+  };
+}
+
+/**
+ * The OLLAMA_* settings (OLLAMA_MODELS, say) `host start` hands the supervisor
+ * through its environment. A login autostart has no shell to inherit them from, so
+ * launchd and systemd get them written down. OLLAMA_HOST comes from the host config,
+ * and anything named like a credential stays out.
+ */
+function supervisorEnvironment(env) {
+  return Object.fromEntries(Object.entries(env).filter(([key, value]) => /^OLLAMA_/i.test(key)
+    && key.toUpperCase() !== "OLLAMA_HOST"
+    && !/(?:KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL)/i.test(key)
+    && typeof value === "string" && value && !/[\r\n]/.test(value)));
+}
+
+/** The supervisor's login autostart on this platform, or null where there is none. */
+export function hostAutostartSpec(ctx, { nodePath, supervisorFile, configFile, logDir, runtimeDir }) {
+  const programArguments = [nodePath, ...supervisorArguments({ supervisorFile, configFile, logDir })];
+  // The supervisor logs to --log itself; this catches only what node prints when it
+  // cannot run the supervisor at all.
+  const errorLog = path.join(logDir, "supervisor.error.log");
+  if (ctx.platform === "darwin") {
+    return launchAgent({
+      label: HOST_LAUNCHD_LABEL,
+      homeDir: ctx.homeDir,
+      uid: ctx.uid,
+      programArguments,
+      workingDirectory: runtimeDir,
+      stderrPath: errorLog,
+      // Restarted after a crash (a non-zero exit or a signal), never after exit 0. A
+      // copy that finds another supervisor running exits 0 at once, and so does a
+      // deliberate stop, so KeepAlive cannot spin on either. A plain `KeepAlive: true`
+      // would relaunch that duplicate every ten seconds for as long as the other runs.
+      keepAlive: { SuccessfulExit: false },
+      environment: { HOME: ctx.homeDir, ...supervisorEnvironment(ctx.env) },
+    });
+  }
+  if (ctx.platform === "win32") {
+    return windowsRun({
+      env: ctx.env,
+      subject: "host supervisor",
+      valueName: HOST_RUN_VALUE,
+      vbsPath: path.join(runtimeDir, "supervisor.vbs"),
+      workingDirectory: runtimeDir,
+      commandLine: programArguments,
+      comments: [
+        "Team Memory: starts this computer's host supervisor (keeps the embedding model loaded) at logon, with no window.",
+        "Written by `cli.mjs host start`; `cli.mjs host stop` removes it.",
+      ],
+    });
+  }
+  if (ctx.platform === "linux") {
+    return systemdUnit({
+      env: ctx.env,
+      homeDir: ctx.homeDir,
+      subject: "host supervisor",
+      unitName: HOST_SYSTEMD_UNIT,
+      comment: "Written by `cli.mjs host start`; `cli.mjs host stop` removes it.",
+      description: "Team Memory host supervisor (keeps the embedding model loaded)",
+      workingDirectory: runtimeDir,
+      execStart: programArguments,
+      environment: supervisorEnvironment(ctx.env),
+      stderrPath: errorLog,
+      // Same reasoning as launchd's SuccessfulExit: only a failure is restarted.
+      restart: "on-failure",
+      restartSec: 10,
+    });
+  }
+  return null;
+}
+
+function hostAutostartFor(options, paths, config) {
+  const ctx = autostartContext(options);
+  const spec = hostAutostartSpec(ctx, {
+    nodePath: options.nodePath || process.execPath,
+    supervisorFile: config?.supervisorFile || paths.supervisorFile,
+    configFile: config?.state?.configFile || paths.configFile,
+    logDir: config?.state?.logDir || paths.logDir,
+    runtimeDir: paths.runtimeDir,
+  });
+  return { ctx, spec };
+}
+
+function autostartError(error) {
+  // A test that forgot its fake runner must fail, not pass with a warning.
+  if (error?.code === UNDER_TEST_ERROR) throw error;
+  return sanitizeError(error, "the login autostart could not be changed");
+}
+
+async function registeredNow(ctx, spec) {
+  try { return await autostartRegistered(ctx, spec); }
+  catch (error) { autostartError(error); return false; }
+}
+
+/**
+ * Registers the supervisor's autostart. launchd and systemd start the supervisor
+ * through it when none runs (`started`); on Windows the Run value only takes effect
+ * at the next logon, so `host start` starts this one itself, with the same command.
+ */
+async function registerHostAutostart(ctx, spec, { supervisorRunning }) {
+  if (!spec) return { registered: false, kind: null, started: false, error: `There is no login autostart for ${ctx.platform}` };
+  try {
+    if (spec.kind === "launchd") {
+      const installed = await installLaunchAgent(ctx, spec);
+      let started = installed.started;
+      // Loaded and unchanged, but not running (stopped by hand, say): start it now.
+      if (!started && !supervisorRunning) {
+        await kickstartLaunchAgent(ctx, spec);
+        started = true;
+      }
+      return { registered: true, kind: spec.kind, path: installed.path, changed: installed.changed, started };
+    }
+    if (spec.kind === "systemd") {
+      const installed = await installSystemdUnit(ctx, spec);
+      return { registered: true, kind: spec.kind, path: installed.path, changed: installed.changed, started: installed.started };
+    }
+    const installed = await registerWindowsRun(ctx, spec);
+    return { registered: true, kind: spec.kind, path: installed.path, changed: installed.changed, started: false };
+  } catch (error) {
+    const message = autostartError(error);
+    return { registered: await registeredNow(ctx, spec), kind: spec.kind, started: false, error: message };
+  }
+}
+
+/** Removes the supervisor's autostart. launchd and systemd stop the supervisor as they do. */
+async function unregisterHostAutostart(ctx, spec) {
+  if (!spec) return { registered: false, kind: null, removed: false };
+  const wasRegistered = await registeredNow(ctx, spec);
+  try {
+    if (spec.kind === "launchd") await uninstallLaunchAgent(ctx, spec);
+    else if (spec.kind === "systemd") await uninstallSystemdUnit(ctx, spec);
+    else await unregisterWindowsRun(ctx, spec);
+    return { registered: false, kind: spec.kind, removed: wasRegistered };
+  } catch (error) {
+    const message = autostartError(error);
+    return { registered: await registeredNow(ctx, spec), kind: spec.kind, removed: false, error: message };
+  }
+}
+
+async function hostAutostartStatus(options, paths, config) {
+  const { ctx, spec } = hostAutostartFor(options, paths, config);
+  if (!spec) return { registered: false, kind: null };
+  return { registered: await registeredNow(ctx, spec), kind: spec.kind };
+}
+
 /**
  * Prepare (the gateway included) and start the personal host supervisor.
  *
- * The supervisor is started directly, detached from whoever asked for it, and found
- * again through its PID file. Nothing is registered with launchd, the Windows task
- * scheduler or systemd: the app starts the supervisor, and it outlives the terminal
- * or the UI process that pressed the button. The cost is deliberate - nothing
- * restarts it after a reboot until the app runs again. The gateway is different:
- * its own install registers its own autostart.
+ * The supervisor gets a per-user login autostart (see the top of this file), and
+ * starts through it now where the OS can do that (launchd, systemd); on Windows,
+ * or when the autostart cannot be registered, it is spawned directly and detached
+ * with the same command, which is reported in `autostart.error` and `warnings`.
+ * Either way it outlives the terminal or the UI process that pressed the button,
+ * and is found again through its PID file. The gateway's own install registers the
+ * gateway's own autostart.
  */
 export async function hostStart(options = {}) {
   const prepared = options.skipPrepare
@@ -743,17 +933,31 @@ export async function hostStart(options = {}) {
       }
     }
   }
+  await fsp.mkdir(config.state.logDir, { recursive: true });
+  const { ctx: autostartCtx, spec } = hostAutostartFor(options, paths, config);
+  const registration = await registerHostAutostart(autostartCtx, spec, { supervisorRunning: existing.running });
+  let startedBy = null;
   if (!existing.running) {
-    await fsp.mkdir(config.state.logDir, { recursive: true });
-    try {
-      spawnDetached(spawnImpl, options.nodePath || process.execPath,
-        [config.supervisorFile, "--config", config.state.configFile],
-        { cwd: paths.runtimeDir, env: options.env || process.env });
-      started = true;
-    } catch (error) {
-      return { ok: false, ready: false, issues: [sanitizeError(error, "the host supervisor could not be started")] };
+    if (registration.started) startedBy = registration.kind;
+    else {
+      try {
+        spawnDetached(spawnImpl, options.nodePath || process.execPath,
+          supervisorArguments({ supervisorFile: config.supervisorFile, configFile: config.state.configFile, logDir: config.state.logDir }),
+          { cwd: paths.runtimeDir, env: options.env || process.env });
+        startedBy = "spawn";
+      } catch (error) {
+        return { ok: false, ready: false, issues: [sanitizeError(error, "the host supervisor could not be started")], autostart: registration };
+      }
     }
+    started = true;
   }
+  const autostart = {
+    registered: registration.registered,
+    kind: registration.kind,
+    ...(registration.path ? { path: registration.path } : {}),
+    ...(registration.changed !== undefined ? { changed: registration.changed } : {}),
+    ...(registration.error ? { error: registration.error } : {}),
+  };
   const deadline = Date.now() + (options.startTimeoutMs ?? 180_000);
   const pollMs = options.statusPollMs ?? 1_000;
   let status = await hostStatus(options);
@@ -765,8 +969,13 @@ export async function hostStart(options = {}) {
   const loginNeeded = gatewayNeedsLogin(status);
   return {
     ...status,
+    autostart,
+    ...(registration.error
+      ? { warnings: [`The host supervisor has no login autostart, so it will not come back after a reboot by itself: ${registration.error}`] }
+      : {}),
     prepared: true,
     started,
+    ...(startedBy ? { startedBy } : {}),
     alreadyRunning: existing.running,
     ...(ollamaRestarted ? { ollamaRestarted } : {}),
     timedOut: !status.ok && !loginNeeded,
@@ -784,7 +993,8 @@ export async function hostStatus(options = {}) {
   const paths = resolveHostPaths(options);
   const gateway = await gatewayStatus({ directory: paths.gatewayDir, runner: options.gatewayRunner, env: options.env });
   const config = await readRuntimeConfig(paths);
-  if (!config) return { ok: false, installed: false, running: false, gateway, paths };
+  const autostart = await hostAutostartStatus(options, paths, config);
+  if (!config) return { ok: false, installed: false, running: false, gateway, autostart, paths };
   const pid = await pidState(config.state.pidFile);
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const ollamaHealth = config.ollama.enabled ? await probeJson(fetchImpl, `${config.ollama.baseUrl}/api/version`) : { ok: true, status: null };
@@ -801,21 +1011,36 @@ export async function hostStatus(options = {}) {
     supervisor: { pid: pid.record?.pid || null, processAlive: pid.running },
     gateway,
     ollama: { enabled: config.ollama.enabled, healthy: ollamaHealth.ok, status: ollamaHealth.status, model: config.ollama.model, resident },
+    autostart,
     paths,
   };
 }
 
 /**
- * Stop the supervisor and unload only its embedding model. The gateway is left
- * running: it has its own lifecycle, and `gateway/cli.mjs uninstall` in its
- * directory is what removes it.
+ * Remove the supervisor's login autostart, stop the supervisor, and unload only its
+ * embedding model. The gateway is left running: it has its own lifecycle, and
+ * `gateway/cli.mjs uninstall` in its directory is what removes it.
  */
 export async function hostStop(options = {}) {
   const paths = resolveHostPaths(options);
   const config = await readRuntimeConfig(paths);
   const initialPid = config ? await pidState(config.state.pidFile) : { record: null, running: false };
   await fsp.mkdir(paths.runtimeDir, { recursive: true });
-  if (!config) return { ok: true, stopped: false, reason: "host runtime is not installed" };
+  // First, so nothing starts the supervisor again; launchd and systemd stop it here.
+  const { ctx: autostartCtx, spec } = hostAutostartFor(options, paths, config);
+  const autostart = await unregisterHostAutostart(autostartCtx, spec);
+  const autostartWarning = autostart.error
+    ? `The login autostart could not be removed, so the supervisor may start again at the next login: ${autostart.error}`
+    : null;
+  if (!config) {
+    return {
+      ok: !autostart.error,
+      stopped: false,
+      reason: "host runtime is not installed",
+      autostart,
+      ...(autostartWarning ? { warning: autostartWarning } : {}),
+    };
+  }
   const run = options.run || defaultRun;
   const env = options.env || process.env;
   const isProcessAlive = options.isProcessAlive || processAlive;
@@ -851,12 +1076,13 @@ export async function hostStop(options = {}) {
   if (config.ollama.enabled) await runWith(run, config.ollama.executable, ["stop", config.ollama.model], { env, timeout: 30_000 });
   const stopped = !originalRunning || !isProcessAlive(originalPid);
   return {
-    ok: stopped,
+    ok: stopped && !autostart.error,
     stopped,
     signaled,
     preservedConfig: true,
+    autostart,
     warning: originalRunning && !identityMatches
       ? "A stale PID was not signaled because its ownership could not be verified"
-      : (!stopped && signalFailed ? "The host supervisor could not be terminated" : (!stopped ? "The host supervisor is still running" : null)),
+      : (!stopped && signalFailed ? "The host supervisor could not be terminated" : (!stopped ? "The host supervisor is still running" : autostartWarning)),
   };
 }
