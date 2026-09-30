@@ -126,7 +126,7 @@ export function installedServerDir(config = null) {
   return path.resolve(process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR || config?.paths?.serverDir || path.join(installPaths(config).appHome, "server"));
 }
 
-async function withServerLifecycleLock(directory, operation, callback) {
+export async function withServerLifecycleLock(directory, operation, callback) {
   const lockPath = `${path.resolve(directory)}.lifecycle.lock`;
   const lock = await acquireFileLock(lockPath, {
     attempts: 1,
@@ -201,6 +201,7 @@ export async function ensureDockerRunning({
 
 const DEFAULT_API_PORT = 8001;
 const DEFAULT_DASHBOARD_PORT = 4173;
+export const DEFAULT_GATE_PORT = 8010;
 const PORT_SEARCH_SPAN = 20;
 
 /** True when something on this machine already answers or holds 127.0.0.1:port. */
@@ -235,6 +236,14 @@ export async function chooseServerPorts({ inUse = portInUse } = {}) {
   const api = await firstFreePort(DEFAULT_API_PORT, inUse);
   const dashboard = await firstFreePort(DEFAULT_DASHBOARD_PORT, inUse);
   return { api, dashboard };
+}
+
+/**
+ * The port the share gate publishes on 127.0.0.1: 8010, or the next free one. It is
+ * chosen the first time sharing is turned on and kept in the .env from then on.
+ */
+export async function chooseGatePort({ inUse = portInUse } = {}) {
+  return firstFreePort(DEFAULT_GATE_PORT, inUse);
 }
 
 /** The ports an installed server uses, as its private .env says. */
@@ -347,8 +356,13 @@ export async function dockerCliEnvironment(directory, {
   return result;
 }
 
-async function compose(directory, args, options = {}) {
+export async function compose(directory, args, options = {}) {
   const env = await dockerCliEnvironment(directory);
+  // Which optional services run (the share gate) is the installed .env's to say,
+  // not whatever the shell that started this happened to export.
+  const profiles = (await readEnvironmentFile(path.join(directory, ".env"))).COMPOSE_PROFILES;
+  if (profiles) env.COMPOSE_PROFILES = profiles;
+  else delete env.COMPOSE_PROFILES;
   return execFileAsync("docker", ["compose", "--project-directory", directory, ...args], {
     cwd: directory,
     timeout: options.timeout || 900_000,
@@ -357,7 +371,7 @@ async function compose(directory, args, options = {}) {
   });
 }
 
-function replaceEnvironment(text, values) {
+export function replaceEnvironment(text, values) {
   const seen = new Set();
   const lines = text.split(/\r?\n/).map(line => {
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
@@ -369,14 +383,14 @@ function replaceEnvironment(text, values) {
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
-function parseEnvironment(text) {
+export function parseEnvironment(text) {
   return Object.fromEntries(text.split(/\r?\n/).flatMap(line => {
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
     return match ? [[match[1], match[2]]] : [];
   }));
 }
 
-async function readEnvironmentFile(target) {
+export async function readEnvironmentFile(target) {
   try { return parseEnvironment(await fsp.readFile(target, "utf8")); }
   catch { return {}; }
 }
@@ -1451,7 +1465,31 @@ export async function serverStart(options = {}) {
   }));
 }
 
-export async function serverStatus({
+/**
+ * Whether this server is shared with the owner's other computers, read from files
+ * only, so status stays cheap. share-manager imports this module, hence the
+ * import at call time.
+ */
+async function shareSummaryFor(directory) {
+  try {
+    const { shareSummary } = await import("./share-manager.mjs");
+    return await shareSummary({ serverDirectory: directory });
+  } catch {
+    return { enabled: false, publicUrl: null };
+  }
+}
+
+export async function serverStatus(options = {}) {
+  requireServerProfile(options.profile || "portable");
+  const directory = path.resolve(options.serverDirectory || installedServerDir());
+  const [result, share] = await Promise.all([
+    serverStatusWithoutShare({ ...options, serverDirectory: directory }),
+    shareSummaryFor(directory),
+  ]);
+  return { ...result, share };
+}
+
+async function serverStatusWithoutShare({
   profile = "portable",
   hostRuntime = DEFAULT_HOST_RUNTIME,
   serverDirectory = null,

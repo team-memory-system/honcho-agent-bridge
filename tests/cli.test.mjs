@@ -300,3 +300,38 @@ test("doctor verifies runtime version, host plugins, Honcho access, and MCP hand
   assert.equal(result.checks.find((check) => check.name === "codex-plugin").enabled, true);
   assert.equal(result.checks.find((check) => check.name === "claude-plugin").enabled, true);
 });
+
+test("server share takes the tunnel token from its environment only, and prints the gate token for copying", async (t) => {
+  const help = await runCli(["help"], {});
+  for (const line of ["server share status [--check]", "server share disable", "server share token", "server share rotate"]) {
+    assert.ok(help.usage.includes(line), line);
+  }
+  assert.ok(help.usage.some((line) => line.startsWith("server share enable --public-url") && line.includes("HONCHO_TUNNEL_TOKEN")));
+
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-cli-share-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const serverDir = path.join(root, "server");
+  await fsp.mkdir(serverDir, { recursive: true });
+  const env = { HONCHO_AGENT_BRIDGE_SERVER_DIR: serverDir, HONCHO_AGENT_BRIDGE_HOME: root, HONCHO_TUNNEL_TOKEN: "" };
+
+  for (const flag of ["--tunnel-token", "--tunnel-token=abc", "--token", "--client-secret"]) {
+    const args = ["server", "share", "enable", "--public-url", "https://memory.example.com", flag];
+    if (!flag.includes("=")) args.push("value-on-the-command-line");
+    await assert.rejects(runCli(args, env), (error) => {
+      const output = JSON.parse(String(error.stdout || "{}"));
+      assert.equal(output.ok, false);
+      assert.match(output.error, /HONCHO_TUNNEL_TOKEN, not the command line/);
+      assert.equal(String(error.stdout).includes("value-on-the-command-line"), false);
+      return true;
+    }, flag);
+  }
+
+  await assert.rejects(runCli(["server", "share", "token"], env), (error) => {
+    assert.match(JSON.parse(String(error.stdout)).error, /no gate token/);
+    return true;
+  });
+  const gateToken = "cli-share-gate-token-5b1f7c2e";
+  await fsp.writeFile(path.join(serverDir, ".env"), `POSTGRES_PASSWORD=db-secret\nHONCHO_GATE_TOKEN=${gateToken}\n`);
+  const shown = await runCli(["server", "share", "token"], env);
+  assert.deepEqual(shown, { ok: true, token: gateToken }, "the one result that shows a secret shows only that");
+});

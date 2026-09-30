@@ -9,7 +9,7 @@ import path from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createUiServer, rejectUnsafeRequest } from "../scripts/ui.mjs";
+import { createUiServer, rejectUnsafeRequest, shareEnableInvocation } from "../scripts/ui.mjs";
 import { BRIDGE_TOKEN, startBridge } from "./fake-bridge.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -368,4 +368,50 @@ test("the connect form's fields are the ones the server reads, and none rides th
   assert.deepEqual(secrets, ["token", "accessClientId", "accessClientSecret"]);
   assert.match(server, /runCli\(\["bridge", "connect", "--url", url\], \{ timeout: 90_000, env \}\)/,
     "only the address is an argument; the secrets go through the environment");
+});
+
+test("the share form's tunnel token goes to the CLI through its environment, never its arguments", async (t) => {
+  const secret = "eyJhIjoidHVubmVsLXRva2VuLWZyb20tdGhlLWZvcm0ifQ";
+  const invocation = shareEnableInvocation({ publicUrl: " https://memory.example.com ", tunnelToken: ` ${secret} ` });
+  assert.deepEqual(invocation.args, ["server", "share", "enable", "--public-url", "https://memory.example.com"]);
+  assert.equal(invocation.env.HONCHO_TUNNEL_TOKEN, secret);
+  assert.equal(JSON.stringify(invocation.args).includes(secret), false);
+
+  const previous = process.env.HONCHO_TUNNEL_TOKEN;
+  process.env.HONCHO_TUNNEL_TOKEN = "inherited-tunnel-token";
+  t.after(() => {
+    if (previous === undefined) delete process.env.HONCHO_TUNNEL_TOKEN;
+    else process.env.HONCHO_TUNNEL_TOKEN = previous;
+  });
+  const blank = shareEnableInvocation({ publicUrl: "https://memory.example.com", tunnelToken: "" });
+  assert.equal("HONCHO_TUNNEL_TOKEN" in blank.env, false, "a blank field keeps the saved token instead of an inherited one");
+
+  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  const routes = server.match(/const SHARE_ROUTES = \{([\s\S]*?)\n\};/)[1];
+  for (const action of ["status", "enable", "disable", "token", "rotate"]) {
+    assert.match(routes, new RegExp(`"/api/server/share/${action}"`), action);
+  }
+  assert.match(routes, /runCli\(args, \{ timeout: 900_000, env \}\)/);
+});
+
+test("the gate token is read with a same-origin POST only", async (t) => {
+  const serverDir = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-ui-share-"));
+  t.after(() => fsp.rm(serverDir, { recursive: true, force: true }));
+  const gateToken = "ui-share-gate-token-0c9d4e1a";
+  await fsp.writeFile(path.join(serverDir, ".env"), `HONCHO_GATE_TOKEN=${gateToken}\n`);
+  const previous = process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR;
+  process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR = serverDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR;
+    else process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR = previous;
+  });
+
+  const read = await send("/api/server/share/token");
+  assert.equal(read.status, 405, "a GET, which a cross-site page can make, does not answer");
+  assert.equal(read.text.includes(gateToken), false);
+  const crossSite = await send("/api/server/share/token", { method: "POST", body: {}, headers: { origin: "http://evil.example" } });
+  assert.equal(crossSite.status, 403);
+  const shown = await send("/api/server/share/token", { method: "POST", body: {} });
+  assert.equal(shown.status, 200);
+  assert.deepEqual(shown.body, { ok: true, token: gateToken });
 });

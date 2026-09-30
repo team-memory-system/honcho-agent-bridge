@@ -17,6 +17,12 @@ The setup CLI creates `.env`, generates a database password, and starts this
 project. API and dashboard ports bind only to `127.0.0.1`; PostgreSQL and Redis
 are not published to the host. Persistent memory lives in named Docker volumes.
 
+`gate/gate.mjs` is the token gate that `server share enable` runs as the `gate`
+service (Compose profile `share`, reusing the dashboard image's Node) when the
+owner shares this server with their other computers through a Cloudflare tunnel.
+It publishes only `127.0.0.1:${HONCHO_GATE_PORT:-8010}` and forwards only
+`GET /health` and `/v3/*`, and only with the gate token.
+
 `env.personal.example` is the personal profile's template. Every chat model
 points at the subscription gateway's router (`host.docker.internal:11400`) and
 embeddings at Ollama; secret-looking values are always blank. `server prepare

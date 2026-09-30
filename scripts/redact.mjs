@@ -59,6 +59,15 @@ export function redactSecrets(value) {
   );
 }
 
+/**
+ * The one exception, for `server share token` alone: its whole purpose is to show
+ * the gate token so the owner can copy it to another computer. Nothing but `ok`
+ * and that token is printed, so nothing else can ride along unredacted.
+ */
+export function formatRevealedToken({ ok, token }) {
+  return `${JSON.stringify({ ok: Boolean(ok), token: typeof token === "string" ? token : "" }, null, 2)}\n`;
+}
+
 /** Exactly what the CLI writes to stdout for a result. */
 export function formatJson(value) {
   return `${JSON.stringify(redactSecrets(value), null, 2)}\n`;

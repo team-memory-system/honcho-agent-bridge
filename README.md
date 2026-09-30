@@ -256,6 +256,55 @@ For a portable install, replace `personal` with `portable`. `server prepare` rep
 
 `server verify --profile personal` performs a production-shaped, non-destructive diagnostic: combined server status including the gateway's router health, a local Ollama embedding request proven to exceed 2048 evaluated tokens with truncation disabled and exactly 1536 output dimensions, Docker API-container access to both host services (Ollama and the router's `/health`), and Honcho health. It makes no model call by default. Add `--live-completion` only when an actual minimal completion through the router is intended; it uses the installed `.env`'s router address, key, model and effort, reads the key internally, never places it on a command line, sends it nowhere but this machine, returns only success and model, and discards the completion body.
 
+## Sending to this server from other computers (Cloudflare) / 다른 컴퓨터에서 이 서버로 보내기
+
+A personal server listens only on `127.0.0.1`, so the owner's other computers cannot reach it. Sharing puts two things in front of it, both on the server's computer:
+
+- **The gate** (`server/gate/gate.mjs`), a Compose service under the `share` profile that publishes `127.0.0.1:<gate port>` (8010, or the next free port; kept in the installed `.env` as `HONCHO_GATE_PORT` once chosen). Every request needs `Authorization: Bearer <gate token>`, compared in constant time; only `GET /health` and `/v3/*` are forwarded to the API, bodies stream both ways (dialectic SSE included), and bodies over 20 MB are refused. The gate token is 32 random bytes, generated once into the private `.env` as `HONCHO_GATE_TOKEN`.
+- **A Cloudflare tunnel** (`cloudflared`) from a public hostname to the gate. Cloudflare Access in front of the hostname decides which devices get in at all; the gate token decides which of them may use the API. There is no Tailscale path.
+
+### Owner steps in the Cloudflare Zero Trust dashboard
+
+1. **Networks → Tunnels → Create a tunnel**, type **Cloudflared**, any name. On the install step, copy the token from the shown command (the long value after `--token`). Do not run that command; the app installs and runs cloudflared itself.
+2. **Public hostname**: `<name>.<your domain>`, service **HTTP**, URL `http://localhost:<gate port>` (`server share status` shows the port, 8010 unless it was taken).
+3. **Access → Applications → Add an application → Self-hosted** on that same hostname, with a policy that allows your WARP device group and/or your email addresses.
+4. For a computer without WARP, create a **service token** (Access → Service credentials) and add a **Service Auth** policy for it on the same application. That computer's collector sends it when `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are set in its environment.
+
+For a team, an admin can create the tunnel and the Access application and hand the teammate only the tunnel token and the hostname.
+
+### Turning it on
+
+```sh
+# The tunnel token goes in the environment, never on the command line.
+HONCHO_TUNNEL_TOKEN='<token from step 1>' node scripts/cli.mjs server share enable --public-url https://<name>.<your domain>
+node scripts/cli.mjs server share status --check
+node scripts/cli.mjs server share token     # the gate token, to copy to the other computers
+```
+
+`enable` needs an installed personal server. It uses `cloudflared` from `PATH`, else `runtime/cloudflared/cloudflared` in the app directory, else downloads the latest release for this platform from `github.com/cloudflare/cloudflared` into that path and checks it with `cloudflared --version`. It writes the tunnel token to `runtime/cloudflared/tunnel-token` (owner-only), adds `share` to `COMPOSE_PROFILES` in the installed `.env` (other profiles are kept), runs `docker compose up -d gate`, and registers a per-user autostart that runs `cloudflared tunnel --no-autoupdate run --token-file <that file>`, with no admin rights:
+
+| Platform | Autostart | Logs |
+| --- | --- | --- |
+| macOS | LaunchAgent `~/Library/LaunchAgents/team-memory-system.tunnel.plist` (RunAtLoad, KeepAlive) | `runtime/cloudflared/logs/tunnel.log`, `tunnel.error.log` |
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `TeamMemoryTunnel`, a hidden `wscript` running `runtime/cloudflared/tunnel.vbs` | `runtime/cloudflared/logs/tunnel.log` |
+| Linux | systemd user unit `team-memory-tunnel.service` | `runtime/cloudflared/logs/tunnel.log`, `tunnel.error.log` |
+
+The public address must be `https://<hostname>` with no path, query or credentials; it is saved in `runtime/share.json`. The tunnel token is needed the first time only; a later `enable` without it keeps the saved file. `server start` brings the gate up by itself while sharing is on, because Compose reads `COMPOSE_PROFILES` from the installed `.env`. `server status` includes `share: {enabled, publicUrl}`.
+
+`server share status --check` also requests `<public address>/health` with the gate token and reports `publicCheck.state`: `ok`; `access` (Cloudflare Access stopped the request: a 403, a redirect to `*.cloudflareaccess.com`, or a `cf-access-*`/`cf-mitigated` header; this computer is not in the allowed WARP group); `token` (a 401 from the gate); `unreachable` (DNS or network failure, or a Cloudflare 502/530/1033 because the tunnel or the gate is down); or `error`.
+
+`server share disable` removes the autostart, stops the tunnel, stops and removes the gate container, and removes `share` from `COMPOSE_PROFILES`. It keeps the gate token and the tunnel token file, so turning sharing on again keeps every other computer working. `server share rotate` makes a new gate token and recreates the gate; every other computer then needs the new one.
+
+### On each other computer
+
+Install the plugin, then run setup against the public address with the gate token in the environment, as for any server that needs an API token:
+
+```sh
+HONCHO_API_TOKEN='<gate token>' node scripts/cli.mjs setup apply --agents codex,claude --user-peer <id> --honcho-url https://<name>.<your domain>
+```
+
+The Team Memory app offers the same steps on its server screen (`/api/server/share/*`); the tunnel token typed there reaches the CLI through its environment only.
+
 ## Building a distributable bundle
 
 The release builder copies this plugin and a complete Honcho source checkout, removes runtime state and secret-bearing files, preserves the Honcho AGPL license, records the exact source commit, and creates a tarball:

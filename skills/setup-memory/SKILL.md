@@ -74,6 +74,13 @@ For a user whose own Honcho already runs on another of their computers (reachabl
 2. Run `setup plan` with `--honcho-url <that server's address>`. If the plan warns that the address requires an API token, ask the user to set `HONCHO_API_TOKEN` in their own terminal and run `setup apply` there themselves, for example `HONCHO_API_TOKEN=... node <plugin-root>/scripts/cli.mjs setup apply ...`. Never ask for the token in chat or put it on a command line you run.
 3. Continue with `doctor` and `nextSteps` as above.
 
+To make that possible for a personal server on the other computer, share it there first (Cloudflare Tunnel plus Access only; never Tailscale):
+
+1. The owner creates a tunnel in the Cloudflare Zero Trust dashboard (Networks → Tunnels → Create a tunnel → Cloudflared), sets its public hostname's service to `http://localhost:<gate port>` (`server share status` shows the port), and puts an Access application with a WARP-group or email policy on that hostname. For a team, an admin can do this and hand over only the tunnel token.
+2. On the server's computer the user runs `HONCHO_TUNNEL_TOKEN=... node <plugin-root>/scripts/cli.mjs server share enable --public-url https://<hostname>` in their own terminal. Never ask for the tunnel token in chat or pass it as an option; the CLI refuses a token option. The app's server screen does the same with the token kept off the command line.
+3. `server share status --check` reports `publicCheck.state`: `access` means Cloudflare Access did not let this device in (check the WARP group or the policy), `token` a wrong gate token, `unreachable` the tunnel or the gate being down.
+4. The gate token is the `HONCHO_API_TOKEN` for setup on the other computer. The user copies it from the app's server screen, or runs `server share token` in their own terminal; do not run that command yourself, since its output is the secret. `server share disable` turns sharing off and keeps both tokens; `server share rotate` replaces the gate token.
+
 ## Safety
 
 - Preserve unrelated hooks and settings. The CLI removes only entries bearing its managed markers and creates timestamped backups before rewriting existing files.
