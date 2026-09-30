@@ -123,3 +123,32 @@ test("the Claude hook ignores a Codex rollout that Codex handed it", async (t) =
   await run("claude", claudeTranscript);
   await fsp.access(gateLog);
 });
+
+test("--help prints usage and never runs the command", async (t) => {
+  const { appHome, env } = await sandbox(t);
+  const help = await runCli(["setup", "apply", "--agents", "claude", "--user-peer", "user_test", "--help"], env);
+  assert.ok(help.usage.some((line) => line.startsWith("setup plan|apply")));
+  await assert.rejects(fsp.access(path.join(appHome, "config.json")), "help must not install anything");
+});
+
+test("a saved token stays with its server, and a server installed here is pointed out", async (t) => {
+  const { appHome, env } = await sandbox(t);
+  const serverDir = path.join(appHome, "server");
+  await fsp.mkdir(serverDir, { recursive: true });
+  await fsp.writeFile(path.join(serverDir, ".env"), "HONCHO_API_PORT=8765\n");
+  const remote = ["setup", "apply", "--agents", "claude", "--user-peer", "user_test", "--honcho-url=https://memory.example.test"];
+  const first = await runCli(remote, { ...env, HONCHO_API_TOKEN: "remote-token" });
+  assert.equal(first.ok, true, "--key=value options are read");
+  let config = JSON.parse(await fsp.readFile(path.join(appHome, "config.json"), "utf8"));
+  assert.equal(config.honcho.baseUrl, "https://memory.example.test");
+  assert.equal(config.honcho.apiToken, "remote-token");
+
+  const kept = await runCli(["setup", "plan"], env);
+  assert.ok(kept.warnings.some((line) => /installed at http:\/\/127\.0\.0\.1:8765, but collection goes to https:\/\/memory\.example\.test/.test(line)));
+
+  const moved = await runCli(["setup", "apply", "--honcho-url", "http://127.0.0.1:8765"], env);
+  assert.equal(moved.ok, true);
+  config = JSON.parse(await fsp.readFile(path.join(appHome, "config.json"), "utf8"));
+  assert.equal(config.honcho.baseUrl, "http://127.0.0.1:8765");
+  assert.equal(config.honcho.apiToken, undefined, "the remote server's token must not follow to another server");
+});

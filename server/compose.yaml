@@ -37,6 +37,15 @@ services:
   deriver:
     <<: *honcho-service
     entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
+    # The api's entrypoint runs the migrations; started beside it, the deriver
+    # found no vector columns and exited once before its restart.
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import os; os.kill(1, 0)\""]
       interval: 30s

@@ -61,7 +61,12 @@ function parseOptions(items) {
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
     if (!item.startsWith("--")) continue;
-    const key = item.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    const [name, inline] = item.slice(2).split(/=(.*)/s);
+    const key = name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    if (inline !== undefined) {
+      options[key] = inline;
+      continue;
+    }
     const next = items[index + 1];
     if (!next || next.startsWith("--")) options[key] = true;
     else {
@@ -97,6 +102,14 @@ async function readHostJson(target) {
     throw new Error(`Refusing to modify non-object JSON settings at ${target}`);
   }
   return value;
+}
+
+function sameOrigin(left, right) {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
 }
 
 /** A server that requires a token answers /health with 401 without one. */
@@ -305,14 +318,19 @@ async function setupPlan(options = {}) {
     claude: detected.agents.claude.detected,
   };
   const agents = options.agents ? parseAgents(options.agents, detectedAgents) : { ...(existing?.agents || detectedAgents) };
+  const baseUrl = optionString(options.honchoUrl, (await defaultHonchoUrl(existing)).url);
   // A server that requires a token (one on another computer, behind its own auth)
-  // gets it from the environment: a command line is visible to every process.
-  const apiToken = String(process.env[HONCHO_API_TOKEN_ENV] || "").trim() || existing?.honcho?.apiToken || "";
+  // gets it from the environment: a command line is visible to every process. A
+  // saved token belongs to the server it was saved for and never follows the
+  // collector to another one.
+  const envToken = String(process.env[HONCHO_API_TOKEN_ENV] || "").trim();
+  const savedToken = existing?.honcho?.apiToken && sameOrigin(existing.honcho.baseUrl, baseUrl) ? existing.honcho.apiToken : "";
+  const apiToken = envToken || savedToken;
   const config = {
     version: CONFIG_VERSION,
     user: { peerId: optionString(options.userPeer, existing?.user?.peerId || "") },
     honcho: {
-      baseUrl: optionString(options.honchoUrl, (await defaultHonchoUrl(existing)).url),
+      baseUrl,
       workspaceId: optionString(options.workspace, existing?.honcho?.workspaceId || "memory"),
       ...(apiToken ? { apiToken } : {}),
       // Written by `bridge connect`, not by this plan. Rebuilding the config without
@@ -348,6 +366,16 @@ async function setupPlan(options = {}) {
   if (selectedAgents.length === 0) issues.push("at least one detected agent must be selected");
   const onCommandLine = Object.keys(options).filter((key) => /token|secret/i.test(key));
   if (onCommandLine.length) issues.push(`pass the API token through ${HONCHO_API_TOKEN_ENV}, not the command line`);
+  if (existing?.honcho?.apiToken && !envToken && !savedToken) {
+    warnings.push(`The API token saved for ${publicUrl(existing.honcho.baseUrl)} is not carried to ${publicUrl(baseUrl)}`);
+  }
+  // Moving from a server elsewhere to one installed here: setup keeps the saved
+  // address unless told otherwise, which the 2026-09-30 install test tripped on.
+  const installedPorts = await installedServerPorts(installedServerDir(existing));
+  const installedUrl = `http://127.0.0.1:${installedPorts.api}`;
+  if (installedPorts.installed && !options.honchoUrl && !sameOrigin(baseUrl, installedUrl)) {
+    warnings.push(`This computer has a Honcho server installed at ${installedUrl}, but collection goes to ${publicUrl(baseUrl)}. Pass --honcho-url ${installedUrl} to collect into this computer's server.`);
+  }
   for (const provider of ["codex", "claude"]) {
     if (agents[provider] && !detected.agents[provider].plugin?.enabled) {
       warnings.push(`${provider} collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in ${provider}`);
@@ -1081,8 +1109,40 @@ async function runHook(provider) {
   return { ok: result.status === 0, status: result.status, signal: result.signal };
 }
 
+function usage() {
+  return {
+    ok: true,
+    version: VERSION,
+    usage: [
+      "detect",
+      "server plan [--profile portable|personal]",
+      "server prepare [--profile portable|personal] [--model <id>]",
+      "server start [--profile portable|personal] [--no-build] [--model <id>]",
+      "server status [--profile portable|personal]",
+      "server stop [--profile portable|personal]",
+      "server verify [--profile personal] [--live-completion]",
+      "host plan [--profile personal]",
+      "host prepare [--profile personal]",
+      "host start [--profile personal]",
+      "host status [--profile personal]",
+      "host stop [--profile personal]",
+      "gateway open",
+      "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN)",
+      "bridge status",
+      "bridge connect --url <address> (secrets in HONCHO_MCP_BEARER_TOKEN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)",
+      "bridge test",
+      "bridge disconnect",
+      "ui open [--no-browser]",
+      "doctor",
+      "status",
+    ],
+  };
+}
+
 async function main() {
   const args = process.argv.slice(2);
+  // `setup apply --help` ran apply in the 2026-09-30 install test. Help never acts.
+  if (args.some((item) => item === "--help" || item === "-h")) return usage();
   const command = args.shift() || "help";
   if (command === "detect") return detect();
   if (command === "doctor" || command === "status") return doctor();
@@ -1146,34 +1206,7 @@ async function main() {
     const options = parseOptions(args);
     if (subcommand === "open") return uiOpen(options);
   }
-  return {
-    ok: true,
-    version: VERSION,
-    usage: [
-      "detect",
-      "server plan [--profile portable|personal]",
-      "server prepare [--profile portable|personal] [--model <id>]",
-      "server start [--profile portable|personal] [--no-build] [--model <id>]",
-      "server status [--profile portable|personal]",
-      "server stop [--profile portable|personal]",
-      "server verify [--profile personal] [--live-completion]",
-      "host plan [--profile personal]",
-      "host prepare [--profile personal]",
-      "host start [--profile personal]",
-      "host status [--profile personal]",
-      "host stop [--profile personal]",
-      "gateway open",
-      "setup plan [options]",
-      "setup apply [options]",
-      "bridge status",
-      "bridge connect --url <address> (secrets in HONCHO_MCP_BEARER_TOKEN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)",
-      "bridge test",
-      "bridge disconnect",
-      "ui open [--no-browser]",
-      "doctor",
-      "status",
-    ],
-  };
+  return usage();
 }
 
 try {

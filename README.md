@@ -128,7 +128,7 @@ gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 159 tests, no network, no Docker
+npm test          # 162 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # setup screen on localhost
@@ -188,6 +188,16 @@ codex plugin add honcho-agent-bridge@honcho-agent-bridge
 
 claude plugin marketplace add team-memory-system/honcho-agent-bridge
 claude plugin install honcho-agent-bridge@honcho-agent-bridge
+```
+
+To update an installed plugin:
+
+```sh
+claude plugin marketplace update honcho-agent-bridge
+claude plugin update honcho-agent-bridge@honcho-agent-bridge
+
+codex plugin marketplace upgrade
+codex plugin add honcho-agent-bridge@honcho-agent-bridge
 ```
 
 For a local checkout, pass its absolute directory instead of the repository name. Start a new Codex session or reload Claude plugins after installation. Then invoke `$setup-memory` in Codex or `/memory-setup` in Claude Code.

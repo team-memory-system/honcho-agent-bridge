@@ -49,7 +49,9 @@ export function redactSecrets(value) {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => {
       if (NAME_ONLY_FIELDS.has(key) && isSettingNameList(item)) return [key, [...item]];
-      if (SECRET_FIELD.test(key) && item) return [key, "[redacted]"];
+      // A number or a flag is a count or a setting, never a credential: server verify's
+      // minimumPromptTokens printed as "[redacted]" in the 2026-09-30 install test.
+      if (SECRET_FIELD.test(key) && item && typeof item !== "number" && typeof item !== "boolean") return [key, "[redacted]"];
       if (typeof item === "string" && /(url|uri|address)$/i.test(key)) return [key, publicUrl(item)];
       if (typeof item === "string" && /(error|message|stack)/i.test(key)) return [key, sanitizeUrlsInText(item)];
       return [key, redactSecrets(item)];

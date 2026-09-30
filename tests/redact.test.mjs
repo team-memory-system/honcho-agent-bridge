@@ -106,3 +106,8 @@ test("the CLI prints every result through that same formatter", async () => {
   assert.match(cli, /function printJson\(value\) \{\n {2}process\.stdout\.write\(formatJson\(value\)\);\n\}/);
   assert.equal(/function redactSecrets/.test(cli), false, "there is one redaction, not two");
 });
+
+test("counts and flags under secret-looking names are printed as they are", () => {
+  const printed = JSON.parse(formatJson({ minimumPromptTokens: 2048, hasToken: true, apiToken: "private" }));
+  assert.deepEqual(printed, { minimumPromptTokens: 2048, hasToken: true, apiToken: "[redacted]" });
+});
