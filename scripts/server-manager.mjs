@@ -1,6 +1,7 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fsp from "node:fs/promises";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -142,6 +143,112 @@ async function dockerProbe() {
     const message = String(error?.stderr || error?.message || error).trim();
     return { installed: !/ENOENT|not found/i.test(message), running: false, error: message };
   }
+}
+
+/** The Docker Desktop app this installer can start, or "" when there is none. */
+export async function dockerDesktopApp({ platform = process.platform, env = process.env, home = process.env.HOME || "" } = {}) {
+  const candidates = platform === "darwin"
+    ? ["/Applications/Docker.app", path.join(home, "Applications", "Docker.app")]
+    : platform === "win32"
+      ? [path.join(env.ProgramFiles || "C:\\Program Files", "Docker", "Docker", "Docker Desktop.exe")]
+      : [];
+  for (const candidate of candidates) if (candidate && await exists(candidate)) return candidate;
+  return "";
+}
+
+function launchDockerDesktop(app, platform) {
+  const [command, args] = platform === "darwin" ? ["open", ["-g", "-a", app]] : [app, []];
+  const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+  child.on("error", () => {});
+  child.unref();
+}
+
+/**
+ * Start Docker Desktop when it is installed but not running, and wait for its
+ * engine. A teammate's first install usually finds it closed.
+ */
+export async function ensureDockerRunning({
+  platform = process.platform,
+  inspector = dockerProbe,
+  appFinder = dockerDesktopApp,
+  launcher = launchDockerDesktop,
+  timeoutMs = 180_000,
+  intervalMs = 3_000,
+} = {}) {
+  const first = await inspector();
+  if (first.running || !first.installed) return { ...first, started: false };
+  const app = await appFinder({ platform });
+  if (!app) return { ...first, started: false };
+  launcher(app, platform);
+  const deadline = Date.now() + timeoutMs;
+  let latest = first;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    latest = await inspector();
+    if (latest.running) return { ...latest, started: true, app };
+  }
+  return { ...latest, started: false, app, error: `Docker Desktop was started but its engine did not answer within ${Math.round(timeoutMs / 1000)} seconds` };
+}
+
+const DEFAULT_API_PORT = 8001;
+const DEFAULT_DASHBOARD_PORT = 4173;
+const PORT_SEARCH_SPAN = 20;
+
+/** True when something on this machine already answers or holds 127.0.0.1:port. */
+export async function portInUse(port) {
+  const answers = await new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const done = (value) => { socket.destroy(); resolve(value); };
+    socket.setTimeout(500, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+  if (answers) return true;
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => resolve(true));
+    server.listen({ host: "127.0.0.1", port, exclusive: true }, () => server.close(() => resolve(false)));
+  });
+}
+
+async function firstFreePort(start, inUse) {
+  for (let port = start; port < start + PORT_SEARCH_SPAN; port += 1) {
+    if (!(await inUse(port))) return port;
+  }
+  throw new Error(`No free port between ${start} and ${start + PORT_SEARCH_SPAN - 1} on 127.0.0.1`);
+}
+
+/**
+ * Ports for a new install. 8001 is a common port (another Honcho, an SSH tunnel),
+ * so a busy default moves to the next free one instead of failing at compose up.
+ */
+export async function chooseServerPorts({ inUse = portInUse } = {}) {
+  const api = await firstFreePort(DEFAULT_API_PORT, inUse);
+  const dashboard = await firstFreePort(DEFAULT_DASHBOARD_PORT, inUse);
+  return { api, dashboard };
+}
+
+/** The ports an installed server uses, as its private .env says. */
+export async function installedServerPorts(directory = installedServerDir()) {
+  const environmentPath = path.join(directory, ".env");
+  const installed = await exists(environmentPath);
+  const environment = installed ? await readEnvironmentFile(environmentPath) : {};
+  return {
+    installed,
+    api: Number(environment.HONCHO_API_PORT) || DEFAULT_API_PORT,
+    dashboard: Number(environment.HONCHO_DASHBOARD_PORT) || DEFAULT_DASHBOARD_PORT,
+  };
+}
+
+function serverUrls(ports) {
+  return { apiUrl: `http://127.0.0.1:${ports.api}`, dashboardUrl: `http://127.0.0.1:${ports.dashboard}` };
+}
+
+/** Port values to write into the private .env: kept when installed, chosen when new. */
+async function portEnvironment(installed, portChooser) {
+  const current = await installedServerPorts(installed);
+  const ports = current.installed ? current : await portChooser();
+  return { HONCHO_API_PORT: String(ports.api), HONCHO_DASHBOARD_PORT: String(ports.dashboard) };
 }
 
 async function bundleProbe(directory = sourceServerDir()) {
@@ -402,15 +509,19 @@ export async function serverPlan({
   profile = "portable",
   platform = process.platform,
   dockerInspector = dockerProbe,
+  dockerAppFinder = dockerDesktopApp,
   bundleInspector = bundleProbe,
   honchoSourceInspector = honchoSourceProbe,
   gatewaySourceInspector = null,
+  portChooser = chooseServerPorts,
 } = {}) {
   requireServerProfile(profile);
   const [docker, bundle, honchoSource] = await Promise.all([dockerInspector(), bundleInspector(), honchoSourceInspector()]);
   const issues = [];
   const warnings = [];
+  const dockerApp = docker.installed && !docker.running ? await dockerAppFinder({ platform }) : "";
   if (!docker.installed) issues.push("Docker CLI is not installed");
+  else if (!docker.running && dockerApp) warnings.push(`Docker Desktop is not running; server prepare starts it (${dockerApp}) and waits for its engine`);
   else if (!docker.running) issues.push("Docker is installed but the engine is not running");
   if (!bundle.ok) {
     // Everything under honcho/ is fetched by prepare when a source pin is bundled,
@@ -458,6 +569,19 @@ export async function serverPlan({
   if (profile === "portable" && !process.env.LLM_OPENAI_API_KEY && !(await exists(path.join(bundle.directory, ".env")))) {
     warnings.push("No OpenAI key was supplied; add the required LLM key to server/.env before memory processing");
   }
+  const installedPorts = await installedServerPorts(installDirectory);
+  let ports = installedPorts;
+  if (!installedPorts.installed) {
+    try {
+      ports = await portChooser();
+      if (ports.api !== DEFAULT_API_PORT) warnings.push(`Port ${DEFAULT_API_PORT} is already used by another program; the Honcho API will use ${ports.api}`);
+      if (ports.dashboard !== DEFAULT_DASHBOARD_PORT) warnings.push(`Port ${DEFAULT_DASHBOARD_PORT} is already used by another program; the dashboard will use ${ports.dashboard}`);
+    } catch (error) {
+      issues.push(operationError(error));
+    }
+  }
+  const operations = gateway ? personalOperations({ honchoSource, gateway, bundle, installDirectory }) : null;
+  if (operations && dockerApp && !docker.running) operations.unshift({ type: "start-docker-desktop", app: dockerApp });
   return {
     ok: issues.length === 0,
     ready: issues.length === 0,
@@ -467,9 +591,8 @@ export async function serverPlan({
     bundle,
     installDirectory,
     honchoSource,
-    ...(gateway ? { gateway, operations: personalOperations({ honchoSource, gateway, bundle, installDirectory }) } : {}),
-    apiUrl: "http://127.0.0.1:8001",
-    dashboardUrl: "http://127.0.0.1:4173",
+    ...(gateway ? { gateway, operations } : {}),
+    ...serverUrls(ports),
     issues,
     warnings,
   };
@@ -893,8 +1016,12 @@ async function serverPrepareUnlocked({
   gatewaySourceFetcher = ensureGatewaySource,
   gatewayRunner,
   model = "",
+  dockerStarter = ensureDockerRunning,
+  portChooser = chooseServerPorts,
 } = {}) {
   requireServerProfile(profile);
+  // Plan reports a closed Docker Desktop as something prepare fixes, not as a stop.
+  if (!preparedPlan) await dockerStarter({ platform });
   // The download happens here and never in `server plan`, which must not mutate.
   const honchoSource = await honchoSourceFetcher();
   if (!honchoSource.ok) {
@@ -908,7 +1035,7 @@ async function serverPrepareUnlocked({
       next: "Make the Honcho source repository reachable, or install a release bundle that already contains server/honcho",
     };
   }
-  const plan = preparedPlan || await serverPlan({ profile });
+  const plan = preparedPlan || await serverPlan({ profile, portChooser });
   if (!plan.ready) return plan;
   const installed = path.resolve(serverDirectory || installedServerDir());
   const privateFileOptions = {
@@ -917,6 +1044,8 @@ async function serverPrepareUnlocked({
     ...(privateFileRunner ? { run: privateFileRunner } : {}),
     ...(fileSystem ? { fileSystem } : {}),
   };
+  // Decided before the bundle is copied: afterwards a new install has a .env too.
+  const ports = await portEnvironment(installed, portChooser);
 
   if (profile !== "personal") {
     const installation = await copyServerBundle(plan.bundle.directory, installed, privateFileOptions);
@@ -935,7 +1064,7 @@ async function serverPrepareUnlocked({
         next: "Remove the retained secret-bearing backup paths reported by cleanup before retrying",
       };
     }
-    const environment = await initializeEnvironment(installed, profile, privateFileOptions);
+    const environment = await initializeEnvironment(installed, profile, privateFileOptions, ports);
     const missingSecretFields = await missingLlmSecrets(environment.path);
     return {
       ok: true,
@@ -969,7 +1098,7 @@ async function serverPrepareUnlocked({
   let candidateEnvironment;
   let missingSecretFields;
   try {
-    candidateEnvironment = await initializeEnvironment(candidate.path, profile, privateFileOptions, gateway.values);
+    candidateEnvironment = await initializeEnvironment(candidate.path, profile, privateFileOptions, { ...gateway.values, ...ports });
     missingSecretFields = await missingLlmSecrets(candidateEnvironment.path);
   } catch (error) {
     const cleanup = await removeTransactionArtifact(candidate.fileSystem, candidate.path, "candidate bundle");
@@ -1219,14 +1348,27 @@ async function serverStartUnlocked({
   }
   const args = ["up", "-d", "--remove-orphans"];
   if (build) args.push("--build");
+  const ports = await installedServerPorts(installed);
   let composeResult;
   try {
     composeResult = await composeRunner(installed, args);
   } catch (error) {
     if (host) await hostRuntime.stop({ profile, installedServerDir: installed }).catch(() => {});
+    const detail = String(error?.stderr || error?.message || error);
+    if (/address already in use|port is already allocated|ports are not available/i.test(detail)) {
+      return {
+        ok: false,
+        ready: false,
+        mode: "local-docker",
+        profile,
+        ...serverUrls(ports),
+        issues: [`Port ${ports.api} or ${ports.dashboard} on 127.0.0.1 is taken by another program: ${detail.trim().split(/\r?\n/).at(-1)}`],
+        next: `Stop the program on that port, or change HONCHO_API_PORT / HONCHO_DASHBOARD_PORT in ${path.join(installed, ".env")} and in setup's --honcho-url, then run server start again`,
+      };
+    }
     throw error;
   }
-  const health = await healthWaiter("http://127.0.0.1:8001/health");
+  const health = await healthWaiter(`${serverUrls(ports).apiUrl}/health`);
   const result = {
     ok: health.ok,
     mode: "local-docker",
@@ -1234,8 +1376,7 @@ async function serverStartUnlocked({
     installation: prepared.installation,
     environment: prepared.environment,
     health,
-    apiUrl: "http://127.0.0.1:8001",
-    dashboardUrl: "http://127.0.0.1:4173",
+    ...serverUrls(ports),
     compose: { stdout: composeResult.stdout.trim(), stderr: composeResult.stderr.trim() },
   };
   if (host) result.host = host;
@@ -1275,7 +1416,8 @@ export async function serverStatus({
   try {
     const { stdout } = await composeRunner(directory, ["ps", "--format", "json"], { timeout: 10_000 });
     const services = stdout.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
-    const health = await healthWaiter("http://127.0.0.1:8001/health", 2_500);
+    const urls = serverUrls(await installedServerPorts(directory));
+    const health = await healthWaiter(`${urls.apiUrl}/health`, 2_500);
     const containersRunning = services.some(item => item.State === "running");
     const result = {
       ok: health.ok && (!host || host.ok),
@@ -1284,6 +1426,7 @@ export async function serverStatus({
       directory,
       docker,
       health,
+      ...urls,
       services,
     };
     if (host) result.host = host;
@@ -1481,9 +1624,10 @@ async function verifyContainerHostAccess({ directory, composeRunner }) {
   };
 }
 
-async function verifyHonchoHealth({ fetchImpl, timeoutMs }) {
+async function verifyHonchoHealth({ directory, fetchImpl, timeoutMs }) {
+  const { apiUrl } = serverUrls(await installedServerPorts(directory));
   try {
-    const response = await fetchWithTimeout(fetchImpl, "http://127.0.0.1:8001/health", {
+    const response = await fetchWithTimeout(fetchImpl, `${apiUrl}/health`, {
       method: "GET",
       headers: { Accept: "application/json" },
     }, timeoutMs);
@@ -1585,7 +1729,7 @@ export async function serverVerify({
   const [embedding, containerHost, honcho, completion] = await Promise.all([
     verifyOllamaEmbedding({ fetchImpl, model: embeddingModel, timeoutMs: requestTimeoutMs }),
     verifyContainerHostAccess({ directory, composeRunner }),
-    verifyHonchoHealth({ fetchImpl, timeoutMs: Math.min(requestTimeoutMs, 30_000) }),
+    verifyHonchoHealth({ directory, fetchImpl, timeoutMs: Math.min(requestTimeoutMs, 30_000) }),
     liveCompletion
       ? verifyLiveCompletion({ directory, fetchImpl, timeoutMs: requestTimeoutMs })
       : Promise.resolve({ ok: true, skipped: true }),
