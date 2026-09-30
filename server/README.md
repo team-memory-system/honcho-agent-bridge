@@ -21,9 +21,11 @@ points at the subscription gateway's router (`host.docker.internal:11400`) and
 embeddings at Ollama; secret-looking values are always blank. `server prepare
 --profile personal` writes the router address, key and chat model that the
 installed gateway reports over those defaults. `gateway-source.json` names the
-gateway's repository the way `honcho-source.json` names Honcho's, but the gateway
-is fetched into the app directory's `runtime/subscription-gateway`, not here: it
-runs as its own program, and its own autostart points at those files.
+independent `chenjingdev/subscription-gateway` repository and a full commit hash,
+so a plugin release always installs the same gateway revision. The gateway is
+fetched into the app directory's `runtime/subscription-gateway`, not here: it runs
+as its own program, and its own autostart points at those files. Update the pinned
+commit only after verifying the new gateway with this installer.
 
 Never add `.env`, database exports, Docker volumes, API keys, bearer tokens, or
 Cloudflare credentials to a release.

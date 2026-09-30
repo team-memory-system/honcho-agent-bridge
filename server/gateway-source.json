@@ -1,4 +1,5 @@
 {
-  "repo": "https://github.com/team-memory-system/subscription-gateway",
-  "ref": "main"
+  "repo": "https://github.com/chenjingdev/subscription-gateway",
+  "ref": "main",
+  "commit": "be498fd16183afe02ee3f92d7d0e4185aa6e85a0"
 }

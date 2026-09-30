@@ -6,14 +6,15 @@ person's Honcho.
 
 ## Read this first (for agents)
 
-This is one of three repositories that make up the memory system. Any of them can
-be the place you landed, so here is the whole map.
+The memory system uses the following repositories. Team Memory System maintains
+the server and agent bridge; the subscription gateway is an independently released
+dependency maintained by `chenjingdev`.
 
 | Repository | What it is | Installed where |
 |---|---|---|
 | [`honcho-selfhost`](https://github.com/team-memory-system/honcho-selfhost) | The memory server. A fork of `plastic-labs/honcho` (AGPL-3.0), with the MCP bridge and dashboard inside it | One computer per person |
 | **`honcho-agent-bridge`** (this one) | Collector, installer, diagnostics, release builder, agent plugin | Every machine that runs an agent |
-| [`subscription-gateway`](https://github.com/team-memory-system/subscription-gateway) | Turns the owner's own Codex and Claude logins into one OpenAI-compatible router, with its own login screen (AGPL-3.0) | Only the computer that runs Honcho; `server prepare` fetches it and runs its own install |
+| [`subscription-gateway`](https://github.com/chenjingdev/subscription-gateway) | Independent subscription-to-API gateway with its own login screen (AGPL-3.0) | The computer that runs Honcho; `server prepare` fetches the pinned source revision and runs the gateway's own install |
 
 **Topology.** One Honcho and one database per person; that person's several machines
 all feed the same one. Teammates do not share a database. What is shared is a single

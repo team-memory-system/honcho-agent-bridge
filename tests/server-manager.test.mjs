@@ -347,7 +347,7 @@ async function personalBundle(root) {
     gateway: { uiUrl: "http://127.0.0.1:11450", routerUrl: "http://127.0.0.1:11400/v1" },
   }));
   await fsp.writeFile(path.join(source, "gateway-source.json"), JSON.stringify({
-    repo: "https://github.com/team-memory-system/subscription-gateway",
+    repo: "https://github.com/chenjingdev/subscription-gateway",
     ref: "main",
   }));
   await fsp.writeFile(path.join(source, "env.personal.example"), `
@@ -1518,7 +1518,7 @@ test("personal plan shows the gateway steps and asks for no key", async (t) => {
       state: "missing",
       present: false,
       fetchable: true,
-      pin: { repo: "https://github.com/team-memory-system/subscription-gateway", ref: "main" },
+      pin: { repo: "https://github.com/chenjingdev/subscription-gateway", ref: "main" },
     }),
   });
   assert.equal(plan.ready, true, plan.issues.join(", "));
@@ -1532,7 +1532,7 @@ test("personal plan shows the gateway steps and asks for no key", async (t) => {
   ]);
   assert.equal(plan.gateway.uiUrl, "http://127.0.0.1:11450");
   assert.equal(plan.gateway.routerUrl, "http://127.0.0.1:11400/v1");
-  assert.match(plan.warnings.join(" "), /Subscription gateway source will be downloaded from https:\/\/github\.com\/team-memory-system\/subscription-gateway \(main\)/);
+  assert.match(plan.warnings.join(" "), /Subscription gateway source will be downloaded from https:\/\/github\.com\/chenjingdev\/subscription-gateway \(main\)/);
   assert.equal(/proxy|11435|LLM_VLLM_API_KEY/i.test(JSON.stringify(plan)), false, "no proxy and no key to supply");
 
   const blocked = await serverPlan({

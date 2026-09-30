@@ -1,6 +1,6 @@
 // The subscription gateway, as this repository sees it.
 //
-// The gateway (team-memory-system/subscription-gateway, AGPL-3.0) turns this
+// The gateway (chenjingdev/subscription-gateway, AGPL-3.0) turns this
 // user's own Codex and Claude logins into one OpenAI-compatible router, and Honcho
 // sends every chat model there. It is its own program with its own lifecycle: it
 // keeps its own logins, registers its own per-user autostart through its own
