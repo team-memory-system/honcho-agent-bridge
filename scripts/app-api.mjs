@@ -56,6 +56,7 @@ export async function appContext(options = {}) {
     ok: true,
     version: VERSION,
     configured: Boolean(config),
+    installedAt: config?.installedAt || null,
     user: { peerId: config?.user?.peerId || "" },
     workspace: config?.honcho?.workspaceId || "memory",
     agents: { codex: Boolean(config?.agents?.codex), claude: Boolean(config?.agents?.claude) },

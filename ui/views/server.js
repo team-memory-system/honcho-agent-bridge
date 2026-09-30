@@ -51,9 +51,8 @@ export default {
       const server = status.status === "fulfilled" ? status.value : null;
       const hostStatus = host.status === "fulfilled" ? host.value : null;
       const context = app.context;
-      // A server this app did not install still answers: say whose it is instead of "none".
+      // A memory server on another computer: this one must not get a second one.
       const answering = await api().get("/queue/status").then(() => true, () => false);
-      const loopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/.test(context?.honcho?.url || "");
       const external = !server?.installed && answering;
 
       const nodes = [outcome];
@@ -65,11 +64,9 @@ export default {
         nodes.push(serverSection(server), hostSection(hostStatus), verifySection());
       } else {
         nodes.push(section({ title: "기억 서버" },
-          external && loopback
-            ? notice("", h("b", {}, `이 컴퓨터에서 기억 서버가 돌고 있습니다 (${context.honcho.url}).`), h("div", {}, "이 앱으로 설치한 서버가 아니라 여기서 켜고 끌 수는 없습니다. 직접 띄운 방식(docker compose 등)으로 관리하세요. 기억 보기·묻기·도구 설정은 그대로 됩니다."))
-            : external
-              ? notice("", h("b", {}, `이 컴퓨터는 ${context?.honcho?.url}의 기억 서버를 씁니다.`), h("div", {}, "그 서버는 다른 컴퓨터에 있어 여기서 켜고 끌 수 없습니다. 서버를 둔 컴퓨터에서 관리하세요."))
-              : notice("warn", h("b", {}, "이 컴퓨터에는 기억 서버가 없습니다."), h("div", {}, "내 다른 컴퓨터에 서버가 있으면 연결 화면에서 그 주소를 넣으세요.")),
+          external
+            ? notice("", h("b", {}, `이 컴퓨터는 ${context?.honcho?.url}의 기억 서버로 대화를 보냅니다.`), h("div", {}, "그 서버는 다른 컴퓨터에 있어 여기서 켜고 끌 수 없습니다. 서버를 둔 컴퓨터에서 이 앱을 여세요."))
+            : notice("warn", h("b", {}, "이 컴퓨터에는 기억 서버가 없습니다."), h("div", {}, "내 다른 컴퓨터에 서버가 있으면 연결 화면에서 그 주소를 넣으세요.")),
         ));
         // Installing a second server beside one that already answers would split a person's memories.
         nodes.push(external

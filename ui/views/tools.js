@@ -80,7 +80,6 @@ export default {
     async function drawShared() {
       try {
         const result = await get("/api/dashboard/mcp/tools");
-        if (typeof result !== "object" || !result) throw new Error("기억 서버의 관리 기능이 도구 목록을 내주지 않았습니다.");
         let tools = result.tools || [];
         clear(shared,
           result.bridge_running === false ? notice("warn", "브리지가 멈춰 있습니다. 바꾼 설정은 브리지가 다시 켜질 때 적용됩니다.") : null,
@@ -112,7 +111,6 @@ export default {
         if (caller.value.trim()) query.set("caller", caller.value.trim());
         try {
           const data = await get(`/api/dashboard/audit?${query}`);
-          if (typeof data !== "object" || !data) { clear(list, notice("", "이 기억 서버의 관리 기능은 예전 판이라 조회 기록을 내주지 않습니다. 서버를 다시 준비하면 생깁니다.")); return; }
           if (data.enabled === false) { clear(list, notice("", "조회 기록이 켜져 있지 않습니다. 기억 서버의 브리지에 HONCHO_AUDIT_DSN을 설정하면 남기 시작합니다.")); return; }
           const rows = data.rows || [];
           const summary = data.summary || {};

@@ -51,15 +51,6 @@ export function emit() {
 
 export async function loadContext() {
   app.context = await get("/api/app/context");
-  if (!app.prefs.me && !app.context.user.peerId) {
-    // An install that predates this app has no setup file; find the person in
-    // the memories instead of asking.
-    try {
-      const peers = await honcho(workspace()).post("/peers/list?page=1&size=100", {});
-      const person = (peers.items || []).find((peer) => /^user_/.test(peer.id));
-      if (person) savePrefs({ me: person.id });
-    } catch {}
-  }
   emit();
   return app.context;
 }

@@ -64,7 +64,7 @@ export default {
 
     // ── Collection ────────────────────────────────────────
 
-    async function drawCollect() {
+    async function drawCollect(banner = null) {
       clear(collect, h("div", { class: "empty" }, spinner()));
       const [status, claude, codex] = await Promise.allSettled([
         get("/api/status"),
@@ -81,17 +81,14 @@ export default {
         const collecting = Boolean(context?.agents?.[name]);
         const plugin = found?.plugin || {};
         const last = latest[name];
-        const recent = last && Date.now() - new Date(last.createdAt) < 2 * 86_400_000;
         const state = !found?.detected ? tag("설치 안 됨")
           : collecting && plugin.enabled ? tag("모으는 중", "ok")
             : collecting ? tag("플러그인 꺼짐", "warn")
-              // Conversations still arrive: an older collector outside this app sends them.
-              : recent ? tag("다른 수집기로 모이는 중")
-                : tag("모으지 않음");
+              : tag("모으지 않음");
         return h("div", { class: "row" },
           h("div", {},
             h("div", { class: "title" }, h("span", { class: `src ${name}` }, name === "codex" ? "X" : "C"), label, state),
-            h("div", { class: "sub" }, last ? `마지막으로 모인 대화 ${ago(last.createdAt)} · ${last.title || "제목 없음"}` : "아직 이 서버에 모인 대화가 없습니다."),
+            h("div", { class: "sub" }, last ? `이 서버에 마지막으로 모인 ${label} 대화 ${ago(last.createdAt)} · ${last.title || "제목 없음"}` : `이 서버에 모인 ${label} 대화가 아직 없습니다.`),
           ),
           h("div", { class: "end" }, collecting && !plugin.enabled && found?.detected
             ? h("span", { class: "muted", style: { fontSize: "12.5px" } }, name === "codex" ? "Codex에서 플러그인을 켜고 새 세션을 여세요" : "Claude Code에서 /plugin 으로 켜세요")
@@ -129,21 +126,24 @@ export default {
           confirm: "설정하기",
         });
         if (!ok) return;
+        const chosen = new FormData(form).getAll("agents");
         await busy(control, async () => {
           const done = await post("/api/setup/apply", formBody(form));
           if (!done.ok) { clear(result, planView(done)); throw new Error("설정하지 못했습니다."); }
-          clear(result, notice("ok", h("b", {}, "설정했습니다."),
-            h("ul", {},
-              done.hooks?.codex ? h("li", {}, "Codex: 새 세션을 열면 훅을 승인하라고 묻습니다. “Syncing codex conversation to personal memory”를 승인하세요.") : null,
-              done.hooks?.claude ? h("li", {}, "Claude Code: 열려 있는 세션에서 /reload-plugins 를 실행하거나 다시 시작하세요.") : null,
-              h("li", {}, "그다음부터는 대화가 끝날 때마다 자동으로 모입니다."),
-            )));
           await loadContext();
           refreshStatus();
+          // Redraw with the new setup, and keep what to do next above it.
+          await drawCollect(notice("ok", h("b", {}, "설정했습니다. 에이전트를 다시 시작하면 모이기 시작합니다."),
+            h("ul", {},
+              chosen.includes("codex") ? h("li", {}, "Codex: 새 세션을 열면 훅을 승인하라고 묻습니다. “Syncing codex conversation to personal memory”를 승인하세요.") : null,
+              chosen.includes("claude") ? h("li", {}, "Claude Code: 열려 있는 세션에서 /reload-plugins 를 실행하거나 새로 여세요.") : null,
+              h("li", {}, "그다음부터는 대화가 끝날 때마다 자동으로 모입니다. 시작하기 화면에서 첫 기억이 들어왔는지 확인할 수 있습니다."),
+            )));
         });
       };
 
       clear(collect,
+        banner ? h("div", { style: { marginBottom: "14px" } }, banner) : null,
         h("div", { class: "rows" }, agentRow("claude", "Claude Code"), agentRow("codex", "Codex")),
         checks.length && context?.configured ? h("div", { style: { marginTop: "12px" } }, notice("warn", h("b", {}, "점검에서 걸린 것"), h("ul", {}, checks.map((check) => h("li", {}, checkText(check)))))) : null,
         h("div", { class: "panel", style: { marginTop: "16px" } },
@@ -162,9 +162,19 @@ export default {
     }
 
     function checkText(check) {
+      const agent = (name) => (name === "codex" ? "Codex" : "Claude Code");
+      const plugin = /^(codex|claude)-plugin$/.exec(check.name);
+      if (plugin) return check.installed
+        ? `${agent(plugin[1])}에 팀 메모리 플러그인이 설치돼 있지만 꺼져 있습니다. 켜야 대화가 모입니다.`
+        : `${agent(plugin[1])}에 팀 메모리 플러그인이 없습니다. 플러그인을 설치하고 켜세요.`;
+      if (check.name === "claude-hook") return "Claude Code는 플러그인에 든 훅으로 모읍니다. 플러그인을 켜면 함께 켜집니다.";
+      const hook = /^(codex|claude)-hook$/.exec(check.name);
+      if (hook) return `${agent(hook[1])}에 대화 수집 훅이 없거나 예전 것입니다. 설정을 다시 적용하세요.`;
       if (check.name === "configuration") return "수집 설정이 없습니다.";
       if (check.name === "runtime") return `수집 프로그램이 ${check.actualVersion ? `예전 판(${check.actualVersion})` : "설치돼 있지 않습니다"}. 설정을 다시 적용하면 새로 설치합니다.`;
-      if (check.name === "honcho") return "기억 서버가 답하지 않습니다.";
+      if (check.name === "honcho-health") return "기억 서버가 답하지 않습니다.";
+      if (check.name === "honcho-workspaces") return "기억 서버에 닿았지만 작업공간을 읽지 못했습니다. 토큰이 맞는지 확인하세요.";
+      if (check.name === "mcp") return "에이전트용 기억 도구(MCP)가 시작되지 않습니다.";
       if (check.name === "shared-bridge") return "공유 창구가 답하지 않습니다.";
       return `${check.name}: ${check.error || check.state || "문제 있음"}`;
     }

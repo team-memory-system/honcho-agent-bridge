@@ -77,12 +77,16 @@ export default {
           text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : choice.key === "remote" ? "내 서버 주소(와 토큰)를 넣고 모을 에이전트를 고릅니다." : "내 이름과 모을 에이전트를 고릅니다.",
           action: ["연결 화면에서 설정", () => go("connect/collect")],
         });
+        // Only a conversation from an agent this computer collects, after setup, proves it works.
         let latest = null;
         if (context?.configured) {
-          const recent = await get(`/api/app/sessions?${new URLSearchParams({ workspace: workspace(), size: "1" })}`).catch(() => null);
-          latest = recent?.items?.[0] || null;
+          const since = context.installedAt ? new Date(context.installedAt) : null;
+          const sources = ["claude", "codex"].filter((name) => context.agents[name]);
+          const recent = await Promise.all(sources.map((source) => get(`/api/app/sessions?${new URLSearchParams({ workspace: workspace(), size: "1", source })}`).catch(() => null)));
+          latest = recent.map((page) => page?.items?.[0]).filter((item) => item && (!since || new Date(item.createdAt) > since))
+            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
         }
-        const fresh = latest && context?.configured && Date.now() - new Date(latest.createdAt) < 7 * 86_400_000;
+        const fresh = Boolean(latest);
         steps.push({
           title: "첫 기억 확인",
           done: Boolean(fresh),
