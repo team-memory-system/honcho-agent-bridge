@@ -19,6 +19,7 @@ import { appContext, localTools, relayDashboard, relayGateway, relayHoncho, sess
 import { configEnvironment, loadConfig } from "./config.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
+import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
 
 const execFileAsync = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -235,7 +236,83 @@ const SHARE_ROUTES = {
   "/api/server/share/rotate": async () => runCli(["server", "share", "rotate"], { timeout: 300_000 }),
 };
 
+/**
+ * Other servers that also receive the conversations from chosen folders
+ * (targets.mjs). A target's API token and Access service token reach the CLI
+ * through its environment, like every other secret here; every other value is
+ * passed as `--name=value`, so a value that starts with `--` is never read as an
+ * option of its own.
+ */
+const TARGET_SECRET_FIELDS = Object.freeze({
+  apiToken: TARGET_SECRET_ENV.apiToken,
+  accessClientId: TARGET_SECRET_ENV.accessClientId,
+  accessClientSecret: TARGET_SECRET_ENV.accessClientSecret,
+});
+
+function inlineOption(name, value) {
+  if (typeof value !== "string" || !value.trim()) return [];
+  return [`--${name}=${value.trim()}`];
+}
+
+function foldersValue(value) {
+  if (Array.isArray(value)) return value.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean).join(",");
+  return typeof value === "string" ? value : "";
+}
+
+function agentsValue(value) {
+  if (Array.isArray(value)) return value.filter((item) => item === "claude" || item === "codex").join(",");
+  if (value && typeof value === "object") return ["claude", "codex"].filter((name) => value[name] === true).join(",");
+  return typeof value === "string" ? value : "";
+}
+
+/** What `/api/targets/<action>` runs. Secrets only ever in `env`; null for a request that names no target. */
+export function targetInvocation(action, body = {}) {
+  const id = typeof body?.id === "string" ? body.id.trim() : "";
+  if (!TARGET_ID.test(id)) return null;
+  // Only `add` carries secrets; every other action runs with none inherited.
+  const env = secretEnvironment(action === "add" ? body : {}, TARGET_SECRET_FIELDS);
+  const args = ["target", action, id];
+  if (action === "add") {
+    args.push(
+      ...inlineOption("url", body.url),
+      ...inlineOption("folders", foldersValue(body.folders)),
+      ...inlineOption("label", body.label),
+      ...inlineOption("workspace", body.workspace),
+      ...inlineOption("user-peer", body.userPeer),
+      ...inlineOption("agents", agentsValue(body.agents)),
+    );
+  } else if (action === "set") {
+    if (body.folders !== undefined) args.push(...inlineOption("folders", foldersValue(body.folders)));
+    if (typeof body.enabled === "boolean") args.push(`--enabled=${body.enabled}`);
+    args.push(
+      ...inlineOption("label", body.label),
+      ...inlineOption("workspace", body.workspace),
+      ...inlineOption("user-peer", body.userPeer),
+    );
+    if (body.agents !== undefined) args.push(...inlineOption("agents", agentsValue(body.agents)));
+  } else if (action === "backfill") {
+    if (typeof body.since === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.since)) args.push(`--since=${body.since}`);
+    if (Number.isInteger(body.limit) && body.limit > 0) args.push(`--limit=${body.limit}`);
+  }
+  return { args, env };
+}
+
+const TARGET_TIMEOUTS = { add: 90_000, remove: 30_000, set: 30_000, test: 90_000, backfill: 3_600_000 };
+
+// POST only, like the share routes: they change the configuration or send
+// conversations to another server.
+const TARGET_ROUTES = Object.fromEntries(Object.entries(TARGET_TIMEOUTS).map(([action, timeout]) => [
+  `/api/targets/${action}`,
+  async (body) => {
+    const invocation = targetInvocation(action, body);
+    if (!invocation) return { ok: false, error: "Name the target: a short id of lower-case letters, digits and dashes." };
+    return runCli(invocation.args, { timeout, env: invocation.env });
+  },
+]));
+
 const ROUTES = {
+  "/api/targets": async () => runCli(["target", "list"], { timeout: 30_000, env: secretEnvironment({}, TARGET_SECRET_FIELDS) }),
+  ...TARGET_ROUTES,
   "/api/bridge/status": async () => runCli(["bridge", "status"], { timeout: 30_000 }),
   "/api/bridge/connect": async (body) => connectBridge(body),
   "/api/bridge/test": async () => runCli(["bridge", "test"], { timeout: 90_000 }),
@@ -441,7 +518,7 @@ export function createUiServer() {
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];
     if (!route && !hostRoute) return json(res, 404, { error: "Not found" });
-    if (Object.hasOwn(SHARE_ROUTES, url.pathname) && req.method !== "POST") {
+    if ((Object.hasOwn(SHARE_ROUTES, url.pathname) || Object.hasOwn(TARGET_ROUTES, url.pathname)) && req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Method not allowed" });
     }
     let body = {};

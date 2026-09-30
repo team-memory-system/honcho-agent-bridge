@@ -32,7 +32,9 @@ gets an answer, without reading the underlying messages.
 1. **Collect.** An agent's Stop hook runs `scripts/main.mjs`, which reads that
    turn's transcript file and posts new messages to Honcho. There is no daemon:
    the hook is invoked by the agent, once per turn. Failed writes are queued in a
-   spool and retried on the next hook.
+   spool and retried on the next hook. Conversations from chosen folders can also
+   go to a second server (`target ...`, `scripts/targets.mjs`); each such server
+   has its own spool and dedupe state.
 2. **Install.** `scripts/cli.mjs` detects agents, previews changes, backs up what it
    edits, and writes the hook.
 3. **The Team Memory app.** `scripts/ui.mjs` serves `ui/`, one screen over all three
@@ -185,7 +187,9 @@ The repository bundles the conversation collectors, setup/diagnostic workflow, a
 - Detect installed agents, preview setup changes, preserve unrelated settings, and create backups.
 - Run on macOS, Windows, and Linux wherever a recent Node.js runtime is available.
 
-Company memory, folder-based sharing rules, and cross-device database synchronization are intentionally deferred until the personal-memory package is complete.
+- Also send the conversations from chosen folders to a second server, such as the company's shared Honcho (see "Also sending some folders to another server").
+
+Cross-device database synchronization is intentionally deferred until the personal-memory package is complete.
 
 ## Prerequisites
 
@@ -354,6 +358,65 @@ HONCHO_API_TOKEN='<gate token>' node scripts/cli.mjs setup apply --agents codex,
 ```
 
 The Team Memory app offers the same steps on its server screen (`/api/server/share/*`); the tunnel token typed there reaches the CLI through its environment only.
+
+## Also sending some folders to another server (e.g. your company's)
+
+Every conversation still goes to your own server, exactly as before. A *target* is
+a second Honcho server that also receives a copy of the conversations you had in
+chosen folders, for example your work repositories going to the company's shared
+memory:
+
+```sh
+# The target's secrets go in the environment, never on the command line.
+export HONCHO_TARGET_API_TOKEN=...                  # when that server requires one
+export HONCHO_TARGET_CF_ACCESS_CLIENT_ID=...        # only behind Cloudflare Access without WARP
+export HONCHO_TARGET_CF_ACCESS_CLIENT_SECRET=...
+node scripts/cli.mjs target add company --url https://memory.company.example \
+  --folders ~/work/acme,~/work/acme-infra --label "ACME" --workspace acme
+node scripts/cli.mjs target list
+node scripts/cli.mjs target test company
+node scripts/cli.mjs target set company --folders ~/work/acme   # or --enabled false to pause it
+node scripts/cli.mjs target remove company
+```
+
+- **Which conversations.** A Codex or Claude Code session goes to a target when its
+  working directory is one of the target's folders or inside one: `~/work/acme`
+  takes `~/work/acme/api` but not `~/work/acme-old`. Paths are compared after `~`
+  and `..` are resolved, trailing slashes removed and symlinks followed, and without
+  regard to case on Windows and macOS (whose default file system ignores case). A
+  session is decided once, by the first working directory its transcript records
+  (Codex's session header, Claude Code's first message line): a session that `cd`s
+  into another folder later stays where it started. ChatGPT imports and anything
+  else without a working directory never go to a target.
+- **What is sent.** The same messages, peers and metadata your own server gets, in
+  the target's workspace (`--workspace`, default your own workspace id) under your
+  user peer (`--user-peer` to use another name there). Messages carry the local
+  transcript path in their metadata, as they do on your own server.
+- **When.** From the turn after `target add` on. Nothing from before is sent until
+  you ask: `target backfill company --since 2026-09-01` sends past sessions from
+  those folders whose transcript was written on or after that date. It works through
+  at most `--limit` transcripts per run (default 500), oldest first, and remembers
+  which it finished, so running it again carries on where it stopped and never sends
+  anything twice.
+- **When the target is down.** Your own server is sent to first, so a target that is
+  slow or down never holds it up. The target's copy waits in its own spool and goes
+  on the next drain, as your own server's failed writes do. Each target keeps its
+  own dedupe state, so neither server gets a message twice.
+- **Recall stays with your own server.** The MCP tools (`scripts/mcp-server.mjs`)
+  read only your own server; a target is written to, never read from.
+
+`target add` checks that the server answers and that its workspace can be read with
+the given token (the same Cloudflare Access and 401 classification setup uses), and
+warns when a folder does not exist yet. `doctor` runs the same check for every
+enabled target. `target list`, `doctor` and the app show only whether a token is
+saved (`hasToken`, `hasAccess`), never the token. The app's routes are
+`GET /api/targets` and `POST /api/targets/add|remove|set|test|backfill`; the tokens
+typed into its form reach the CLI through its environment only.
+
+On disk, each target keeps its own directory, `<data>/targets/<id>/`:
+`spool/<agent>/pending/` (turns waiting for it), `state/<agent>.json` (what it has
+been sent), `logs/<agent>.log`, and `backfill.json`. `target remove` deletes that
+directory; what is already on that server stays there.
 
 ## Building a distributable bundle
 

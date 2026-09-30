@@ -5,7 +5,9 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { readJson } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
+import { activeTargets, targetEnvironment, targetPaths, withoutTargetFilter } from "./targets.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SPOOL_ROOT = expandHome(process.env.HONCHO_CODEX_GATE_SPOOL || "~/.hermes/spool/codex-honcho");
@@ -18,6 +20,15 @@ const EXTERNAL_BATCH_SIZE = numberEnv("HONCHO_CODEX_EXTERNAL_BATCH_SIZE", 10);
 const LOCK_STALE_MS = numberEnv("HONCHO_CODEX_GATE_LOCK_STALE_MS", 120_000);
 const MAX_DELAY_SECONDS = numberEnv("HONCHO_CODEX_GATE_MAX_DELAY_SECONDS", 300);
 const DEFAULT_HONCHO_BASE_URL = "http://127.0.0.1:8001";
+const PROVIDER = String(process.env.HONCHO_AGENT_PROVIDER || "codex").trim().toLowerCase();
+
+// Other servers that also take this provider's conversations from chosen folders
+// (targets.mjs). Read only from the configuration the hook named: a queue run by
+// hand, or by a test, without HONCHO_AGENT_BRIDGE_CONFIG never sends anywhere else.
+const CONFIG = process.env.HONCHO_AGENT_BRIDGE_CONFIG
+  ? await readJson(process.env.HONCHO_AGENT_BRIDGE_CONFIG, null)
+  : null;
+const TARGETS = activeTargets(CONFIG, PROVIDER);
 
 function expandHome(value) {
   if (value === "~") return os.homedir();
@@ -53,7 +64,21 @@ function importerEnv() {
   env.HONCHO_BASE_URL = env.HONCHO_BASE_URL || windowsUserEnv("HONCHO_BASE_URL") || DEFAULT_HONCHO_BASE_URL;
   const token = env.HONCHO_API_BEARER_TOKEN || windowsUserEnv("HONCHO_API_BEARER_TOKEN");
   if (token) env.HONCHO_API_BEARER_TOKEN = token;
-  return env;
+  return withoutTargetFilter(env);
+}
+
+/**
+ * The same importer, pointed at one target: its server and credentials, its own
+ * state, and its folders, outside which the importer sends nothing.
+ */
+function targetImporterEnv(target) {
+  const base = {
+    ...process.env,
+    HONCHO_CODEX_IMPORT_TRIGGER: process.env.HONCHO_CODEX_IMPORTER_TRIGGER || "hook_gate",
+    HONCHO_CODEX_QUIET: "0",
+    HONCHO_CODEX_DREAM_EVERY_MESSAGES: "0",
+  };
+  return targetEnvironment(CONFIG, target, PROVIDER, base);
 }
 
 function utcNow() {
@@ -100,11 +125,23 @@ function pickTranscriptPath(args, hookInput) {
   return "";
 }
 
+async function writePendingEntry(directory, id, entry) {
+  await fsp.mkdir(directory, { recursive: true });
+  const tmpPath = path.join(directory, `${id}.tmp`);
+  const finalPath = path.join(directory, `${id}.json`);
+  await fsp.writeFile(tmpPath, JSON.stringify(entry, null, 2), "utf8");
+  await fsp.rename(tmpPath, finalPath);
+  return finalPath;
+}
+
+/**
+ * Each turn is queued for the primary server and, separately, for every target
+ * that takes this provider. Which folder the session belongs to is left to the
+ * importer, which reads it from the transcript; a target's copy of the entry only
+ * means "look at this transcript for that server".
+ */
 async function enqueue(transcriptPath, hookInput = {}) {
-  await fsp.mkdir(PENDING_DIR, { recursive: true });
   const id = `${utcNow().replace(/[^0-9A-Za-z]+/g, "-")}-${crypto.randomUUID()}`;
-  const tmpPath = path.join(PENDING_DIR, `${id}.tmp`);
-  const finalPath = path.join(PENDING_DIR, `${id}.json`);
   const entry = {
     transcript_path: transcriptPath,
     created_at: utcNow(),
@@ -112,17 +149,24 @@ async function enqueue(transcriptPath, hookInput = {}) {
   if (process.env.HONCHO_GATE_PASS_HOOK_INPUT === "1") {
     entry.hook_input = hookInput;
   }
-  await fsp.writeFile(tmpPath, JSON.stringify(entry, null, 2), "utf8");
-  await fsp.rename(tmpPath, finalPath);
+  const finalPath = await writePendingEntry(PENDING_DIR, id, entry);
+  for (const target of TARGETS) {
+    try {
+      await writePendingEntry(targetPaths(CONFIG, target.id).pending(PROVIDER), id, entry);
+    } catch (error) {
+      // A target's spool that cannot be written never costs the primary its turn.
+      await logLine(`TARGET_ENQUEUE_FAILED ${target.id} ${error?.message || error}`).catch(() => {});
+    }
+  }
   return finalPath;
 }
 
-async function readPendingEntries() {
-  await fsp.mkdir(PENDING_DIR, { recursive: true });
-  const files = await fsp.readdir(PENDING_DIR);
+async function readPendingEntries(directory = PENDING_DIR) {
+  await fsp.mkdir(directory, { recursive: true });
+  const files = await fsp.readdir(directory);
   const entries = [];
   for (const file of files.filter((name) => name.endsWith(".json")).sort()) {
-    const filePath = path.join(PENDING_DIR, file);
+    const filePath = path.join(directory, file);
     try {
       const entry = JSON.parse(await fsp.readFile(filePath, "utf8"));
       if (entry && typeof entry.transcript_path === "string" && entry.transcript_path.trim()) {
@@ -221,14 +265,14 @@ function importerCommand() {
   return { command: process.execPath, args: [IMPORTER_PATH] };
 }
 
-function runImporter(transcriptPath, dryRun, hookInputFile = "") {
+function runImporter(transcriptPath, dryRun, hookInputFile = "", env = importerEnv()) {
   const importer = importerCommand();
   const args = [...importer.args, "--rollout", transcriptPath];
   if (dryRun) args.push("--dry-run");
   if (process.env.HONCHO_GATE_PASS_HOOK_INPUT === "1" && hookInputFile) {
     args.push("--hook-input-file", hookInputFile);
   }
-  const result = spawnSync(importer.command, args, { encoding: "utf8", env: importerEnv() });
+  const result = spawnSync(importer.command, args, { encoding: "utf8", env });
   const parsed = parseImporterResult(result.stdout);
   if (result.error) return { ok: false, error: result.error.message };
   if (!parsed) {
@@ -242,14 +286,19 @@ function runImporter(transcriptPath, dryRun, hookInputFile = "") {
   return parsed;
 }
 
-async function drainPending(dryRun, extraEntries = []) {
-  const entries = [...(await readPendingEntries()), ...extraEntries];
+function groupByTranscript(entries) {
   const groups = new Map();
   for (const entry of entries) {
     const group = groups.get(entry.transcriptPath) || [];
     group.push(entry);
     groups.set(entry.transcriptPath, group);
   }
+  return groups;
+}
+
+async function drainPending(dryRun, extraEntries = []) {
+  const entries = [...(await readPendingEntries()), ...extraEntries];
+  const groups = groupByTranscript(entries);
 
   const results = [];
   for (const [transcriptPath, group] of groups) {
@@ -262,11 +311,56 @@ async function drainPending(dryRun, extraEntries = []) {
     }
   }
 
+  // The primary is done before any target is tried, so a target that is slow or
+  // down can only hold up itself.
+  const targets = dryRun ? [] : await drainTargets();
   return {
     ok: results.every((item) => item.result.ok),
     drained_paths: results.length,
     results,
+    ...(targets.length ? { targets_ok: targets.every((item) => item.ok), targets } : {}),
   };
+}
+
+/**
+ * Each target's own spool, drained with its own importer environment. An entry
+ * leaves the spool only when that server took it (or the importer found the
+ * session outside the target's folders); otherwise it waits for the next drain,
+ * as the primary's does. After the first failure a target is left for this run:
+ * it is probably down, and every further try would only wait out its timeout.
+ */
+async function drainTargets() {
+  const summaries = [];
+  for (const target of TARGETS) {
+    const directory = targetPaths(CONFIG, target.id).pending(PROVIDER);
+    let entries;
+    try {
+      entries = await readPendingEntries(directory);
+    } catch (error) {
+      summaries.push({ id: target.id, ok: false, error: String(error?.message || error) });
+      continue;
+    }
+    if (entries.length === 0) continue;
+    const env = targetImporterEnv(target);
+    const results = [];
+    let failed = false;
+    for (const [transcriptPath, group] of groupByTranscript(entries)) {
+      if (failed) {
+        results.push({ transcript_path: transcriptPath, result: { ok: false, deferred: true } });
+        continue;
+      }
+      const result = runImporter(transcriptPath, false, group[0].filePath, env);
+      results.push({ transcript_path: transcriptPath, result });
+      if (result.ok) {
+        for (const entry of group) await fsp.unlink(entry.filePath).catch(() => {});
+      } else {
+        failed = true;
+        await logLine(`TARGET_DRAIN_FAILED ${target.id} ${transcriptPath} ${result.error || ""}`).catch(() => {});
+      }
+    }
+    summaries.push({ id: target.id, ok: !failed, drained_paths: results.filter((item) => item.result.ok).length, results });
+  }
+  return summaries;
 }
 
 function pendingAgeSeconds(entry) {

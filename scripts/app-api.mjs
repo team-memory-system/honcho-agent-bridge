@@ -21,6 +21,7 @@ import { ALL_TOOLS, WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { publicUrl } from "./redact.mjs";
 import { installedServerModel, installedServerPorts } from "./server-manager.mjs";
+import { configuredTargets, targetSummary } from "./targets.mjs";
 import { VERSION } from "./version.mjs";
 
 const DEFAULT_HONCHO_URL = "http://127.0.0.1:8001";
@@ -88,7 +89,21 @@ export async function appContext(options = {}) {
       connected: Boolean(config?.honcho?.mcpBridgeUrl),
       url: config?.honcho?.mcpBridgeUrl ? publicUrl(config.honcho.mcpBridgeUrl) : null,
     },
+    // Other servers that also receive the conversations from chosen folders. Read
+    // from files on this computer only (config, spool, state): no request is made.
+    targets: await targetsContext(config),
   };
+}
+
+async function targetsContext(config) {
+  const targets = [];
+  for (const target of configuredTargets(config)) {
+    const summary = await targetSummary(config, target).catch(() => null);
+    if (!summary) continue;
+    const { id, label, url, folders, enabled, hasToken, hasAccess, lastSentAt, pending } = summary;
+    targets.push({ id, label, url, folders, enabled, hasToken, hasAccess, lastSentAt, pending });
+  }
+  return targets;
 }
 
 async function readBody(req) {

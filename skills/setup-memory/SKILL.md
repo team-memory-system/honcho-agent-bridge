@@ -82,12 +82,22 @@ To make that possible for a personal server on the other computer, share it ther
 3. `server share status --check` reports `publicCheck.state`: `access` means Cloudflare Access did not let this device in (check the WARP group or the policy), `token` a wrong gate token, `unreachable` the tunnel or the gate being down.
 4. The gate token is the `HONCHO_API_TOKEN` for setup on the other computer. The user copies it from the app's server screen, or runs `server share token` in their own terminal; do not run that command yourself, since its output is the secret. `server share disable` turns sharing off and keeps both tokens; `server share rotate` replaces the gate token.
 
+## Also sending some folders to another server
+
+When the user wants the conversations from certain folders to also reach another Honcho (usually the company's), add a target. Their own server still receives everything.
+
+1. Ask for the server address, the folders, and the workspace id there. The user sets `HONCHO_TARGET_API_TOKEN` (and, without WARP behind Cloudflare Access, `HONCHO_TARGET_CF_ACCESS_CLIENT_ID`/`_SECRET`) in their own terminal and runs `node <plugin-root>/scripts/cli.mjs target add <id> --url <https://…> --folders <a,b> [--workspace <id>]` there. Never ask for these in chat or pass them as options; the CLI refuses them.
+2. `target add` checks the server first. Report its `warnings` (a folder that does not exist yet) and its `note`: past conversations are not sent until the user asks for `target backfill <id> --since YYYY-MM-DD`. Run a backfill only when the user asks.
+3. `target test <id>` and `doctor` (check `target-<id>`) diagnose it; `target set <id> --folders … | --enabled false` changes or pauses it; `target remove <id>` removes it.
+
+Only Codex and Claude Code sessions whose first working directory is inside a target folder are sent there; ChatGPT imports never are. Recall (the MCP tools) reads the user's own server only.
+
 ## Safety
 
 - Preserve unrelated hooks and settings. The CLI removes only entries bearing its managed markers and creates timestamped backups before rewriting existing files.
 - Never display API tokens, bearer tokens, or secret environment values.
 - Never put the gateway's router key on a command line or in chat. `server prepare` writes it into the installed private `.env`, and no result prints it. The opt-in live verification reads it there inside the process, sends it only to this machine's router, discards the completion response body, and reports only success/model.
-- Connecting to someone else's shared bridge is the only sharing this version supports. Do not add automatic folder policies or cross-device synchronization.
+- The sharing this version supports is connecting to someone else's shared bridge and sending chosen folders to a target the user adds explicitly. Do not add targets, folders or backfills the user did not ask for, and do not add cross-device synchronization.
 - Do not claim Honcho was installed when `server start`, `server status`, or `doctor` reports it unreachable. For `personal`, success also requires the gateway's router answering (`host.gateway.router.ok`), healthy Ollama, and the Qwen alias resident.
 - Use the same profile for the complete lifecycle. `server status --profile personal` covers Docker, the gateway and Ollama; `server stop --profile personal` stops the containers and the Ollama supervisor while preserving configuration and Docker volumes. The gateway keeps running: it has its own lifecycle, and `node <app-directory>/runtime/subscription-gateway/gateway/cli.mjs uninstall` is what removes it.
 - `server stop` preserves Docker volumes. Never run `docker compose down -v` or otherwise delete memory data.

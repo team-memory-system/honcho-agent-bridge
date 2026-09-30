@@ -13,6 +13,7 @@ import {
   honchoHeaders,
   isCloudflareAccessBlock,
 } from "./honcho-access.mjs";
+import { folderMatches, foldersFromEnvironment } from "./targets.mjs";
 
 const ROOT_URL = (process.env.HONCHO_BASE_URL || "http://127.0.0.1:8001").replace(/\/+$/, "");
 const AUTH_TOKEN = process.env.HONCHO_API_BEARER_TOKEN || "";
@@ -38,6 +39,32 @@ const CODEX_SESSION_ROOT = expandHome(process.env.CODEX_SESSION_ROOT || "~/.code
 const CODEX_MAX_AGE_SECONDS = Number(process.env.HONCHO_CODEX_IMPORT_MAX_AGE_SECONDS || "180");
 const CODEX_DREAM_EVERY_MESSAGES = Number(process.env.HONCHO_CODEX_DREAM_EVERY_MESSAGES || "20");
 const CODEX_AUTOMATION_PEER = process.env.HONCHO_CODEX_AUTOMATION_PEER || "automation_codex";
+// Set only when this run sends to another server (a target, see targets.mjs): the
+// folders whose conversations that server takes. Nothing outside them, and nothing
+// without a working directory, is sent - checked here, before any request, so no
+// caller of this importer can send a target anything else.
+const TARGET_FOLDERS = foldersFromEnvironment(process.env);
+
+/**
+ * Whether this run may not send `parsed`. A session is decided by its own working
+ * directory, the first one its transcript records: a session that moves to
+ * another folder part-way stays where it started.
+ */
+function outsideTargetFolders(parsed) {
+  if (TARGET_FOLDERS === null) return false;
+  return !folderMatches(parsed?.metadata?.cwd, TARGET_FOLDERS);
+}
+
+function skippedOutsideFolders(provider, parsed, transcriptPath) {
+  return {
+    ok: true,
+    provider,
+    session_id: parsed?.session_id || null,
+    transcript_path: transcriptPath,
+    new_messages: 0,
+    skipped: "outside target folders",
+  };
+}
 
 
 function expandHome(value) {
@@ -517,6 +544,7 @@ async function importCodex(args, hookInput) {
   if (!fs.existsSync(rolloutPath)) return { ok: false, provider: "codex", error: `rollout not found: ${rolloutPath}` };
 
   const parsed = await getProvider("codex").parseTranscript(rolloutPath, hookInput);
+  if (outsideTargetFolders(parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath);
   const sessionId = parsed.session_id;
   return withStateLock("codex", async () => {
     const state = await loadState("codex");
@@ -577,6 +605,9 @@ async function importGenericProvider(args, hookInput) {
 }
 
 async function importParsedSession(args, parsed, transcriptPath) {
+  // Every non-Codex write passes here; a target run never writes a session from
+  // outside its folders, whoever called.
+  if (outsideTargetFolders(parsed)) return skippedOutsideFolders(args.provider, parsed, transcriptPath);
   const sessionId = parsed.session_id;
   return withStateLock(args.provider, async () => {
     const state = await loadState(args.provider);
@@ -672,7 +703,14 @@ async function main() {
   if (!args.transcript) {
     args.transcript = hookInput.transcript_path || hookInput.transcriptPath || "";
   }
-  if (args.provider === "chatgpt") return importChatGptExport(args);
+  if (args.provider === "chatgpt") {
+    // A ChatGPT conversation has no working directory, so it never belongs to a
+    // target's folders. Refused before the export is even read.
+    if (TARGET_FOLDERS !== null) {
+      return { ok: true, provider: "chatgpt", new_messages: 0, skipped: "ChatGPT imports never go to another server" };
+    }
+    return importChatGptExport(args);
+  }
   if (args.provider === "codex") return importCodex(args, hookInput);
   return importGenericProvider(args, hookInput);
 }

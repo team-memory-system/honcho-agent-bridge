@@ -47,6 +47,20 @@ import {
   TUNNEL_TOKEN_ENV,
 } from "./share-manager.mjs";
 import { gatewayDirectory, gatewayOpen } from "./gateway.mjs";
+import { getProvider } from "./providers/index.mjs";
+import {
+  TARGET_ID,
+  TARGET_PROVIDERS,
+  TARGET_SECRET_ENV,
+  configuredTargets,
+  folderMatches,
+  targetAccess,
+  targetAgents,
+  targetEnvironment,
+  targetPaths,
+  targetSummary,
+  targetWorkspace,
+} from "./targets.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
@@ -382,6 +396,9 @@ async function setupPlan(options = {}) {
       ...relayFields(existing),
     },
     agents,
+    // Written by `target add|set|remove`. Setup rebuilds the rest of the file and
+    // must not drop the other servers some folders also go to.
+    ...(Array.isArray(existing?.targets) ? { targets: existing.targets } : {}),
     sources: {
       codex: {
         root: optionString(options.codexRoot, existing?.sources?.codex?.root || path.join(userHome(), ".codex", "sessions")),
@@ -907,6 +924,7 @@ async function doctor() {
     "honcho-source.mjs",
     "honcho-access.mjs",
     "redact.mjs",
+    "targets.mjs",
   ];
   const missingRuntimeFiles = [];
   for (const file of requiredRuntimeFiles) {
@@ -951,6 +969,11 @@ async function doctor() {
         const document = await readJson(target, {});
         checks.push({ name: `${provider}-hook`, ok: hasCurrentManagedHook(document, paths.runtimeDir, provider), path: target });
       }
+    }
+    for (const target of configuredTargets(config)) {
+      if (!target.enabled) continue;
+      const probe = await probeTarget(config, target);
+      checks.push({ name: `target-${target.id}`, ok: probe.ok, url: publicUrl(target.honcho.baseUrl), health: probe.health, workspace: probe.workspace });
     }
   }
   return { ok: checks.every((check) => check.ok), version: VERSION, checks };
@@ -1086,6 +1109,490 @@ async function bridgeDisconnect() {
   });
 }
 
+// ------------------------------------------------------------- other servers
+//
+// A target is a second memory server - usually the company's - that also receives
+// the conversations from chosen folders (targets.mjs). The owner's own server
+// still receives everything. Its secrets come from HONCHO_TARGET_API_TOKEN and
+// HONCHO_TARGET_CF_ACCESS_CLIENT_ID/SECRET only, never from the command line.
+
+const TARGET_TIMEOUT_MS = 10_000;
+const BACKFILL_DEFAULT_LIMIT = 500;
+const BACKFILL_MAX_LIMIT = 5000;
+const BACKFILL_MAX_CONSECUTIVE_FAILURES = 3;
+
+function targetHeaders(target, extra = {}) {
+  return honchoHeaders({ token: target.honcho.apiToken, access: targetAccess(target) }, extra);
+}
+
+/** A probe's answer in the words setup uses for the same answer from the primary. */
+function explainTargetProbe(result, target, what) {
+  if (result.ok || result.access) return result;
+  const url = publicUrl(target.honcho.baseUrl);
+  if (result.status === 401) {
+    return {
+      ...result,
+      reason: target.honcho.apiToken
+        ? `${url} rejected the API token; check the token for that server`
+        : `${url} requires an API token; set ${TARGET_SECRET_ENV.apiToken} in your shell and add the target again`,
+    };
+  }
+  if (result.status === 403) return { ...result, reason: `${url} refused ${what} with this token` };
+  if (result.status) return { ...result, reason: `${url} answered ${what} with HTTP ${result.status}` };
+  return { ...result, reason: `${url} did not answer: ${result.error || "no response"}` };
+}
+
+/**
+ * Health, then a read of the target's workspace, with the same Access and 401
+ * classification setup uses. A workspace-scoped token cannot list every workspace,
+ * so the read is of the one workspace the collector writes to.
+ */
+async function probeTarget(config, target) {
+  const baseUrl = target.honcho.baseUrl;
+  const health = explainTargetProbe(
+    await probeHoncho(baseUrl, "/health", { headers: targetHeaders(target), timeoutMs: TARGET_TIMEOUT_MS }),
+    target,
+    "the health check",
+  );
+  if (!health.ok) return { ok: false, health, workspace: null };
+  const workspaceId = targetWorkspace(config, target);
+  const workspace = explainTargetProbe(
+    await probeHoncho(baseUrl, `/v3/workspaces/${encodeURIComponent(workspaceId)}/sessions/list?page=1&size=1`, {
+      method: "POST",
+      headers: targetHeaders(target, { "Content-Type": "application/json", Accept: "application/json" }),
+      body: "{}",
+      timeoutMs: TARGET_TIMEOUT_MS,
+    }),
+    target,
+    `a read of workspace ${workspaceId}`,
+  );
+  return { ok: workspace.ok, health, workspace: { ...workspace, id: workspaceId } };
+}
+
+function targetSecretsOnCommandLine(options) {
+  const keys = Object.keys(options).filter((key) => /token|secret|clientid|password/i.test(key));
+  return keys.length
+    ? [`pass the target's API token through ${TARGET_SECRET_ENV.apiToken} and its Cloudflare Access service token through ${TARGET_SECRET_ENV.accessClientId} and ${TARGET_SECRET_ENV.accessClientSecret}, not the command line`]
+    : [];
+}
+
+function targetUrlIssues(value) {
+  return bridgeUrlIssues(value).map((issue) => issue.replace("the bridge address", "the server address"));
+}
+
+/** `--folders a,b`: absolute folders (or `~/...`), resolved, one spelling each. */
+function parseFolders(value) {
+  const issues = [];
+  const warnings = [];
+  const folders = [];
+  if (typeof value !== "string" || !value.trim()) return { folders, issues: ["--folders needs at least one folder"], warnings };
+  for (const raw of value.split(",").map((item) => item.trim()).filter(Boolean)) {
+    let expanded = raw;
+    if (raw === "~") expanded = userHome();
+    else if (raw.startsWith("~/") || raw.startsWith("~\\")) expanded = path.join(userHome(), raw.slice(2));
+    if (!path.isAbsolute(expanded)) {
+      issues.push(`${raw} is not an absolute folder; give the whole path, or start it with ~/`);
+      continue;
+    }
+    let folder = path.resolve(expanded);
+    const root = path.parse(folder).root;
+    while (folder.length > root.length && /[\\/]$/.test(folder)) folder = folder.slice(0, -1);
+    if (folders.some((existing) => folderMatches(folder, [existing], { resolveLinks: false }) && folderMatches(existing, [folder], { resolveLinks: false }))) continue;
+    folders.push(folder);
+    if (!fs.existsSync(folder)) warnings.push(`${folder} does not exist on this computer; conversations there are sent once it does`);
+  }
+  if (!folders.length && !issues.length) issues.push("--folders needs at least one folder");
+  return { folders, issues, warnings };
+}
+
+function parseTargetAgents(value) {
+  if (value === undefined) return { agents: undefined, issues: [] };
+  if (typeof value !== "string") return { agents: undefined, issues: ["--agents takes claude, codex or claude,codex"] };
+  const names = value.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  const unknown = names.filter((name) => !TARGET_PROVIDERS.includes(name));
+  if (unknown.length || !names.length) {
+    return { agents: undefined, issues: [`--agents takes ${TARGET_PROVIDERS.join(", ")}; only they record the folder a conversation ran in`] };
+  }
+  return { agents: Object.fromEntries(TARGET_PROVIDERS.map((name) => [name, names.includes(name)])), issues: [] };
+}
+
+function parseEnabled(value) {
+  if (value === true || value === "true") return true;
+  if (value === "false") return false;
+  return null;
+}
+
+/** The configuration a target command may change: one that already collects conversations. */
+async function collectingConfiguration() {
+  const configuration = await inspectConfiguration();
+  if (configuration.state !== "valid" || !collectsConversations(configuration.config)) {
+    return {
+      error: configuration.state === "valid"
+        ? "set up collection to your own server first (setup apply); a target only receives a copy of it"
+        : `the configuration at ${configuration.path} is ${configuration.state}`,
+    };
+  }
+  return { config: configuration.config, paths: installPaths(configuration.config) };
+}
+
+function findTarget(config, id) {
+  return configuredTargets(config).find((target) => target.id === id) || null;
+}
+
+/** Re-read and rewrite config.json under the setup lock, so two commands never lose each other's change. */
+async function updateTargets(change) {
+  const initial = await collectingConfiguration();
+  if (initial.error) return { ok: false, error: initial.error };
+  return withSetupLock(initial.paths.appHome, async () => {
+    const current = await collectingConfiguration();
+    if (current.error) return { ok: false, error: current.error };
+    const targets = Array.isArray(current.config.targets) ? structuredClone(current.config.targets) : [];
+    const outcome = await change(targets, current.config);
+    if (!outcome.ok) return outcome;
+    const next = { ...current.config, targets };
+    await writeJsonAtomic(current.paths.configPath, next, { backup: true, privateFile: true });
+    return { ...outcome, config: next };
+  });
+}
+
+async function targetList() {
+  const configuration = await inspectConfiguration();
+  const config = configuration.config;
+  const targets = [];
+  for (const target of configuredTargets(config)) targets.push(await targetSummary(config, target));
+  return { ok: true, primary: config?.honcho?.baseUrl ? publicUrl(config.honcho.baseUrl) : null, targets };
+}
+
+async function targetAdd(id, options = {}) {
+  const issues = [...targetSecretsOnCommandLine(options)];
+  const warnings = [];
+  if (!TARGET_ID.test(String(id || ""))) issues.push("the target id is a short slug: lower-case letters, digits and dashes");
+  const url = optionString(options.url, "");
+  if (url) issues.push(...targetUrlIssues(url));
+  else issues.push("--url is required");
+  const parsedFolders = parseFolders(options.folders);
+  issues.push(...parsedFolders.issues);
+  warnings.push(...parsedFolders.warnings);
+  const parsedAgents = parseTargetAgents(options.agents);
+  issues.push(...parsedAgents.issues);
+  const token = String(process.env[TARGET_SECRET_ENV.apiToken] || "").trim();
+  const accessId = String(process.env[TARGET_SECRET_ENV.accessClientId] || "").trim();
+  const accessSecret = String(process.env[TARGET_SECRET_ENV.accessClientSecret] || "").trim();
+  if (Boolean(accessId) !== Boolean(accessSecret)) {
+    issues.push(`the Cloudflare Access service token needs both ${TARGET_SECRET_ENV.accessClientId} and ${TARGET_SECRET_ENV.accessClientSecret}`);
+  }
+  const base = await collectingConfiguration();
+  if (base.error) issues.push(base.error);
+  else {
+    if (findTarget(base.config, id)) issues.push(`a target named ${id} already exists; change it with target set, or remove it first`);
+    if (url && sameOrigin(url, base.config.honcho.baseUrl)) issues.push("that is your own server, which already receives every conversation");
+  }
+  if (issues.length) return { ok: false, saved: false, issues, warnings };
+
+  const target = {
+    id,
+    label: optionString(options.label, id),
+    honcho: {
+      baseUrl: url.replace(/\/+$/, ""),
+      workspaceId: optionString(options.workspace, base.config.honcho.workspaceId || "memory"),
+      ...(token ? { apiToken: token } : {}),
+      ...(accessId && accessSecret ? { access: { clientId: accessId, clientSecret: accessSecret } } : {}),
+    },
+    ...(optionString(options.userPeer, "") ? { userPeerId: optionString(options.userPeer, "") } : {}),
+    folders: parsedFolders.folders,
+    ...(parsedAgents.agents ? { agents: parsedAgents.agents } : {}),
+    enabled: true,
+  };
+  if (!Object.values(targetAgents(base.config, target)).some(Boolean)) {
+    return { ok: false, saved: false, issues: ["none of this target's agents is collected here; pass --agents claude,codex or enable them in setup"], warnings };
+  }
+  // The server has to answer before anything is saved.
+  const probe = await probeTarget(base.config, target);
+  if (!probe.health.ok) {
+    return { ok: false, saved: false, issues: [probe.health.reason || "the server did not answer"], health: probe.health, warnings };
+  }
+  if (!probe.workspace.ok) {
+    const refused = probe.workspace.access || [401, 403].includes(probe.workspace.status);
+    if (refused) return { ok: false, saved: false, issues: [probe.workspace.reason], health: probe.health, workspace: probe.workspace, warnings };
+    warnings.push(probe.workspace.reason);
+  }
+  const saved = await updateTargets(async (targets) => {
+    if (targets.some((item) => item?.id === id)) return { ok: false, saved: false, issues: [`a target named ${id} already exists`] };
+    targets.push(target);
+    return { ok: true, saved: true };
+  });
+  if (!saved.ok) return { ...saved, warnings };
+  return {
+    ok: true,
+    saved: true,
+    target: await targetSummary(saved.config, findTarget(saved.config, id)),
+    health: probe.health,
+    workspace: probe.workspace,
+    warnings,
+    note: `From the next turn on, conversations in these folders are also sent to ${publicUrl(url)}. Earlier ones are not; send them with: target backfill ${id} --since YYYY-MM-DD`,
+  };
+}
+
+async function targetRemove(id) {
+  if (!TARGET_ID.test(String(id || ""))) return { ok: false, error: "name the target to remove" };
+  const result = await updateTargets(async (targets) => {
+    const index = targets.findIndex((item) => item?.id === id);
+    if (index < 0) return { ok: false, error: `no target named ${id}` };
+    targets.splice(index, 1);
+    return { ok: true, removed: id };
+  });
+  if (!result.ok) return result;
+  // Its spool goes too, so nothing queued for it is ever sent. What is already on
+  // that server stays there.
+  const paths = targetPaths(result.config, id);
+  await fsp.rm(paths.root, { recursive: true, force: true });
+  return { ok: true, removed: id, removedData: paths.root };
+}
+
+async function targetSet(id, options = {}) {
+  const issues = [...targetSecretsOnCommandLine(options)];
+  if (!TARGET_ID.test(String(id || ""))) issues.push("name the target to change");
+  const changes = {};
+  const warnings = [];
+  if (options.folders !== undefined) {
+    const parsed = parseFolders(options.folders);
+    issues.push(...parsed.issues);
+    warnings.push(...parsed.warnings);
+    changes.folders = parsed.folders;
+  }
+  if (options.enabled !== undefined) {
+    const enabled = parseEnabled(options.enabled);
+    if (enabled === null) issues.push("--enabled takes true or false");
+    else changes.enabled = enabled;
+  }
+  if (options.label !== undefined) changes.label = optionString(options.label, id);
+  if (options.workspace !== undefined) {
+    const workspace = optionString(options.workspace, "");
+    if (!workspace) issues.push("--workspace needs a workspace id");
+    else changes.workspaceId = workspace;
+  }
+  if (options.userPeer !== undefined) {
+    const peer = optionString(options.userPeer, "");
+    if (!peer) issues.push("--user-peer needs a peer id");
+    else changes.userPeerId = peer;
+  }
+  if (options.agents !== undefined) {
+    const parsed = parseTargetAgents(options.agents);
+    issues.push(...parsed.issues);
+    if (parsed.agents) changes.agents = parsed.agents;
+  }
+  if (!issues.length && !Object.keys(changes).length) issues.push("nothing to change: pass --folders, --enabled, --label, --workspace, --user-peer or --agents");
+  if (issues.length) return { ok: false, saved: false, issues, warnings };
+  const result = await updateTargets(async (targets) => {
+    const target = targets.find((item) => item?.id === id);
+    if (!target) return { ok: false, error: `no target named ${id}` };
+    if (changes.folders) target.folders = changes.folders;
+    if (changes.enabled !== undefined) target.enabled = changes.enabled;
+    if (changes.label !== undefined) target.label = changes.label;
+    if (changes.workspaceId) target.honcho = { ...(target.honcho || {}), workspaceId: changes.workspaceId };
+    if (changes.userPeerId) target.userPeerId = changes.userPeerId;
+    if (changes.agents) target.agents = changes.agents;
+    return { ok: true, saved: true };
+  });
+  if (!result.ok) return { ...result, warnings };
+  return { ok: true, saved: true, target: await targetSummary(result.config, findTarget(result.config, id)), warnings };
+}
+
+async function targetTest(id) {
+  const configuration = await inspectConfiguration();
+  const target = findTarget(configuration.config, id);
+  if (!target) return { ok: false, error: `no target named ${id}` };
+  const probe = await probeTarget(configuration.config, target);
+  return { ok: probe.ok, id, url: publicUrl(target.honcho.baseUrl), enabled: target.enabled, health: probe.health, workspace: probe.workspace };
+}
+
+// ------------------------------------------------------------------ backfill
+//
+// Adding a target sends nothing from before. `target backfill` sends past
+// conversations on request, in bounded runs: each run looks at up to --limit
+// transcripts, oldest first, and remembers which it finished in the target's
+// backfill.json, so the next run carries on where this one stopped. The importer
+// dedupes against the target's own state and what that server already holds, so
+// running it again sends nothing twice.
+
+async function walkFiles(root, accept, depth = Infinity) {
+  const found = [];
+  const stack = [{ directory: root, level: 0 }];
+  while (stack.length) {
+    const { directory, level } = stack.pop();
+    let entries;
+    try {
+      entries = await fsp.readdir(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory() && level + 1 < depth) stack.push({ directory: full, level: level + 1 });
+      else if (entry.isFile() && accept(entry.name)) found.push(full);
+    }
+  }
+  return found;
+}
+
+/** Where each agent keeps its transcripts on this computer. */
+async function transcriptFiles(config, provider) {
+  if (provider === "codex") {
+    const root = config?.sources?.codex?.root || path.join(userHome(), ".codex", "sessions");
+    return walkFiles(root, (name) => name.startsWith("rollout-") && name.endsWith(".jsonl"));
+  }
+  // Claude Code: ~/.claude/projects/<project>/<session>.jsonl. Subagent transcripts
+  // sit deeper and are not conversations of their own.
+  const root = config?.sources?.claude?.root || path.join(userHome(), ".claude", "projects");
+  return walkFiles(root, (name) => name.endsWith(".jsonl"), 2);
+}
+
+function parseSince(value) {
+  if (value === undefined) return { sinceMs: 0, issues: [] };
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return { issues: ["--since takes a date as YYYY-MM-DD"] };
+  // Midnight at the start of that day, on this computer's clock.
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    return { issues: [`${value} is not a date`] };
+  }
+  return { sinceMs: date.getTime(), issues: [] };
+}
+
+function foldersKey(folders) {
+  return JSON.stringify([...folders].sort());
+}
+
+function runCollector(provider, transcript, env) {
+  const result = spawnSync(process.execPath, [path.join(SCRIPT_DIR, "collector.mjs"), "--provider", provider, "--transcript", transcript], {
+    encoding: "utf8",
+    env,
+    timeout: 600_000,
+  });
+  const lines = String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const errorLines = String(result.stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of [...lines.reverse(), ...errorLines.reverse()]) {
+    try {
+      return JSON.parse(line);
+    } catch {}
+  }
+  return { ok: false, error: result.error?.message || `the importer exited with ${result.status}` };
+}
+
+async function targetBackfill(id, options = {}) {
+  const issues = [...targetSecretsOnCommandLine(options)];
+  const since = parseSince(options.since);
+  issues.push(...since.issues);
+  const limit = options.limit === undefined ? BACKFILL_DEFAULT_LIMIT : Number(options.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > BACKFILL_MAX_LIMIT) issues.push(`--limit takes a whole number from 1 to ${BACKFILL_MAX_LIMIT}`);
+  const base = await collectingConfiguration();
+  if (base.error) issues.push(base.error);
+  const target = base.config ? findTarget(base.config, id) : null;
+  if (base.config && !target) issues.push(`no target named ${id}`);
+  if (target && !target.enabled) issues.push(`${id} is turned off; turn it on with target set ${id} --enabled true`);
+  if (target && !target.folders.length) issues.push(`${id} has no folders`);
+  if (issues.length) return { ok: false, issues };
+
+  const { config } = base;
+  const paths = targetPaths(config, id);
+  const progress = await readJson(paths.backfill, null);
+  const done = progress && typeof progress.done === "object" && progress.done ? progress.done : {};
+  // A session found outside the folders is looked at again once the folders change.
+  if (progress?.folders !== foldersKey(target.folders)) {
+    for (const [key, entry] of Object.entries(done)) if (entry?.outcome !== "sent") delete done[key];
+  }
+  const saveProgress = () => writeJsonAtomic(paths.backfill, { version: 1, folders: foldersKey(target.folders), done });
+
+  const candidates = [];
+  const agents = targetAgents(config, target);
+  for (const provider of TARGET_PROVIDERS) {
+    if (!agents[provider]) continue;
+    for (const file of await transcriptFiles(config, provider)) {
+      let stat;
+      try { stat = await fsp.stat(file); } catch { continue; }
+      if (stat.mtimeMs < since.sinceMs) continue;
+      const key = `${provider}:${file}`;
+      if (done[key] && done[key].mtimeMs === stat.mtimeMs && done[key].size === stat.size) continue;
+      candidates.push({ provider, file, key, mtimeMs: stat.mtimeMs, size: stat.size });
+    }
+  }
+  candidates.sort((left, right) => left.mtimeMs - right.mtimeMs || left.file.localeCompare(right.file));
+
+  const summary = { sent_sessions: 0, new_messages: 0, outside_folders: 0, unreadable: 0, failed: 0 };
+  const failures = [];
+  let examined = 0;
+  let consecutiveFailures = 0;
+  let stoppedEarly = false;
+  for (const candidate of candidates.slice(0, limit)) {
+    examined += 1;
+    let parsed;
+    try {
+      parsed = await getProvider(candidate.provider).parseTranscript(candidate.file, {});
+    } catch (error) {
+      // Looked at again only once the file changes; it says nothing about the server.
+      summary.unreadable += 1;
+      done[candidate.key] = { mtimeMs: candidate.mtimeMs, size: candidate.size, outcome: "unreadable" };
+      failures.push({ transcript_path: candidate.file, error: String(error?.message || error) });
+      continue;
+    }
+    // Decided here without starting the importer; the importer checks again.
+    if (!folderMatches(parsed.metadata?.cwd, target.folders)) {
+      summary.outside_folders += 1;
+      done[candidate.key] = { mtimeMs: candidate.mtimeMs, size: candidate.size, outcome: "outside" };
+      continue;
+    }
+    const env = targetEnvironment(config, target, candidate.provider, {
+      ...process.env,
+      HONCHO_AGENT_IMPORT_TRIGGER: "backfill",
+      HONCHO_CODEX_DREAM_EVERY_MESSAGES: "0",
+    });
+    const result = runCollector(candidate.provider, candidate.file, env);
+    if (result.ok) {
+      consecutiveFailures = 0;
+      if (!result.skipped) summary.sent_sessions += 1;
+      summary.new_messages += Number(result.new_messages || 0);
+      done[candidate.key] = { mtimeMs: candidate.mtimeMs, size: candidate.size, outcome: result.skipped ? "outside" : "sent", at: new Date().toISOString() };
+      await saveProgress();
+    } else {
+      summary.failed += 1;
+      consecutiveFailures += 1;
+      failures.push({ transcript_path: candidate.file, session_id: parsed.session_id, error: sanitizeUrlsInText(result.error || "failed") });
+      // The server is most likely down; the rest wait for the next run.
+      if (consecutiveFailures >= BACKFILL_MAX_CONSECUTIVE_FAILURES) {
+        stoppedEarly = true;
+        break;
+      }
+    }
+  }
+  await saveProgress();
+  return {
+    ok: summary.failed === 0,
+    id,
+    url: publicUrl(target.honcho.baseUrl),
+    since: options.since || null,
+    limit,
+    considered: candidates.length,
+    examined,
+    remaining: candidates.length - examined,
+    ...summary,
+    ...(stoppedEarly ? { stopped: `stopped after ${BACKFILL_MAX_CONSECUTIVE_FAILURES} failures in a row; run it again once the server answers` } : {}),
+    ...(failures.length ? { failures: failures.slice(0, 20) } : {}),
+  };
+}
+
+async function targetCommand(args) {
+  const action = args.shift() || "list";
+  const id = args[0] && !args[0].startsWith("--") ? args.shift() : "";
+  const options = parseOptions(args);
+  if (action === "list") return targetList();
+  if (action === "add") return targetAdd(id, options);
+  if (action === "remove") return targetRemove(id);
+  if (action === "set") return targetSet(id, options);
+  if (action === "test") return targetTest(id);
+  if (action === "backfill") return targetBackfill(id, options);
+  return { ok: false, error: `Unknown target action: ${action}. Expected list, add, remove, set, test or backfill.` };
+}
+
 // ---------------------------------------------------------------- setup screen
 
 const UI_HOST = "127.0.0.1";
@@ -1199,6 +1706,12 @@ function usage() {
       "bridge connect --url <address> (secrets in HONCHO_MCP_BEARER_TOKEN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)",
       "bridge test",
       "bridge disconnect",
+      "target list",
+      "target add <id> --url <https://host> --folders <dir,dir> [--label <text>] [--workspace <id>] [--user-peer <id>] [--agents claude,codex] (its API token in HONCHO_TARGET_API_TOKEN; its Cloudflare Access service token in HONCHO_TARGET_CF_ACCESS_CLIENT_ID, HONCHO_TARGET_CF_ACCESS_CLIENT_SECRET)",
+      "target set <id> [--folders <dir,dir>] [--enabled true|false] [--label <text>] [--workspace <id>] [--user-peer <id>] [--agents claude,codex]",
+      "target test <id>",
+      "target backfill <id> [--since YYYY-MM-DD] [--limit <n>]",
+      "target remove <id>",
       "ui open [--no-browser]",
       "doctor",
       "status",
@@ -1293,6 +1806,7 @@ async function main() {
     if (subcommand === "test") return bridgeTest();
     if (subcommand === "disconnect") return bridgeDisconnect();
   }
+  if (command === "target") return targetCommand(args);
   if (command === "ui") {
     const subcommand = args.shift() || "open";
     const options = parseOptions(args);
@@ -1304,7 +1818,7 @@ async function main() {
 try {
   const result = await main();
   if (result?.[REVEALS_TOKEN]) process.stdout.write(formatRevealedToken(result));
-  else if (!process.argv.includes("hook")) printJson(result);
+  else if (process.argv[2] !== "hook") printJson(result);
   process.exitCode = result.ok ? 0 : 1;
 } catch (error) {
   printJson({ ok: false, error: String(error?.message || error) });
