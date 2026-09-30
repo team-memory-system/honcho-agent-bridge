@@ -67,6 +67,10 @@ gets an answer, without reading the underlying messages.
   detached and finds it again through its PID file, and after a reboot it stays down
   until someone runs `host start` or presses start in the setup UI. Until then the
   Qwen alias is not kept loaded, and Ollama answers only if its own app started it.
+  An Ollama the app downloaded itself (`runtime/ollama`) has no app or service of
+  its own, so it is down after a reboot too, and comes back with the supervisor:
+  `host start` starts its `ollama serve`, and the supervisor starts it again within
+  15 seconds whenever it stops answering.
   `host stop` and `server stop` leave the gateway running;
   `node <app-dir>/runtime/subscription-gateway/gateway/cli.mjs uninstall` removes it.
 - **A changed `gateway-source.json` replaces the gateway.** The next `server prepare`
@@ -151,7 +155,7 @@ gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 173 tests, no network, no Docker
+npm test          # 224 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # the Team Memory app on localhost
@@ -197,11 +201,22 @@ Cross-device database synchronization is intentionally deferred until the person
 - Docker Desktop/Engine with Compose when installing the bundled local Honcho server (`server prepare` starts a closed Docker Desktop on macOS and Windows and waits for its engine), or an existing Honcho API. For your own server on another computer, see [Collecting from another computer](#collecting-from-another-computer).
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
 
-The `personal` profile also requires macOS or Windows, git, Ollama on the host, and a Codex and/or Claude subscription. `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
+The `personal` profile also requires macOS or Windows, git, and a Codex and/or Claude subscription. Docker Desktop and Ollama are fetched by the app when this computer has neither (see [Docker Desktop and Ollama](#docker-desktop-and-ollama)). `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
 
-On Windows, Docker Desktop must use its WSL 2 backend, hardware virtualization and the WSL features must be enabled, and Ollama must be installed for the current user and available on `PATH`. `server plan` checks Docker CLI/Compose and engine health and whether git can fetch the gateway; personal preparation installs the gateway (its own install brings its npm dependencies) and checks Ollama and its local API, and the required base/alias/context. Docker engine readiness is the current gate for the WSL backend: setup does not independently enable WSL, clear a pending reboot, or preflight every port. If Docker reports that a WSL feature change requires a reboot, restart Windows and run the same plan again.
+On Windows, Docker Desktop must use its WSL 2 backend and hardware virtualization must be enabled. `server plan` checks Docker CLI/Compose and engine health and whether git can fetch the gateway; personal preparation installs the gateway (its own install brings its npm dependencies) and checks Ollama and its local API, and the required base/alias/context. Docker engine readiness is the current gate for the WSL backend: setup does not independently enable WSL beyond what Docker's installer does, or preflight every port. If Docker or WSL asks for a reboot, restart Windows and run the same plan again.
 
-When Docker, Ollama or git is absent, the setup skill offers an explicitly confirmed installation through the detected platform's official package manager or vendor installer, then reruns the prerequisite checks. System software installation is never hidden inside the release archive.
+### Docker Desktop and Ollama
+
+With `--profile personal` on macOS (Apple Silicon or Intel) or Windows 11, a missing Docker Desktop or Ollama is not an issue: `server plan` lists `install-docker-desktop {url, destination}` and `install-ollama {url, destination}` first, and `server prepare` runs them before anything else. Downloads stream to `<app dir>/runtime/downloads/<name>.part` and are renamed only when complete; a failed download removes the `.part` and names the URL. Each action reports its byte size and what was verified.
+
+- **Ollama** is found on `PATH`, as the macOS app's CLI (`/Applications/Ollama.app/Contents/Resources/ollama`), as the Windows installer's `%LOCALAPPDATA%\Programs\Ollama\ollama.exe`, or as the app's own copy in `<app dir>/runtime/ollama`. When there is none, prepare downloads the standalone build from `https://github.com/ollama/ollama/releases/latest/download/` (`ollama-darwin.tgz`, `ollama-windows-amd64.zip` or `ollama-windows-arm64.zip`), checks it against that release's `sha256sum.txt` (a mismatch deletes it), unpacks it whole with the system `tar` so its libraries stay beside the binary, and runs `ollama --version`. No admin rights are needed. Models stay in Ollama's default directory (`~/.ollama`). The app starts `ollama serve` for its own copy (see the reboot note above).
+- **Docker Desktop** on macOS: `Docker.dmg` for this Mac's processor is mounted read-only, its `Docker.app` must pass `codesign --verify --deep --strict`, carry Docker's Team ID `9BNSXJN65R` and be accepted by `spctl -a`, and is then copied to `/Applications` with `ditto` (an administrator account can do this without sudo; Docker documents no other location, so a non-admin account gets a clear issue). The app is opened, and prepare waits up to 3 minutes for the engine while Docker's first-run window asks to accept its terms and, for the recommended settings, the macOS password. Until its first run links the CLI onto `PATH`, every docker call uses `Docker.app/Contents/Resources/bin/docker`.
+- **Docker Desktop** on Windows: `Docker Desktop Installer.exe` must have a valid Authenticode signature from Docker Inc; it then runs elevated (`install --accept-license --quiet`, so Windows shows its administrator prompt), `wsl --status` is checked, and `Docker Desktop.exe` is started. A restart the installer (exit 3010/1641) or WSL asks for returns `nextAction: {"kind": "restart-required"}`; a declined prompt returns `docker-install-approval`.
+- When the engine is not up in time, prepare returns `ok: true, ready: false` with `nextAction: {"kind": "docker-first-run", "app": ...}` and changes nothing else; running prepare again continues from there.
+- Docker publishes no checksum for these unversioned downloads, which is why the signature is what is checked.
+- Docker Desktop is free for personal use, education, non-commercial open source projects and small businesses (fewer than 250 employees and less than $10 million in annual revenue); larger companies and government entities need a paid Docker subscription. The plan repeats this as a warning.
+
+Git is still a prerequisite. When git is absent, the setup skill offers an explicitly confirmed installation through the detected platform's official package manager or vendor installer, then reruns the prerequisite checks. System software installation is never hidden inside the release archive.
 
 One setup run can enable conversation collection for every detected agent. Installing the plugin in each host is still required for that host to receive the skills and MCP tools.
 

@@ -1,9 +1,11 @@
 // Keeps the personal profile's embedding model resident in Ollama.
 //
 // `host start` spawns this detached and finds it again through its PID file. It
-// starts `ollama serve` when nothing answers on the configured address, and warms
-// the Qwen3 alias on an interval so an embedding after an idle stretch does not
-// wait for a model load. The subscription gateway is not supervised here: it has
+// starts `ollama serve` when nothing answers on the configured address - at start,
+// and again on every service check (`serviceCheckIntervalMs`, 15 s by default) -
+// and warms the Qwen3 alias on an interval so an embedding after an idle stretch
+// does not wait for a model load. Nothing registers this with the OS, so after a
+// reboot it, and the `ollama serve` it started, stay down until `host start` runs. The subscription gateway is not supervised here: it has
 // its own lifecycle and registers its own autostart.
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -181,6 +183,31 @@ function startOllama(config) {
   });
 }
 
+function serviceCheckInterval(config) {
+  const value = Number(config.ollama?.serviceCheckIntervalMs);
+  return Number.isInteger(value) && value >= 100 ? value : 15_000;
+}
+
+let checking = false;
+
+/**
+ * Between warmups, start `ollama serve` again whenever the API stops answering. The
+ * app's own Ollama download has no service of its own, so this is what brings it
+ * back after it exits.
+ */
+async function keepOllamaServing(config) {
+  if (stopping || checking || ollamaChild) return;
+  checking = true;
+  try {
+    if (!(await ollamaHealthy(config)) && !stopping && !ollamaChild) {
+      log("ollama-not-answering", { baseUrl: config.ollama.baseUrl });
+      startOllama(config);
+    }
+  } finally {
+    checking = false;
+  }
+}
+
 async function warmEmbedding(config) {
   if (stopping || !config.ollama.enabled) return;
   if (!(await ollamaHealthy(config))) {
@@ -254,6 +281,10 @@ async function main() {
     await warmEmbedding(config);
     const warmer = setInterval(() => warmEmbedding(config), config.ollama.warmIntervalMs);
     timers.add(warmer);
+    if (config.ollama.manageService) {
+      const checker = setInterval(() => keepOllamaServing(config), serviceCheckInterval(config));
+      timers.add(checker);
+    }
   }
 }
 

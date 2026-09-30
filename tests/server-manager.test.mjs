@@ -1564,6 +1564,8 @@ test("personal plan shows the gateway steps and asks for no key", async (t) => {
     profile: "personal",
     platform: "darwin",
     dockerInspector: async () => ({ installed: true, running: true }),
+    // Ollama is here, so there is nothing to download (whatever this computer has).
+    ollamaLocator: () => ({ path: "/usr/local/bin/ollama", source: "path" }),
     bundleInspector: async () => ({ ok: true, directory: source, missing: [] }),
     honchoSourceInspector: async () => ({ present: true, fetchable: false }),
   };
