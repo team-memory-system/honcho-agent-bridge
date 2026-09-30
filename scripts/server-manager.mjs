@@ -25,6 +25,7 @@ import {
 import { hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 import { cloneSource, gitAvailable, readSourcePin } from "./source-pin.mjs";
+import { isWrappedHoncho, prepareHonchoTree } from "./honcho-source.mjs";
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -288,14 +289,26 @@ export async function ensureHonchoSource(directory = sourceServerDir(), { runner
   if (!probe.fetchable) return { ok: false, fetched: false, directory: probe.directory, error: probe.reason };
   const { pin } = probe;
   const staging = `${probe.directory}.fetching`;
+  const prepared = `${probe.directory}.prepared`;
   await fsp.rm(staging, { recursive: true, force: true });
+  await fsp.rm(prepared, { recursive: true, force: true });
   try {
-    const commit = await cloneSource(pin, staging, runner);
-    await fsp.rename(staging, probe.directory);
+    // The wrapper needs Git long enough to initialize and verify its official
+    // upstream submodule. Only the prepared flat source is installed.
+    const commit = await cloneSource(pin, staging, runner, { keepGit: true });
+    if (await isWrappedHoncho(staging)) {
+      await prepareHonchoTree(staging, prepared, { runner });
+      await fsp.rename(prepared, probe.directory);
+    } else {
+      await fsp.rm(path.join(staging, ".git"), { recursive: true, force: true });
+      await fsp.rename(staging, probe.directory);
+    }
     return { ok: true, fetched: true, directory: probe.directory, repo: pin.repo, ref: pin.ref, commit };
   } catch (error) {
-    await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
     return { ok: false, fetched: false, directory: probe.directory, error: error?.stderr?.trim() || error?.message || String(error) };
+  } finally {
+    await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
+    await fsp.rm(prepared, { recursive: true, force: true }).catch(() => {});
   }
 }
 

@@ -1,13 +1,14 @@
 # Bundled Honcho server
 
-The AGPL Honcho source belongs in `honcho/`, and it arrives one of two ways.
-A release bundle ships it already filled. A plugin installed from a marketplace
-cannot carry it — the source is AGPL and lives in its own repository, which is
-why `.gitignore` here excludes the directory — so `server prepare` clones the
-repository named in `honcho-source.json` into `honcho/` before it builds
-anything. `server plan` reports that download and never performs it. Set a full
-40-character `commit` in that file to tie a plugin version to one Honcho commit;
-with only `ref`, every install takes the current tip of that branch.
+The AGPL Honcho runtime source belongs in `honcho/`, and it arrives one of two ways.
+A release bundle ships it already prepared. A marketplace plugin downloads the
+separate repository named in `honcho-source.json` into a staging directory. For
+the `honcho-selfhost` wrapper it initializes the pinned official submodule, applies
+the local patches, and exports the runtime into `honcho/`; the upstream checkout
+itself stays unchanged. Earlier flat source repositories are accepted too.
+`server plan` reports the download and never performs it. Both source pins use a
+full 40-character `commit` so a plugin version always installs the reviewed source.
+The prepared source records upstream and patch provenance in `.honcho-source.json`.
 
 The local collector and MCP process stay on the host; this Compose project runs
 Honcho API, Deriver, PostgreSQL/pgvector, Redis, and the dashboard.

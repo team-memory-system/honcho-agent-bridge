@@ -1,4 +1,5 @@
 {
   "repo": "https://github.com/team-memory-system/honcho-selfhost",
-  "ref": "main"
+  "ref": "main",
+  "commit": "2322fbc3263d302567f00390499ab49ce73914a3"
 }

@@ -845,6 +845,7 @@ async function doctor() {
     "ui.mjs",
     "file-lock.mjs",
     "version.mjs",
+    "honcho-source.mjs",
   ];
   const missingRuntimeFiles = [];
   for (const file of requiredRuntimeFiles) {

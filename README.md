@@ -10,6 +10,12 @@ The memory system uses the following repositories. Team Memory System maintains
 the server and agent bridge; the subscription gateway is an independently released
 dependency maintained by `chenjingdev`.
 
+`honcho-selfhost` keeps official Honcho in a submodule and its core changes in
+patches. This installer (0.3.4+) prepares that source before installing it, so the
+installed server keeps the same flat Docker build layout. Both source downloads
+are pinned to full commits in `server/*-source.json`; `.honcho-source.json` inside
+the installed Honcho source records the official commit and patch checksums.
+
 | Repository | What it is | Installed where |
 |---|---|---|
 | [`honcho-selfhost`](https://github.com/team-memory-system/honcho-selfhost) | The memory server. A fork of `plastic-labs/honcho` (AGPL-3.0), with the MCP bridge and dashboard inside it | One computer per person |

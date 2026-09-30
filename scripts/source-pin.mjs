@@ -35,17 +35,19 @@ export async function gitAvailable(runner) {
 }
 
 /**
- * Clone the pinned source into `target` and drop its history. Returns the commit
+ * Clone the pinned source into `target` and normally drop its history. Honcho
+ * wrappers retain Git until their upstream submodule has been materialized.
+ * Returns the commit
  * that was checked out. The caller owns `target`: it is a staging path, renamed
  * into place only once this has succeeded.
  */
-export async function cloneSource(pin, target, runner) {
+export async function cloneSource(pin, target, runner, { keepGit = false } = {}) {
   const clone = ["clone", "--branch", pin.ref, "--single-branch"];
   if (!pin.commit) clone.push("--depth", "1");
   clone.push(pin.repo, target);
   await runner("git", clone, { timeout: 900_000 });
   if (pin.commit) await runner("git", ["-C", target, "checkout", "--detach", pin.commit], { timeout: 120_000 });
   const { stdout } = await runner("git", ["-C", target, "rev-parse", "HEAD"], { timeout: 30_000 });
-  await fsp.rm(path.join(target, ".git"), { recursive: true, force: true });
+  if (!keepGit) await fsp.rm(path.join(target, ".git"), { recursive: true, force: true });
   return String(stdout || "").trim();
 }

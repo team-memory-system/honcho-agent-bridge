@@ -1,6 +1,6 @@
 {
   "name": "honcho-agent-bridge",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Installable self-hosted personal memory shared by Codex and Claude Code.",
   "author": {
     "name": "chenjing"

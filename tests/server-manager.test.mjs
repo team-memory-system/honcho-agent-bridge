@@ -1692,3 +1692,57 @@ test("the fetch stages the clone, drops its history, and leaves nothing behind o
 async function bundleFileExists(directory, relative) {
   try { await fsp.access(path.join(directory, relative)); return true; } catch { return false; }
 }
+
+for (const failPreparation of [false, true]) {
+  test(`wrapper source ${failPreparation ? "preparation failure leaves no partial installation" : "is prepared before installation and drops the source checkout"}`, async t => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-wrapper-fetch-"));
+    t.after(() => fsp.rm(root, { recursive: true, force: true }));
+    await fsp.writeFile(path.join(root, "honcho-source.json"), JSON.stringify({
+      repo: "https://github.com/team-memory-system/honcho-selfhost", ref: "main",
+    }));
+    let prepared = 0;
+    const runner = async (command, args) => {
+      if (command === process.execPath) {
+        prepared += 1;
+        assert.equal(args[0], path.join(root, "honcho.fetching", "scripts", "prepare-source.mjs"));
+        assert.equal(args[1], "--output");
+        assert.equal(await bundleFileExists(root, "honcho.fetching/.git"), true, "Git must remain available for submodule preparation");
+        const output = args[2];
+        await fsp.mkdir(path.join(output, "database"), { recursive: true });
+        await fsp.mkdir(path.join(output, "local-dashboard"), { recursive: true });
+        await fsp.writeFile(path.join(output, "Dockerfile"), "FROM scratch\n");
+        if (failPreparation) throw new Error("patch failed; source was not prepared");
+        await fsp.writeFile(path.join(output, "LICENSE"), "AGPL\n");
+        await fsp.writeFile(path.join(output, "database", "init.sql"), "CREATE EXTENSION vector;\n");
+        await fsp.writeFile(path.join(output, "local-dashboard", "Dockerfile"), "FROM scratch\n");
+        await fsp.writeFile(path.join(output, ".honcho-source.json"), JSON.stringify({
+          kind: "honcho-selfhost-source", upstream: { commit: "b".repeat(40) },
+        }));
+        return { stdout: "{}\n", stderr: "" };
+      }
+      if (args[0] === "--version") return { stdout: "git version 2.0\n", stderr: "" };
+      if (args[0] === "clone") {
+        const target = args.at(-1);
+        await fsp.mkdir(path.join(target, ".git"), { recursive: true });
+        await fsp.mkdir(path.join(target, "scripts"), { recursive: true });
+        await fsp.writeFile(path.join(target, "selfhost-source.json"), "{}\n");
+        await fsp.writeFile(path.join(target, "scripts", "prepare-source.mjs"), "// called by the runner\n");
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: `${"a".repeat(40)}\n`, stderr: "" };
+    };
+    const result = await ensureHonchoSource(root, { runner });
+    assert.equal(prepared, 1);
+    assert.equal(result.ok, !failPreparation);
+    assert.equal(await bundleFileExists(root, "honcho.fetching"), false);
+    assert.equal(await bundleFileExists(root, "honcho.prepared"), false);
+    assert.equal(await bundleFileExists(root, "honcho/Dockerfile"), !failPreparation);
+    assert.equal(await bundleFileExists(root, "honcho/.git"), false);
+    assert.equal(await bundleFileExists(root, "honcho/selfhost-source.json"), false);
+    if (failPreparation) assert.match(result.error, /patch failed/);
+    else {
+      assert.equal(result.commit, "a".repeat(40));
+      assert.equal(JSON.parse(await fsp.readFile(path.join(root, "honcho", ".honcho-source.json"), "utf8")).upstream.commit, "b".repeat(40));
+    }
+  });
+}
