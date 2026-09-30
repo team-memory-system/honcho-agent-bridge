@@ -1,114 +1,94 @@
 <!doctype html>
 <html lang="ko">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>기억 설치</title>
-<link rel="stylesheet" href="styles.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>팀 메모리</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b5412a'/%3E%3Ctext x='16' y='22' font-size='17' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='white'%3E기%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <script>
+    try { const theme = localStorage.getItem("tm.theme"); if (theme) document.documentElement.dataset.theme = theme; } catch {}
+  </script>
 </head>
 <body>
-<header>
-  <h1>기억 설치</h1>
-  <p>다른 사람의 기억에 연결하거나, 내 대화를 내 Honcho에 모으는 설정을 여기서 합니다. 터미널은 필요 없습니다.</p>
-  <button id="refresh" class="quiet">다시 확인</button>
-</header>
+  <div class="shell">
+    <aside class="rail" id="rail">
+      <div class="mark"><span class="seal">기</span><strong>팀 메모리</strong></div>
+      <nav class="nav" id="nav" aria-label="메뉴"></nav>
+      <div>
+        <div class="nav-label">이 컴퓨터</div>
+        <div class="machine" id="machine"></div>
+      </div>
+      <div class="rail-foot">
+        <div class="who"><b id="who-name">—</b><small id="who-space">—</small></div>
+        <button class="btn quiet icon-only small" id="theme" type="button" title="화면 밝기"></button>
+      </div>
+    </aside>
+    <div class="main">
+      <div class="mobile-bar">
+        <button class="btn icon-only small" id="menu" type="button" aria-label="메뉴">☰</button>
+        <span class="seal">기</span><strong>팀 메모리</strong>
+      </div>
+      <main id="page" class="view" tabindex="-1"></main>
+    </div>
+  </div>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
-<main>
-  <section class="card" id="status-card">
-    <h2>1. 지금 상태</h2>
-    <div id="status" class="status-grid"><p class="muted">확인 중…</p></div>
-    <pre id="status-detail" hidden></pre>
-  </section>
-
-  <section class="card" id="bridge-card">
-    <h2>2. 다른 사람의 기억에 연결</h2>
-    <p class="muted">
-      기억을 직접 만들지 않고 물어보기만 할 거면 이 칸만 채우면 됩니다.
-      네 값은 모두 기억 주인에게 받으세요. 이 컴퓨터의 설정 파일에만 저장되고, 화면에 다시 보이지 않습니다.
-    </p>
-    <p id="bridge-state" class="muted">확인 중…</p>
-    <form id="bridge-form" autocomplete="off">
-      <label>브리지 주소
-        <input name="url" type="url" placeholder="https://…/mcp" required>
+  <!-- The two forms that write this computer's setup. They are plain markup so the
+       fields the server accepts can be checked against what the page sends. -->
+  <template id="tpl-setup-form">
+    <form id="setup-form" class="form-grid" autocomplete="off">
+      <label class="field">
+        <span>기억 속의 내 이름</span>
+        <input class="input" name="userPeer" required pattern="[A-Za-z0-9_-]+" placeholder="예: user_minji">
+        <small>영문·숫자·밑줄. 내 모든 컴퓨터에서 같은 이름을 씁니다.</small>
       </label>
-      <label>브리지 토큰
-        <input name="token" type="password" required>
+      <label class="field">
+        <span>작업공간</span>
+        <input class="input" name="workspace" pattern="[A-Za-z0-9_-]+" placeholder="memory">
+        <small>보통 그대로 둡니다.</small>
       </label>
-      <label>Cloudflare 서비스 토큰 ID
-        <input name="accessClientId" type="password">
+      <label class="field wide">
+        <span>기억 서버 주소</span>
+        <input class="input" name="honchoUrl" type="url" placeholder="이 컴퓨터의 서버를 쓰면 비워 둡니다">
+        <small>내 다른 컴퓨터에 서버가 있으면 그 주소를 넣습니다.</small>
       </label>
-      <label>Cloudflare 서비스 토큰 비밀
-        <input name="accessClientSecret" type="password">
+      <label class="field wide">
+        <span>서버 토큰</span>
+        <input class="input" name="apiToken" type="password" placeholder="서버가 토큰을 요구할 때만">
       </label>
-      <div class="actions">
-        <button type="submit" class="primary">연결</button>
-        <button type="button" data-bridge="test" class="quiet">연결 확인</button>
-        <button type="button" data-bridge="disconnect" class="quiet">연결 끊기</button>
+      <div class="field wide">
+        <span>대화를 모을 에이전트</span>
+        <div class="checks">
+          <label><input type="checkbox" name="agents" value="claude" checked> Claude Code</label>
+          <label><input type="checkbox" name="agents" value="codex" checked> Codex</label>
+        </div>
       </div>
     </form>
-    <pre id="bridge-result" hidden></pre>
-  </section>
+  </template>
 
-  <section class="card">
-    <h2>3. 훅 설치</h2>
-    <p class="muted">에이전트가 대화를 끝낼 때마다 수집기가 그 기록을 읽어 Honcho로 보냅니다.</p>
-    <form id="setup-form">
-      <label>내 peer id
-        <input name="userPeer" placeholder="user_chen" autocomplete="off" required>
+  <template id="tpl-bridge-form">
+    <form id="bridge-form" class="form-grid" autocomplete="off">
+      <label class="field wide">
+        <span>공유 창구 주소</span>
+        <input class="input" name="url" type="url" required placeholder="https://…">
       </label>
-      <label>workspace
-        <input name="workspace" placeholder="memory" autocomplete="off">
+      <label class="field wide">
+        <span>창구 토큰</span>
+        <input class="input" name="token" type="password" required>
       </label>
-      <label>Honcho 주소
-        <input name="honchoUrl" placeholder="http://127.0.0.1:8001" autocomplete="off">
+      <label class="field">
+        <span>Cloudflare 서비스 토큰 ID</span>
+        <input class="input" name="accessClientId" type="password">
       </label>
-      <label>대상 에이전트
-        <input name="agents" placeholder="codex,claude" autocomplete="off">
+      <label class="field">
+        <span>Cloudflare 서비스 토큰 비밀</span>
+        <input class="input" name="accessClientSecret" type="password">
       </label>
-      <div class="actions">
-        <button type="button" data-setup="plan" class="quiet">무엇이 바뀌는지 먼저 보기</button>
-        <button type="submit" class="primary">설치</button>
-      </div>
     </form>
-    <pre id="setup-result" hidden></pre>
-  </section>
+  </template>
 
-  <section class="card">
-    <h2>4. 서버와 게이트웨이</h2>
-    <p class="muted">
-      Honcho 컨테이너를 올립니다. 대화 정리에 쓰는 모델은 구독 게이트웨이가 내 Codex·Claude 로그인으로 돌립니다.
-      로그인은 게이트웨이 화면에서 합니다. 서버 준비가 로그인을 요청하면 그 화면을 열어 로그인한 뒤 서버 준비를 다시 누르세요.
-    </p>
-    <div class="actions">
-      <button data-server="status" class="quiet">서버 상태</button>
-      <button data-server="prepare" class="quiet">서버 준비</button>
-      <button data-server="start" class="primary">서버 시작</button>
-      <button data-server="stop" class="quiet">서버 정지</button>
-    </div>
-    <div class="actions">
-      <button data-gateway="open" class="primary">게이트웨이 화면 열기</button>
-      <button data-host="status" class="quiet">게이트웨이·Ollama 상태</button>
-      <button data-host="start" class="quiet">게이트웨이·Ollama 시작</button>
-      <button data-host="stop" class="quiet">Ollama 정지</button>
-    </div>
-    <pre id="server-result" hidden></pre>
-  </section>
-
-  <section class="card">
-    <h2>5. ChatGPT 웹 대화 넣기</h2>
-    <p class="muted">
-      ChatGPT 설정에서 <strong>데이터 내보내기</strong>를 하면 메일로 zip이 옵니다.
-      그 안의 <code>conversations.json</code>을 그대로 올리세요. 이미 들어간 대화는 다시 넣지 않습니다.
-    </p>
-    <input type="file" id="chatgpt-file" accept=".json,application/json">
-    <div class="actions">
-      <button id="chatgpt-import" class="primary" disabled>넣기</button>
-      <span id="chatgpt-progress" class="muted"></span>
-    </div>
-    <pre id="chatgpt-result" hidden></pre>
-  </section>
-</main>
-
-<script src="app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -241,6 +241,15 @@ export async function installedServerPorts(directory = installedServerDir()) {
   };
 }
 
+/** The chat model the installed server's .env points every chat setting at. */
+export async function installedServerModel(directory = installedServerDir()) {
+  try {
+    return installedChatModel(await readEnvironmentFile(path.join(directory, ".env"))) || "";
+  } catch {
+    return "";
+  }
+}
+
 function serverUrls(ports) {
   return { apiUrl: `http://127.0.0.1:${ports.api}`, dashboardUrl: `http://127.0.0.1:${ports.dashboard}` };
 }

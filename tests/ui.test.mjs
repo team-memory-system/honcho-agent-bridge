@@ -88,7 +88,7 @@ test("the page and its assets are served, and nothing above the ui directory is"
   const page = await send("/");
   assert.equal(page.status, 200);
   assert.match(page.headers["content-type"], /text\/html/);
-  assert.match(page.text, /기억 설치/);
+  assert.match(page.text, /팀 메모리/);
 
   assert.equal((await send("/styles.css")).status, 200);
   assert.equal((await send("/app.js")).status, 200);
@@ -197,7 +197,7 @@ test("the UI serves its pages from an installed runtime, where everything is one
     request.end();
   });
   assert.equal(page.status, 200);
-  assert.match(page.text, /기억 설치/);
+  assert.match(page.text, /팀 메모리/);
 });
 
 test("the setup form's fields reach the CLI under the names it actually reads", async () => {
@@ -225,6 +225,10 @@ test("the form's field names and the accepted option names are the same set", as
   const accepted = server.match(/const SETUP_OPTIONS = new Set\(\[([\s\S]*?)\]\)/)[1]
     .match(/"([^"]+)"/g)
     .map((quoted) => quoted.slice(1, -1));
+  // Secret fields are read too, but into the environment, never onto the command line.
+  accepted.push(...server.match(/const SETUP_SECRET_FIELDS = Object\.freeze\(\{([\s\S]*?)\}\)/)[1]
+    .match(/(\w+):/g)
+    .map((key) => key.slice(0, -1)));
   for (const field of fields) {
     assert.ok(accepted.includes(field), `the form sends "${field}", which the server drops`);
   }
@@ -277,13 +281,38 @@ test("the host buttons drive the host lifecycle, not the Docker stack", async ()
   assert.match(cli, /command === "host"/);
   assert.match(cli, /command === "gateway"/);
 
-  // Every button on the page has a route to go to.
-  const markup = await fsp.readFile(path.join(ROOT, "ui", "index.html"), "utf8");
-  const hostButtons = [...markup.matchAll(/data-host="([^"]+)"/g)].map((match) => match[1]);
-  assert.ok(hostButtons.length >= 3, "the host buttons were not found");
-  for (const action of hostButtons) assert.match(routes, new RegExp(`"/api/host/${action}"`));
-  assert.match(markup, /data-gateway="open"/);
-  assert.equal(/id="proxy-config"|llmProxyRoot/.test(markup), false);
+  // Every host action the screens call has a route to go to.
+  const screens = await uiSources();
+  const hostCalls = [...new Set([...screens.matchAll(/"\/api\/host\/([a-z]+)"/g)].map((match) => match[1]))];
+  assert.ok(hostCalls.includes("start") && hostCalls.includes("stop") && hostCalls.includes("status"), "the host controls were not found");
+  for (const action of hostCalls) assert.match(routes, new RegExp(`"/api/host/${action}"`));
+  assert.match(screens, /"\/api\/gateway\/open"/);
+  assert.equal(/id="proxy-config"|llmProxyRoot/.test(screens), false);
+});
+
+async function uiSources() {
+  const files = [];
+  async function walk(directory) {
+    for (const entry of await fsp.readdir(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) await walk(target);
+      else if (/\.(js|html)$/.test(entry.name)) files.push(await fsp.readFile(target, "utf8"));
+    }
+  }
+  await walk(path.join(ROOT, "ui"));
+  return files.join("\n");
+}
+
+test("every server route the screens call exists", async () => {
+  const screens = await uiSources();
+  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  const called = new Set([...screens.matchAll(/["`](\/api\/[a-z/-]+)/g)].map((match) => match[1].replace(/\/$/, "")));
+  assert.ok(called.size >= 15, `only ${called.size} routes were found`);
+  const relayed = ["/api/honcho/", "/api/dashboard/", "/api/gw/"];
+  for (const route of called) {
+    if (relayed.some((prefix) => route.startsWith(prefix) || `${route}/` === prefix)) continue;
+    assert.ok(server.includes(`"${route}"`), `the page calls ${route}, which ui.mjs does not serve`);
+  }
 });
 
 test("the connect form reaches the bridge, and saves only once the bridge has answered", async (t) => {

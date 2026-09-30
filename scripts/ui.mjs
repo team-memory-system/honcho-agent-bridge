@@ -1,12 +1,12 @@
-// The collector's install screen.
+// The Team Memory app: one screen over the memory server, the collector and the
+// subscription gateway. `cli.mjs ui open` starts it.
 //
-// Everything here already exists as a `cli.mjs` subcommand. This is the same set of
-// steps for someone who does not open a terminal: see what is missing, connect to
-// someone else's shared bridge, install the hooks, bring up Honcho and its host
-// services, and drop in a ChatGPT export. `cli.mjs ui open` starts it.
-//
-// It runs the CLI as a subprocess rather than importing it, so the UI and a terminal
-// take exactly the same path and there is one implementation of each step.
+// Setting things up - connect to someone else's shared bridge, install the hooks,
+// bring up Honcho and its host services, drop in a ChatGPT export - already exists
+// as `cli.mjs` subcommands, and runs the CLI as a subprocess rather than importing
+// it, so the app and a terminal take exactly the same path and there is one
+// implementation of each step. Reading memories, the gateway's accounts and the
+// server's tool switches are relayed to those programs' own APIs (app-api.mjs).
 import { execFile } from "node:child_process";
 import { createReadStream, promises as fs, realpathSync } from "node:fs";
 import http from "node:http";
@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { appContext, localTools, relayDashboard, relayGateway, relayHoncho, sessionsPage, setLocalTool } from "./app-api.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -37,6 +38,7 @@ const CONTENT_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".json": "application/json; charset=utf-8",
 };
 
 function json(res, status, body) {
@@ -201,11 +203,11 @@ const ROUTES = {
     detect: await runCli(["detect"], { timeout: 120_000 }),
     doctor: await runCli(["doctor"], { timeout: 120_000 }),
   }),
-  "/api/setup/plan": async (body) => runCli(["setup", "plan", ...cliOptions(body)]),
-  "/api/setup/apply": async (body) => runCli(["setup", "apply", ...cliOptions(body)]),
+  "/api/setup/plan": async (body) => runCli(["setup", "plan", ...cliOptions(body)], { env: setupEnvironment(body) }),
+  "/api/setup/apply": async (body) => runCli(["setup", "apply", ...cliOptions(body)], { env: setupEnvironment(body) }),
   "/api/server/plan": async (body) => runCli(["server", "plan", ...profileOption(body)]),
-  "/api/server/prepare": async (body) => runCli(["server", "prepare", ...profileOption(body)]),
-  "/api/server/start": async (body) => runCli(["server", "start", ...profileOption(body)]),
+  "/api/server/prepare": async (body) => runCli(["server", "prepare", ...profileOption(body), ...modelOption(body)]),
+  "/api/server/start": async (body) => runCli(["server", "start", ...profileOption(body), ...modelOption(body)]),
   "/api/server/stop": async (body) => runCli(["server", "stop", ...profileOption(body)]),
   "/api/server/status": async (body) => runCli(["server", "status", ...profileOption(body)]),
   "/api/server/verify": async (body) => runCli(["server", "verify", ...profileOption(body, "personal")]),
@@ -233,6 +235,12 @@ function profileOption(body, fallback = "portable") {
   return ["--profile", profile];
 }
 
+/** The chat model Honcho is set to use, as the gateway names it. */
+function modelOption(body) {
+  const model = typeof body?.model === "string" ? body.model.trim() : "";
+  return /^[\w.:/-]{1,120}$/.test(model) ? ["--model", model] : [];
+}
+
 /**
  * The option names `setupPlan` actually reads, spelled as `parseOptions` expects
  * them on the command line. Anything else a form sends is dropped rather than
@@ -241,6 +249,23 @@ function profileOption(body, fallback = "portable") {
 const SETUP_OPTIONS = new Set([
   "userPeer", "honchoUrl", "workspace", "agents", "codexRoot", "dataDir",
 ]);
+
+/**
+ * A server's API token, like the shared-bridge secrets, reaches the CLI through
+ * its environment and never its arguments. Left blank, the CLI keeps the token it
+ * already saved for that same server.
+ */
+const SETUP_SECRET_FIELDS = Object.freeze({ apiToken: "HONCHO_API_TOKEN" });
+
+function setupEnvironment(body) {
+  const env = { ...process.env };
+  for (const [field, name] of Object.entries(SETUP_SECRET_FIELDS)) {
+    delete env[name];
+    const value = typeof body?.[field] === "string" ? body[field].trim() : "";
+    if (value) env[name] = value;
+  }
+  return env;
+}
 
 function cliOptions(body) {
   const args = [];
@@ -314,6 +339,34 @@ export function createUiServer() {
     if (url.pathname === "/api/import/chatgpt" && req.method === "POST") {
       return importChatGpt(req, res);
     }
+    if (url.pathname.startsWith("/api/honcho/")) return relayHoncho(req, res, url);
+    if (url.pathname.startsWith("/api/dashboard/")) return relayDashboard(req, res, url);
+    if (url.pathname.startsWith("/api/gw/")) return relayGateway(req, res, url);
+    if (url.pathname === "/api/app/context" && req.method === "GET") {
+      return json(res, 200, await appContext().catch((error) => ({ ok: false, error: String(error?.message || error) })));
+    }
+    if (url.pathname === "/api/app/mcp-tools") {
+      try {
+        if (req.method === "GET") return json(res, 200, await localTools());
+        if (req.method === "POST") return json(res, 200, await setLocalTool(await readJsonBody(req)));
+        return json(res, 405, { error: "Method not allowed" });
+      } catch (error) {
+        return json(res, error.status || 500, { ok: false, error: String(error?.message || error) });
+      }
+    }
+    if (url.pathname === "/api/app/sessions" && req.method === "GET") {
+      try {
+        const query = url.searchParams;
+        return json(res, 200, await sessionsPage({
+          workspace: query.get("workspace") || "",
+          page: Math.max(1, Number.parseInt(query.get("page") || "1", 10) || 1),
+          size: Math.min(50, Math.max(1, Number.parseInt(query.get("size") || "30", 10) || 30)),
+          source: /^[a-z0-9_-]{0,40}$/i.test(query.get("source") || "") ? query.get("source") || "" : "",
+        }));
+      } catch (error) {
+        return json(res, error.status === 404 ? 404 : 502, { ok: false, error: String(error?.message || error) });
+      }
+    }
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];
     if (!route && !hostRoute) return json(res, 404, { error: "Not found" });
@@ -345,6 +398,6 @@ function isMainModule() {
 
 if (isMainModule()) {
   createUiServer().listen(port, host, () => {
-    process.stdout.write(`Honcho Agent Bridge setup: http://${host}:${port}\n`);
+    process.stdout.write(`Team Memory: http://${host}:${port}\n`);
   });
 }

@@ -210,7 +210,7 @@ test("ui open starts one detached setup screen and reuses it", async (t) => {
   assert.equal(first.body.url, `http://127.0.0.1:${port}`);
 
   const page = await fetch(`http://127.0.0.1:${port}/`);
-  assert.match(await page.text(), /다른 사람의 기억에 연결/, "it outlived the command that started it");
+  assert.match(await page.text(), /id="bridge-form"/, "it outlived the command that started it");
 
   const second = await cli(["ui", "open", "--no-browser"], uiEnv);
   assert.equal(second.body.ok, true);

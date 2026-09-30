@@ -8,7 +8,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { WRITE_TOOLS } from "../scripts/mcp-tool-defaults.mjs";
+import { ALL_TOOLS, WRITE_TOOLS } from "../scripts/mcp-tool-defaults.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = path.join(ROOT, "scripts", "mcp-server.mjs");
@@ -20,6 +20,10 @@ const EXPECTED_TOOLS = [
   "get_session_context", "list_conclusions", "query_conclusions", "create_conclusions", "delete_conclusion",
   "schedule_dream", "get_queue_status",
 ];
+
+test("the app's tool switch list is the server's tool list", () => {
+  assert.deepEqual([...ALL_TOOLS], EXPECTED_TOOLS);
+});
 
 function startApi() {
   const requests = [];

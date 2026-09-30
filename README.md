@@ -34,14 +34,20 @@ gets an answer, without reading the underlying messages.
    the hook is invoked by the agent, once per turn. Failed writes are queued in a
    spool and retried on the next hook.
 2. **Install.** `scripts/cli.mjs` detects agents, previews changes, backs up what it
-   edits, and writes the hook. `scripts/ui.mjs` is the same thing with a screen, for
-   people who do not open a terminal; `cli.mjs ui open` starts it detached and opens
+   edits, and writes the hook.
+3. **The Team Memory app.** `scripts/ui.mjs` serves `ui/`, one screen over all three
+   programs: read and search the memories, ask Honcho or a gateway model, log
+   subscription accounts in, set up collection, run the server, switch MCP tools and
+   read the audit log. Setup steps run the same CLI a terminal would; memories, the
+   gateway and the server's tool switches are relayed to those programs' own APIs
+   by `scripts/app-api.mjs`, which adds the Honcho token so the page never holds it.
+   `cli.mjs ui open` starts it detached (default `http://127.0.0.1:4180`) and opens
    the browser, which is how `/memory-setup` shows it.
-3. **Run the local stack.** `server ...` drives the Honcho Docker stack;
+4. **Run the local stack.** `server ...` drives the Honcho Docker stack;
    `host ...` installs the subscription gateway through its own CLI and supervises
    Ollama. Every chat model Honcho uses goes through the gateway's router; the router
    key comes from the gateway, not from the person installing.
-4. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server. Given
+5. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server. Given
    `honcho.mcpBridgeUrl` in its config it stops implementing the tools itself and
    relays to that bridge instead, so the tool definitions live in one place and the
    call is recorded in the bridge's audit log. `bridge connect` writes that address
@@ -135,10 +141,10 @@ gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 162 tests, no network, no Docker
+npm test          # 173 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
-npm run ui        # setup screen on localhost
+npm run ui        # the Team Memory app on localhost
 ```
 
 Tests are the contract. Several of them exist specifically to fail when something
