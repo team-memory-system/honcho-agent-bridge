@@ -13,6 +13,7 @@ import {
   dockerRouterUrl,
   PREFERRED_CHAT_MODELS,
 } from "./gateway.mjs";
+import { DEFAULT_EMBEDDING_ALIAS, EMBEDDING_ALIASES, embeddingAliasBase } from "./host-manager.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PERSONAL_MODEL_PREFIXES = CHAT_MODEL_PREFIXES;
@@ -324,7 +325,9 @@ export function personalEnvironment(text) {
     EMBEDDING_VECTOR_DIMENSIONS: "1536",
     EMBEDDING_QUERY_INSTRUCTION: "Given a personal memory search query, retrieve relevant conversation passages that answer or contextualize the query",
     EMBEDDING_MODEL_CONFIG__TRANSPORT: "openai",
-    EMBEDDING_MODEL_CONFIG__MODEL: "qwen3-embedding-honcho-8192",
+    // A new install starts on Qwen3-Embedding 4B. An install that already has
+    // vectors keeps the alias its .env names (server prepare never replaces it).
+    EMBEDDING_MODEL_CONFIG__MODEL: DEFAULT_EMBEDDING_ALIAS,
     EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL: embeddingBaseUrl,
     EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY_ENV: "LLM_OPENAI_COMPATIBLE_API_KEY",
     VECTOR_STORE_TYPE: "pgvector",
@@ -371,8 +374,10 @@ function personalHostProfile(text) {
     ollama: {
       enabled: ollamaEnabled,
       baseUrl: "http://127.0.0.1:11434",
-      baseModel: env.HONCHO_AGENT_BRIDGE_OLLAMA_BASE_MODEL || "qwen3-embedding:8b",
-      model: embeddingModel || "qwen3-embedding-honcho-8192",
+      baseModel: embeddingAliasBase(embeddingModel || DEFAULT_EMBEDDING_ALIAS)
+        || env.HONCHO_AGENT_BRIDGE_OLLAMA_BASE_MODEL
+        || EMBEDDING_ALIASES[DEFAULT_EMBEDDING_ALIAS],
+      model: embeddingModel || DEFAULT_EMBEDDING_ALIAS,
       contextLength: Number(env.EMBEDDING_MAX_INPUT_TOKENS || 8192),
       dimensions: Number(env.EMBEDDING_VECTOR_DIMENSIONS || 1536),
       keepAlive: -1,

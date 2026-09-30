@@ -28,5 +28,13 @@ into the app directory's `runtime/subscription-gateway`, not here: it runs as it
 own program, and its own autostart points at those files. Update the pinned commit
 only after verifying the new gateway with this installer.
 
+Embeddings use Qwen3-Embedding 4B (`qwen3-embedding:4b`, 1536 dimensions, an
+8192-token context) through the Ollama alias `qwen3-embedding-4b-honcho-8192`.
+An install whose `.env` already names the earlier 8B alias
+`qwen3-embedding-honcho-8192` keeps it, because its stored vectors were made by
+8B; that alias is only ever created from `qwen3-embedding:8b`. No Modelfile is
+bundled: host prepare writes one from the alias's own base into the host runtime
+directory right before `ollama create`.
+
 Never add `.env`, database exports, Docker volumes, API keys, bearer tokens, or
 Cloudflare credentials to a release.

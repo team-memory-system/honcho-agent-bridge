@@ -345,6 +345,7 @@ async function personalBundle(root) {
   await fsp.writeFile(path.join(source, "compose.yaml"), "name: test\n");
   await fsp.writeFile(path.join(source, "host-profile.personal.json"), JSON.stringify({
     gateway: { uiUrl: "http://127.0.0.1:11450", routerUrl: "http://127.0.0.1:11400/v1" },
+    ollama: { enabled: true, model: "qwen3-embedding-4b-honcho-8192", baseModel: "qwen3-embedding:4b", contextLength: 8192 },
   }));
   await fsp.writeFile(path.join(source, "gateway-source.json"), JSON.stringify({
     repo: "https://github.com/team-memory-system/subscription-gateway",
@@ -361,13 +362,61 @@ DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11400/v1
 DERIVER_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_VLLM_API_KEY
 EMBEDDING_MAX_INPUT_TOKENS=8192
 EMBEDDING_MODEL_CONFIG__TRANSPORT=openai
-EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-honcho-8192
+EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-4b-honcho-8192
 EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11434/v1
 EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_OPENAI_COMPATIBLE_API_KEY
 DIALECTIC_LEVELS__high__MODEL_CONFIG__THINKING_EFFORT=low
 `);
   return source;
 }
+
+test("personal server prepare keeps the embedding alias an existing install already has", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-embedding-keep-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const prepareWith = async (destination) => {
+    let installedEnvironment = "";
+    const result = await serverPrepare({
+      profile: "personal",
+      hostRuntime: {
+        status: async () => ({ running: false }),
+        prepare: async ({ installedServerDir }) => {
+          installedEnvironment = await fsp.readFile(path.join(installedServerDir, ".env"), "utf8");
+          return { ok: true, ready: true };
+        },
+      },
+      preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+      honchoSourceFetcher: noFetch,
+      ...gatewayStub(),
+      serverDirectory: destination,
+    });
+    assert.equal(result.ok, true, result.issues?.join(", "));
+    return installedEnvironment;
+  };
+
+  // Its vectors were made by 8B: the 4B template must not replace the alias.
+  const existing = path.join(root, "existing");
+  await fsp.mkdir(existing, { recursive: true });
+  await fsp.writeFile(path.join(existing, ".env"), [
+    "POSTGRES_PASSWORD=private-existing-password",
+    "EMBEDDING_MODEL_CONFIG__TRANSPORT=openai",
+    "EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-honcho-8192",
+    "",
+  ].join("\n"), { mode: 0o600 });
+  const kept = await prepareWith(existing);
+  assert.match(kept, /^EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-honcho-8192$/m);
+  assert.equal(kept.includes("qwen3-embedding-4b-honcho-8192"), false);
+  assert.equal((kept.match(/^EMBEDDING_MODEL_CONFIG__MODEL=/gm) || []).length, 1);
+
+  // An alias the table does not know is still replaced by the profile's.
+  const unknown = path.join(root, "unknown");
+  await fsp.mkdir(unknown, { recursive: true });
+  await fsp.writeFile(path.join(unknown, ".env"), "EMBEDDING_MODEL_CONFIG__MODEL=some-other-embedder\n", { mode: 0o600 });
+  assert.match(await prepareWith(unknown), /^EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-4b-honcho-8192$/m);
+
+  // A new install starts on 4B.
+  assert.match(await prepareWith(path.join(root, "fresh")), /^EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-4b-honcho-8192$/m);
+});
 
 test("personal server prepare adds missing safe profile settings without replacing other secrets or custom values", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-personal-profile-merge-"));
@@ -1321,7 +1370,7 @@ test("personal prepare writes the gateway's router, key and chosen model into th
   }
   // Embeddings stay on Ollama.
   assert.equal(environment.EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL, "http://host.docker.internal:11434/v1");
-  assert.equal(environment.EMBEDDING_MODEL_CONFIG__MODEL, "qwen3-embedding-honcho-8192");
+  assert.equal(environment.EMBEDDING_MODEL_CONFIG__MODEL, "qwen3-embedding-4b-honcho-8192", "a new install starts on Qwen3-Embedding 4B");
   assert.equal(environment.LLM_OPENAI_COMPATIBLE_API_KEY, "ollama-local");
   assert.equal(text.includes("11435"), false);
   assert.equal((text.match(/^LLM_VLLM_API_KEY=/gm) || []).length, 1);
@@ -1503,7 +1552,14 @@ test("personal plan shows the gateway steps and asks for no key", async (t) => {
   const source = await personalBundle(root);
   await fsp.mkdir(path.join(source, "host"), { recursive: true });
   await fsp.writeFile(path.join(source, "host", "supervisor.mjs"), "// supervisor\n");
-  await fsp.writeFile(path.join(source, "host", "qwen3-embedding-8192.Modelfile"), "FROM qwen3-embedding:8b\n");
+  // No Modelfile is bundled: host prepare writes one from the alias's own base.
+  const installed = path.join(root, "installed");
+  const previousServerDir = process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR;
+  process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR = installed;
+  t.after(() => {
+    if (previousServerDir === undefined) delete process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR;
+    else process.env.HONCHO_AGENT_BRIDGE_SERVER_DIR = previousServerDir;
+  });
   const inspectors = {
     profile: "personal",
     platform: "darwin",
@@ -1530,6 +1586,18 @@ test("personal plan shows the gateway steps and asks for no key", async (t) => {
     "install-bundle",
     "prepare-ollama",
   ]);
+  const ollamaStep = plan.operations.at(-1);
+  assert.equal(ollamaStep.model, "qwen3-embedding-4b-honcho-8192");
+  assert.equal(ollamaStep.note, "qwen3-embedding:4b and its 8192-token alias qwen3-embedding-4b-honcho-8192");
+
+  // An existing install keeps its alias, and the plan says so.
+  await fsp.mkdir(installed, { recursive: true });
+  await fsp.writeFile(path.join(installed, ".env"), "EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-honcho-8192\n");
+  const existingPlan = await serverPlan({ ...inspectors, gatewaySourceInspector: async () => ({ state: "current", present: true, fetchable: false }) });
+  const existingStep = existingPlan.operations.find((item) => item.type === "prepare-ollama");
+  assert.equal(existingStep.baseModel, "qwen3-embedding:8b");
+  assert.equal(existingStep.note, "qwen3-embedding:8b and its 8192-token alias qwen3-embedding-honcho-8192");
+  await fsp.rm(installed, { recursive: true, force: true });
   assert.equal(plan.gateway.uiUrl, "http://127.0.0.1:11450");
   assert.equal(plan.gateway.routerUrl, "http://127.0.0.1:11400/v1");
   assert.match(plan.warnings.join(" "), /Subscription gateway source will be downloaded from https:\/\/github\.com\/team-memory-system\/subscription-gateway \(main\)/);

@@ -64,6 +64,9 @@ test("setup takes the API token from HONCHO_API_TOKEN and doctor's health check 
 
   const withoutToken = await runCli(["setup", "plan", ...setup.slice(2)], env);
   assert.ok(withoutToken.warnings.some((line) => /requires an API token; set HONCHO_API_TOKEN/.test(line)));
+  const wrongToken = await runCli(["setup", "plan", ...setup.slice(2)], { ...env, HONCHO_API_TOKEN: "not-the-token" });
+  assert.ok(wrongToken.warnings.some((line) => /rejected the API token/.test(line)), "a wrong token is not reported as a missing one");
+  assert.equal(wrongToken.warnings.some((line) => /requires an API token/.test(line)), false);
 
   const refused = await runCli([...setup, "--api-token", "on-the-command-line"], env);
   assert.equal(refused.ready, false);

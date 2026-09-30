@@ -385,7 +385,9 @@ async function setupPlan(options = {}) {
   const health = await probe(`${config.honcho.baseUrl.replace(/\/+$/, "")}/health`, 1500, authHeaders(config));
   const managed = health.ok ? managedByThisInstall(config.honcho.baseUrl) : null;
   if (health.status === 401) {
-    warnings.push(`${publicUrl(config.honcho.baseUrl)} requires an API token; set ${HONCHO_API_TOKEN_ENV} in your shell and run setup again`);
+    warnings.push(config.honcho.apiToken
+      ? `${publicUrl(config.honcho.baseUrl)} rejected the API token; check the token for that server`
+      : `${publicUrl(config.honcho.baseUrl)} requires an API token; set ${HONCHO_API_TOKEN_ENV} in your shell and run setup again`);
   }
   if (health.ok && managed === false) {
     warnings.push(`A Honcho server answers at ${publicUrl(config.honcho.baseUrl)}, but it is not the server this plugin installed on this computer (it may be a tunnel to another machine). Confirm it is yours before collecting into it.`);

@@ -13,6 +13,7 @@ const OPERATIONS = {
   "merge-hook": (op) => `${op.agent === "codex" ? "Codex" : "Claude Code"}에 대화가 끝날 때마다 모으는 훅을 넣습니다.`,
   "use-plugin-hook": (op) => `${op.agent === "codex" ? "Codex" : "Claude Code"}는 플러그인에 든 훅을 씁니다.`,
   "remove-legacy-managed-hook": (op) => `${op.agent === "codex" ? "Codex" : "Claude Code"}에 예전 방식으로 넣었던 훅을 뺍니다.`,
+  "remove-managed-hook": (op) => `${op.agent === "codex" ? "Codex" : "Claude Code"}에서는 대화를 모으지 않으니 넣어 둔 수집 훅이 있으면 뺍니다.`,
   "remove-hook": (op) => `${op.agent === "codex" ? "Codex" : "Claude Code"}에서 수집 훅을 뺍니다.`,
   "write-config": () => "이 컴퓨터의 수집 설정을 저장합니다.",
   "write-mcp-tool-defaults": (op) => `기억을 바꾸는 MCP 도구 ${op.disabled?.length || 0}개를 꺼 둔 채로 시작합니다.`,
@@ -22,6 +23,12 @@ const WARNINGS = [
   [/(\w+) collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in (\w+)/, (m) => `${m[2] === "codex" ? "Codex" : "Claude Code"}에 팀 메모리 플러그인이 켜져 있지 않습니다. 플러그인을 켜야 대화가 모입니다.`],
   [/A Honcho server answers at (\S+), but it is not the server this plugin installed/, (m) => `${m[1]}에 기억 서버가 있지만 이 앱이 설치한 서버는 아닙니다. 내 서버가 맞는지 확인하세요.`],
   [/requires an API token/, () => "이 서버는 토큰이 필요합니다. 서버 토큰 칸을 채우세요."],
+  [/rejected the API token/, () => "서버가 이 토큰을 받지 않습니다. 서버를 둔 컴퓨터의 토큰이 맞는지 확인하세요."],
+  [/at least one detected agent must be selected/, () => "대화를 모을 에이전트를 하나 이상 고르세요. 이 컴퓨터에 설치된 Claude Code나 Codex만 고를 수 있습니다."],
+  [/The API token saved for (\S+) is not carried to (\S+)/, (m) => `${m[1]}에 쓰던 토큰은 ${m[2]}로 옮기지 않습니다. 새 서버의 토큰을 넣으세요.`],
+  [/This computer has a Honcho server installed at (\S+), but collection goes to (\S+)\./, (m) => `이 컴퓨터에 ${m[1]} 기억 서버가 설치돼 있는데, 대화는 ${m[2]}로 보내게 돼 있습니다. 이 컴퓨터 서버로 모으려면 기억 서버 주소에 ${m[1]}을 넣으세요.`],
+  [/Honcho URL is invalid/, () => "기억 서버 주소가 올바르지 않습니다."],
+  [/Honcho URL must not contain credentials/, () => "기억 서버 주소에 아이디·비밀번호·물음표 뒤 값을 넣지 마세요. 토큰은 서버 토큰 칸에 넣습니다."],
 ];
 
 function explainWarning(text) {

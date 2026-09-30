@@ -112,7 +112,7 @@ export default {
           ? h("label", { class: "field" }, h("span", {}, "모델"), select(state.models.map((model) => [model, model]), state.model, (value) => { state.model = value; savePrefs({ askModel: value }); }, "모델"))
           : h("span", { class: "muted" }, state.gatewayError ? "구독 게이트웨이가 꺼져 있어 모델을 쓸 수 없습니다." : "쓸 수 있는 모델이 없습니다."),
         );
-        if (!state.models.length) nodes.push(button("모델·계정으로", { kind: "small", onClick: () => go("models") }));
+        if (!state.models.length) nodes.push(button("게이트웨이로", { kind: "small", onClick: () => go("models") }));
       }
       clear(bar, nodes);
     }

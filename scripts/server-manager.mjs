@@ -22,7 +22,15 @@ import {
   loopbackUrl,
   prepareGateway,
 } from "./gateway.mjs";
-import { hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
+import {
+  DEFAULT_EMBEDDING_ALIAS,
+  EMBEDDING_ALIASES,
+  embeddingAliasBase,
+  hostPrepare,
+  hostStart,
+  hostStatus,
+  hostStop,
+} from "./host-manager.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 import { cloneSource, gitAvailable, readSourcePin } from "./source-pin.mjs";
 import { isWrappedHoncho, prepareHonchoTree } from "./honcho-source.mjs";
@@ -404,6 +412,11 @@ function mergePersonalProfileEnvironment(currentText, profileText) {
     if (isSecretEnvironmentKey(key)) continue;
     if (isManagedPersonalTopologyKey(key) || !(key in current)) values[key] = value;
   }
+  // The vectors already in this install's database were made by the embedding
+  // alias it names, so a known alias is kept even when the template names another.
+  if (embeddingAliasBase(current.EMBEDDING_MODEL_CONFIG__MODEL)) {
+    values.EMBEDDING_MODEL_CONFIG__MODEL = current.EMBEDDING_MODEL_CONFIG__MODEL;
+  }
   const withoutConflictingModelKeys = currentText.split(/\r?\n/).filter((line) => {
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
     if (!match || !isPersonalModelConfigKey(match[1])) return true;
@@ -490,8 +503,23 @@ async function gatewayAddresses(bundleDirectory) {
   };
 }
 
+/**
+ * The embedding alias prepare is going to make ready: the known alias an installed
+ * .env already names (its vectors were made by it), otherwise the bundled profile's.
+ */
+async function plannedEmbedding(bundleDirectory, installDirectory) {
+  let profile = null;
+  try { profile = JSON.parse(await fsp.readFile(path.join(bundleDirectory, "host-profile.personal.json"), "utf8")); }
+  catch {}
+  const installed = (await readEnvironmentFile(path.join(installDirectory, ".env"))).EMBEDDING_MODEL_CONFIG__MODEL;
+  const model = embeddingAliasBase(installed) ? installed : (profile?.ollama?.model || DEFAULT_EMBEDDING_ALIAS);
+  const baseModel = embeddingAliasBase(model) || profile?.ollama?.baseModel || EMBEDDING_ALIASES[DEFAULT_EMBEDDING_ALIAS];
+  const contextLength = Number(profile?.ollama?.contextLength) || 8192;
+  return { model, baseModel, contextLength };
+}
+
 /** What `server prepare --profile personal` is going to do, in order. */
-function personalOperations({ honchoSource, gateway, bundle, installDirectory }) {
+function personalOperations({ honchoSource, gateway, bundle, installDirectory, embedding }) {
   const operations = [];
   if (!honchoSource.present && honchoSource.fetchable) {
     operations.push({ type: "fetch-honcho-source", repo: honchoSource.pin.repo, ref: honchoSource.pin.commit || honchoSource.pin.ref });
@@ -522,7 +550,12 @@ function personalOperations({ honchoSource, gateway, bundle, installDirectory })
       note: "the router address, its key and the chosen chat model for every chat setting; embeddings stay on Ollama",
     },
     { type: "install-bundle", source: bundle.directory, destination: installDirectory },
-    { type: "prepare-ollama", note: "qwen3-embedding:8b and its 8192-token alias" },
+    {
+      type: "prepare-ollama",
+      model: embedding.model,
+      baseModel: embedding.baseModel,
+      note: `${embedding.baseModel} and its ${embedding.contextLength}-token alias ${embedding.model}`,
+    },
   );
   return operations;
 }
@@ -564,7 +597,7 @@ export async function serverPlan({
     if (platform === "linux") {
       issues.push("The personal host profile currently requires macOS or Windows; use the portable profile on native Linux");
     }
-    const hostAssets = ["host-profile.personal.json", "host/supervisor.mjs", "host/qwen3-embedding-8192.Modelfile"];
+    const hostAssets = ["host-profile.personal.json", "host/supervisor.mjs"];
     const missingHostAssets = [];
     for (const asset of hostAssets) if (!(await exists(path.join(bundle.directory, asset)))) missingHostAssets.push(asset);
     if (missingHostAssets.length) issues.push(`The personal host runtime is incomplete: ${missingHostAssets.join(", ")}`);
@@ -602,7 +635,9 @@ export async function serverPlan({
       issues.push(operationError(error));
     }
   }
-  const operations = gateway ? personalOperations({ honchoSource, gateway, bundle, installDirectory }) : null;
+  const operations = gateway
+    ? personalOperations({ honchoSource, gateway, bundle, installDirectory, embedding: await plannedEmbedding(bundle.directory, installDirectory) })
+    : null;
   if (operations && dockerApp && !docker.running) operations.unshift({ type: "start-docker-desktop", app: dockerApp });
   return {
     ok: issues.length === 0,
@@ -1746,7 +1781,9 @@ export async function serverVerify({
   let rawStatus = null;
   try { rawStatus = await statusInspector({ profile, serverDirectory: directory }); } catch {}
   const status = statusSummary(rawStatus);
-  const embeddingModel = rawStatus?.host?.ollama?.model || "qwen3-embedding-honcho-8192";
+  const embeddingModel = rawStatus?.host?.ollama?.model
+    || (await readEnvironmentFile(path.join(directory, ".env"))).EMBEDDING_MODEL_CONFIG__MODEL
+    || DEFAULT_EMBEDDING_ALIAS;
 
   const [embedding, containerHost, honcho, completion] = await Promise.all([
     verifyOllamaEmbedding({ fetchImpl, model: embeddingModel, timeoutMs: requestTimeoutMs }),

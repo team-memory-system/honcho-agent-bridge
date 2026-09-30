@@ -119,7 +119,9 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.match(profile, /^EMBEDDING_MAX_INPUT_TOKENS=8192$/m);
   assert.match(profile, /^EMBEDDING_MAX_TOKENS_PER_REQUEST=8192$/m);
   assert.match(profile, /^EMBEDDING_VECTOR_DIMENSIONS=1536$/m);
-  assert.match(profile, /^EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-honcho-8192$/m);
+  // The owner's own install runs the 8B alias; a new team install starts on 4B.
+  assert.match(profile, /^EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-4b-honcho-8192$/m);
+  assert.equal(profile.includes("qwen3-embedding-honcho-8192"), false);
   assert.match(profile, /^EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http:\/\/host\.docker\.internal:11434\/v1$/m);
   assert.match(profile, /^EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY_ENV=LLM_OPENAI_COMPATIBLE_API_KEY$/m);
   assert.match(profile, /^EMBEDDING_QUERY_INSTRUCTION=Given a personal memory search query,/m);
@@ -170,7 +172,12 @@ test("distribution includes source and topology but excludes state and secrets",
     await assert.rejects(fsp.access(path.join(bundle, "server", "honcho", name)));
   }
   assert.equal(hostProfile.ollama.enabled, true);
-  assert.equal(hostProfile.ollama.model, "qwen3-embedding-honcho-8192");
+  assert.equal(hostProfile.ollama.model, "qwen3-embedding-4b-honcho-8192");
+  assert.equal(hostProfile.ollama.baseModel, "qwen3-embedding:4b");
+  await assert.rejects(
+    fsp.access(path.join(bundle, "server", "host", "qwen3-embedding-8192.Modelfile")),
+    "the Modelfile is generated from the alias's base at prepare time, not bundled",
+  );
   assert.equal(hostProfile.ollama.dimensions, 1536);
   assert.equal(hostProfile.ollama.contextLength, 8192);
   assert.equal(hostProfile.ollama.keepAlive, -1);

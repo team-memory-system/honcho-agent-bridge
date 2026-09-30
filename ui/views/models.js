@@ -1,4 +1,4 @@
-// 모델·계정: the subscription gateway, seen from here. Log Codex and Claude
+// 게이트웨이: the subscription gateway, seen from here. Log Codex and Claude
 // accounts in, choose how they share the load, try a model, and choose the one
 // the memory server thinks with. Everything is the gateway's own API; this page
 // only puts it in one place.
@@ -19,14 +19,14 @@ function planLabel(plan) {
 }
 
 export default {
-  title: "모델·계정",
-  async mount(page) {
+  title: "게이트웨이",
+  async mount(page, params) {
     const body = h("div", { class: "pad" });
     const refresh = button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침" });
     page.append(
       pageHead({
-        title: "모델·계정",
-        subtitle: "Codex·Claude 구독 계정을 API처럼 씁니다. 기억 서버도 여기 계정으로 생각합니다.",
+        title: "구독 게이트웨이",
+        subtitle: "Codex·Claude 구독 계정을 모델 API로 바꿔 줍니다. 계정, 나눠 쓰는 방식, 모델, 기억 서버가 쓰는 모델을 여기서 정합니다.",
         actions: [
           app.context?.gatewayUiUrl ? h("a", { class: "btn quiet", href: app.context.gatewayUiUrl, target: "_blank", rel: "noreferrer" }, "게이트웨이 화면") : null,
           refresh,
@@ -197,13 +197,7 @@ export default {
     }
 
     function accountsSection(accounts, serving) {
-      const add = (backend) => async (event) => {
-        await busy(event.currentTarget, async () => {
-          const result = await gateway.post("/accounts/add", { backend });
-          if (!result.ok) throw new Error(result.error || "계정을 추가하지 못했습니다.");
-          startWaiting(result.account.id, backend);
-        });
-      };
+      const add = (backend) => (event) => busy(event.currentTarget, () => addAccount(backend));
       return section({
         title: "구독 계정",
         note: "순서대로 쓰기에서는 위에 있는 계정을 먼저 씁니다. 같은 구독을 여러 번 넣으면 한도에 걸릴 때 다음 계정으로 넘어갑니다.",
@@ -213,6 +207,12 @@ export default {
         ? h("div", { class: "rows" }, accounts.map((account, index) => accountRow(account, index, accounts, serving)))
         : empty("아직 계정이 없습니다", "Codex나 Claude 계정을 추가하면 브라우저에서 로그인 창이 열립니다. 로그인을 마치면 여기로 돌아와 자동으로 연결됩니다."),
       );
+    }
+
+    async function addAccount(backend) {
+      const result = await gateway.post("/accounts/add", { backend });
+      if (!result.ok) throw new Error(result.error || "계정을 추가하지 못했습니다.");
+      startWaiting(result.account.id, backend);
     }
 
     function startWaiting(accountId, backend) {
@@ -333,6 +333,11 @@ export default {
     refresh.addEventListener("click", () => busy(refresh, draw));
     clear(body, h("div", { class: "empty" }, spinner()));
     await draw();
+    // Another screen's "log in" button lands here as #/models/add/<backend>.
+    if (params[0] === "add" && ["codex", "claude"].includes(params[1])) {
+      history.replaceState(null, "", "#/models");
+      if (report) await addAccount(params[1]).catch((error) => toast(error.message, "bad"));
+    }
     return { cleanup: () => clearInterval(timer) };
   },
 };

@@ -483,6 +483,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 .step.current .step-num { border-color: var(--accent); color: var(--accent); }
 .step h3 { margin: 1px 0 2px; font-size: 14.5px; font-weight: 600; }
 .step p { margin: 0 0 10px; color: var(--ink-3); font-size: 13px; }
+.step-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 
 dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0; font-size: 13px; }
 dl.facts dt { color: var(--ink-3); }

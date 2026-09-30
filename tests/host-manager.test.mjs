@@ -10,7 +10,10 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  DEFAULT_EMBEDDING_ALIAS,
+  EMBEDDING_ALIASES,
   deriveHostTopology,
+  embeddingModelfile,
   hostPlan,
   hostPrepare,
   hostStart,
@@ -149,7 +152,10 @@ test("Windows batch commands use cmd.exe without Node shell interpolation", () =
   assert.throws(() => windowsBatchInvocation("C:\\100%\\npm.cmd", [], {}), /unsupported characters/);
 });
 
-async function hostFixture(root) {
+// `embeddingModel` is what the installed .env names (null leaves it out, so the
+// bundled profile decides). `shown` overrides what `ollama show --modelfile` prints
+// for an alias; otherwise it prints the Modelfile the alias was created from.
+async function hostFixture(root, { embeddingModel = DEFAULT_EMBEDDING_ALIAS, presentModels = [], shown = {} } = {}) {
   const homeDir = path.join(root, "user");
   const appHome = path.join(root, "app");
   const serverDir = path.join(appHome, "server");
@@ -161,19 +167,20 @@ async function hostFixture(root) {
 LLM_VLLM_API_KEY=private-router-key-never-print-0123456789
 LLM_VLLM_BASE_URL=http://host.docker.internal:11400/v1
 EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://host.docker.internal:11434/v1
-EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-honcho-8192
+${embeddingModel ? `EMBEDDING_MODEL_CONFIG__MODEL=${embeddingModel}` : ""}
 EMBEDDING_MAX_INPUT_TOKENS=8192
 EMBEDDING_VECTOR_DIMENSIONS=1536
 `);
   await fsp.copyFile(new URL("../server/host/supervisor.mjs", import.meta.url), path.join(hostDir, "supervisor.mjs"));
-  await fsp.writeFile(path.join(hostDir, "qwen3-embedding-8192.Modelfile"), "FROM qwen3-embedding:8b\nPARAMETER num_ctx 8192\n");
 
   const tools = path.join(root, "tools");
   await fsp.mkdir(tools);
   const ollama = path.join(tools, "ollama");
   await fsp.writeFile(ollama, "");
   const calls = [];
-  const models = new Set();
+  const models = new Set(presentModels);
+  const created = [];
+  const modelfiles = new Map();
   const run = async (command, args) => {
     calls.push({ command, args: [...args] });
     if (command === "which") return args[0] === "ollama" ? { ok: true, stdout: `${ollama}\n` } : { ok: false };
@@ -181,11 +188,21 @@ EMBEDDING_VECTOR_DIMENSIONS=1536
     if (command === ollama && args[0] === "list") {
       return { ok: true, stdout: `NAME ID SIZE MODIFIED\n${[...models].map((model) => `${model} id 1 GB now`).join("\n")}\n` };
     }
-    if (command === ollama && (args[0] === "pull" || args[0] === "create")) { models.add(args[1]); return { ok: true }; }
-    if (command === ollama && args[0] === "show") return { ok: true, stdout: "FROM qwen3-embedding:8b\nPARAMETER num_ctx 8192\n" };
+    if (command === ollama && args[0] === "pull") { models.add(args[1]); return { ok: true }; }
+    if (command === ollama && args[0] === "create") {
+      const file = args[args.indexOf("-f") + 1];
+      const modelfile = await fsp.readFile(file, "utf8");
+      created.push({ model: args[1], file, modelfile });
+      modelfiles.set(args[1], modelfile);
+      models.add(args[1]);
+      return { ok: true };
+    }
+    if (command === ollama && args[0] === "show") {
+      return { ok: true, stdout: shown[args[2]] ?? modelfiles.get(args[2]) ?? "" };
+    }
     return { ok: true, stdout: "" };
   };
-  return { homeDir, appHome, serverDir, ollama, run, calls, gatewayDir: path.join(appHome, "runtime", "subscription-gateway") };
+  return { homeDir, appHome, serverDir, ollama, run, calls, created, gatewayDir: path.join(appHome, "runtime", "subscription-gateway") };
 }
 
 test("personal host prepare fetches and installs the gateway, creates the Qwen alias once, and writes no secret", async (t) => {
@@ -294,6 +311,144 @@ test("host prepare fails closed when the gateway cannot be fetched or installed"
   assert.equal(installFails.issues[0].includes("sk-private-token"), false, "the CLI's error is redacted before it is repeated");
   assert.equal(fixture.calls.some((call) => call.args[0] === "pull"), false, "nothing else runs after a failed gateway install");
   await assert.rejects(fsp.access(path.join(fixture.appHome, "runtime", "host", "host-config.json")));
+});
+
+function ollamaOnlyOptions(fixture) {
+  return {
+    profile: "personal",
+    installedServerDir: fixture.serverDir,
+    platform: "darwin",
+    env: { HOME: fixture.homeDir, HONCHO_AGENT_BRIDGE_HOME: fixture.appHome },
+    homeDir: fixture.homeDir,
+    run: fixture.run,
+    fetchImpl: async () => response({ version: "1.0" }),
+    skipGateway: true,
+    gatewaySourceInspector: async () => ({ state: "current", present: true, fetchable: false, directory: fixture.gatewayDir }),
+  };
+}
+
+test("embedding aliases each have one fixed base, and topology keeps the alias an installed .env names", () => {
+  assert.deepEqual(EMBEDDING_ALIASES, {
+    "qwen3-embedding-4b-honcho-8192": "qwen3-embedding:4b",
+    "qwen3-embedding-honcho-8192": "qwen3-embedding:8b",
+  });
+  assert.equal(DEFAULT_EMBEDDING_ALIAS, "qwen3-embedding-4b-honcho-8192");
+  assert.equal(embeddingModelfile({ baseModel: "qwen3-embedding:4b", contextLength: 8192 }), "FROM qwen3-embedding:4b\nPARAMETER num_ctx 8192\n");
+
+  const root = path.join(os.tmpdir(), "honcho-agent-bridge-embedding-alias");
+  const homeDir = path.join(root, "home");
+  const paths = { ...resolveHostPaths({ installedServerDir: path.join(root, "server"), platform: "darwin", env: {}, homeDir }), homeDir, env: {} };
+  const bundled = { ollama: { enabled: true, model: "qwen3-embedding-4b-honcho-8192", baseModel: "qwen3-embedding:4b", contextLength: 8192 } };
+
+  const fresh = deriveHostTopology({ environment: {}, profileConfig: bundled, paths });
+  assert.equal(fresh.ollama.model, "qwen3-embedding-4b-honcho-8192");
+  assert.equal(fresh.ollama.baseModel, "qwen3-embedding:4b");
+
+  const existing = deriveHostTopology({ environment: { EMBEDDING_MODEL_CONFIG__MODEL: "qwen3-embedding-honcho-8192" }, profileConfig: bundled, paths });
+  assert.equal(existing.ollama.model, "qwen3-embedding-honcho-8192", "the installed alias made the stored vectors");
+  assert.equal(existing.ollama.baseModel, "qwen3-embedding:8b", "the base comes from the alias table, not the bundled profile");
+
+  const mislabelled = deriveHostTopology({
+    environment: {},
+    profileConfig: { ollama: { model: "qwen3-embedding-honcho-8192", baseModel: "qwen3-embedding:4b" } },
+    paths,
+  });
+  assert.equal(mislabelled.ollama.baseModel, "qwen3-embedding:8b", "a known alias is never paired with another base");
+
+  const custom = deriveHostTopology({ environment: { EMBEDDING_MODEL_CONFIG__MODEL: "my-embedder" }, profileConfig: bundled, paths });
+  assert.equal(custom.ollama.model, "qwen3-embedding-4b-honcho-8192", "an unknown installed alias does not override the profile");
+
+  const noProfile = deriveHostTopology({ environment: {}, paths });
+  assert.equal(noProfile.ollama.model, "qwen3-embedding-4b-honcho-8192");
+  assert.equal(noProfile.ollama.baseModel, "qwen3-embedding:4b");
+});
+
+test("a fresh personal host prepare creates the 4B alias from a Modelfile generated for it", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-host-4b-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const fixture = await hostFixture(root, { embeddingModel: null });
+  const options = ollamaOnlyOptions(fixture);
+
+  const plan = await hostPlan(options);
+  assert.equal(plan.ready, true, plan.issues?.join(", "));
+  assert.equal(plan.topology.ollama.model, "qwen3-embedding-4b-honcho-8192");
+  assert.equal(plan.topology.ollama.baseModel, "qwen3-embedding:4b");
+  assert.deepEqual(plan.operations.filter((item) => item.type.startsWith("ollama-")), [
+    { type: "ollama-pull", model: "qwen3-embedding:4b" },
+    { type: "ollama-create", model: "qwen3-embedding-4b-honcho-8192", baseModel: "qwen3-embedding:4b" },
+  ]);
+
+  const prepared = await hostPrepare(options);
+  assert.equal(prepared.ready, true, prepared.issues?.join(", "));
+  assert.deepEqual(fixture.calls.filter((call) => call.args[0] === "pull").map((call) => call.args[1]), ["qwen3-embedding:4b"]);
+  assert.equal(fixture.created.length, 1);
+  const [created] = fixture.created;
+  assert.equal(created.model, "qwen3-embedding-4b-honcho-8192");
+  assert.equal(created.file, path.join(fixture.appHome, "runtime", "host", "qwen3-embedding-4b-honcho-8192.Modelfile"));
+  assert.equal(created.modelfile, "FROM qwen3-embedding:4b\nPARAMETER num_ctx 8192\n");
+  if (process.platform !== "win32") assert.equal((await fsp.stat(created.file)).mode & 0o777, 0o600);
+  const config = JSON.parse(await fsp.readFile(prepared.configFile, "utf8"));
+  assert.equal(config.ollama.model, "qwen3-embedding-4b-honcho-8192");
+  assert.equal(config.ollama.baseModel, "qwen3-embedding:4b");
+
+  const again = await hostPlan(options);
+  assert.equal(again.ollama.aliasMatches, true);
+  assert.equal(again.operations.some((item) => item.type.startsWith("ollama-")), false);
+});
+
+test("an install whose .env names the 8B alias keeps it and only ever creates it from 8B", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-host-8b-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  // The bundled host profile (copied by the fixture) now names the 4B alias.
+  const bundled = JSON.parse(await fsp.readFile(new URL("../server/host-profile.personal.json", import.meta.url), "utf8"));
+  assert.equal(bundled.ollama.model, "qwen3-embedding-4b-honcho-8192");
+  const fixture = await hostFixture(root, { embeddingModel: "qwen3-embedding-honcho-8192" });
+  const options = ollamaOnlyOptions(fixture);
+
+  const plan = await hostPlan(options);
+  assert.equal(plan.ready, true, plan.issues?.join(", "));
+  assert.equal(plan.topology.ollama.model, "qwen3-embedding-honcho-8192");
+  assert.equal(plan.topology.ollama.baseModel, "qwen3-embedding:8b");
+
+  const prepared = await hostPrepare(options);
+  assert.equal(prepared.ready, true, prepared.issues?.join(", "));
+  assert.deepEqual(fixture.calls.filter((call) => call.args[0] === "pull").map((call) => call.args[1]), ["qwen3-embedding:8b"]);
+  assert.deepEqual(fixture.created.map((item) => [item.model, item.modelfile]), [
+    ["qwen3-embedding-honcho-8192", "FROM qwen3-embedding:8b\nPARAMETER num_ctx 8192\n"],
+  ]);
+  assert.equal(fixture.calls.some((call) => call.args.includes("qwen3-embedding:4b")), false, "nothing touches the 4B base");
+  assert.equal(fixture.calls.some((call) => call.args.includes("qwen3-embedding-4b-honcho-8192")), false);
+  const config = JSON.parse(await fsp.readFile(prepared.configFile, "utf8"));
+  assert.equal(config.ollama.model, "qwen3-embedding-honcho-8192");
+});
+
+test("an existing alias that names another known base is recreated from the base its table entry fixes", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-host-alias-base-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  // What `ollama show --modelfile` prints for a healthy alias: a commented hint and a blob path.
+  const healthy = "# Modelfile generated by \"ollama show\"\n# FROM qwen3-embedding-honcho-8192:latest\n\nFROM /models/blobs/sha256-abc\nPARAMETER num_ctx 8192\n";
+  const kept = await hostFixture(path.join(root, "kept"), {
+    embeddingModel: "qwen3-embedding-honcho-8192",
+    presentModels: ["qwen3-embedding:8b", "qwen3-embedding-honcho-8192:latest"],
+    shown: { "qwen3-embedding-honcho-8192": healthy },
+  });
+  const keptPlan = await hostPlan(ollamaOnlyOptions(kept));
+  assert.equal(keptPlan.ollama.aliasMatches, true);
+  assert.equal(keptPlan.operations.some((item) => item.type.startsWith("ollama-")), false, "a healthy production alias is left alone");
+
+  const wrong = await hostFixture(path.join(root, "wrong"), {
+    embeddingModel: "qwen3-embedding-honcho-8192",
+    presentModels: ["qwen3-embedding:8b", "qwen3-embedding-honcho-8192"],
+    shown: { "qwen3-embedding-honcho-8192": "FROM qwen3-embedding:4b\nPARAMETER num_ctx 8192\n" },
+  });
+  const wrongPlan = await hostPlan(ollamaOnlyOptions(wrong));
+  assert.equal(wrongPlan.ollama.aliasPresent, true);
+  assert.equal(wrongPlan.ollama.aliasMatches, false);
+  const prepared = await hostPrepare(ollamaOnlyOptions(wrong));
+  assert.equal(prepared.ready, true, prepared.issues?.join(", "));
+  assert.deepEqual(wrong.created.map((item) => [item.model, item.modelfile]), [
+    ["qwen3-embedding-honcho-8192", "FROM qwen3-embedding:8b\nPARAMETER num_ctx 8192\n"],
+  ]);
 });
 
 async function writeRuntimeConfig(paths, ollama = { enabled: true, baseUrl: "http://127.0.0.1:11434", model: "qwen3-embedding-honcho-8192" }) {

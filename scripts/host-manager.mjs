@@ -36,6 +36,45 @@ import { securePrivateFile } from "./private-file-permissions.mjs";
 const execFileAsync = promisify(execFile);
 const FORMAT_VERSION = 1;
 
+/**
+ * The Ollama aliases the personal profile knows, each with the one base model it
+ * must be created from. A new install starts on the 4B alias. The 8B alias is what
+ * earlier installs created; their stored vectors were made by 8B, so that alias is
+ * kept and is only ever (re)created from 8B.
+ */
+export const EMBEDDING_ALIASES = Object.freeze({
+  "qwen3-embedding-4b-honcho-8192": "qwen3-embedding:4b",
+  "qwen3-embedding-honcho-8192": "qwen3-embedding:8b",
+});
+export const DEFAULT_EMBEDDING_ALIAS = "qwen3-embedding-4b-honcho-8192";
+const KNOWN_EMBEDDING_BASES = new Set(Object.values(EMBEDDING_ALIASES));
+
+/** The base model a known alias is made from, or "" for an alias this table does not know. */
+export function embeddingAliasBase(alias) {
+  const name = String(alias || "").trim().replace(/:latest$/, "");
+  return Object.hasOwn(EMBEDDING_ALIASES, name) ? EMBEDDING_ALIASES[name] : "";
+}
+
+/** The Modelfile an alias is created from. */
+export function embeddingModelfile({ baseModel, contextLength }) {
+  return `FROM ${baseModel}\nPARAMETER num_ctx ${contextLength}\n`;
+}
+
+/**
+ * True when `ollama show --modelfile` output names a known Qwen3 base other than
+ * the expected one on an uncommented FROM line. Blob paths and the commented
+ * `# FROM <alias>` hint say nothing about the base, so they never count.
+ */
+function namesOtherKnownBase(modelfileText, baseModel) {
+  for (const line of String(modelfileText || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*FROM\s+(\S+)\s*$/i);
+    if (!match) continue;
+    const named = match[1].replace(/:latest$/, "");
+    if (KNOWN_EMBEDDING_BASES.has(named) && named !== baseModel) return true;
+  }
+  return false;
+}
+
 async function exists(target) {
   try { await fsp.access(target); return true; } catch { return false; }
 }
@@ -73,7 +112,8 @@ export function resolveHostPaths({
     logDir,
     gatewayDir: gatewayDirectory(serverDir),
     supervisorFile: path.join(serverDir, "host", "supervisor.mjs"),
-    modelfile: path.join(serverDir, "host", "qwen3-embedding-8192.Modelfile"),
+    // Generated right before `ollama create`, from the alias's own base model.
+    modelfileFor: (model) => path.join(runtimeDir, `${String(model).replace(/[^A-Za-z0-9._-]/g, "_")}.Modelfile`),
     profileFile: (profile) => path.join(serverDir, `host-profile.${profile}.json`),
   };
 }
@@ -181,6 +221,14 @@ export function deriveHostTopology({
   const ollamaUrl = localServiceUrl(rawOllamaUrl || "http://127.0.0.1:11434", "http://127.0.0.1:11434");
   const dimensions = numberOption(ollamaInput.dimensions || environment.EMBEDDING_VECTOR_DIMENSIONS, 1536, { min: 1, max: 65_536 });
   const contextLength = numberOption(ollamaInput.contextLength || environment.EMBEDDING_MAX_INPUT_TOKENS, 8192, { min: 256, max: 1_000_000 });
+  // The vectors already stored were made by the alias the installed .env names, so
+  // a known alias there wins over the bundled profile's (which is what a new
+  // install gets). The alias's base model always comes from EMBEDDING_ALIASES.
+  const installedModel = environment.EMBEDDING_MODEL_CONFIG__MODEL;
+  const model = validModel(
+    embeddingAliasBase(installedModel) ? String(installedModel).trim() : (ollamaInput.model || installedModel),
+    DEFAULT_EMBEDDING_ALIAS,
+  );
   return {
     format: FORMAT_VERSION,
     platform,
@@ -189,8 +237,8 @@ export function deriveHostTopology({
       enabled: Boolean(ollamaEnabled),
       baseUrl: ollamaUrl,
       executable: String(ollamaInput.executable || "ollama"),
-      model: validModel(ollamaInput.model || environment.EMBEDDING_MODEL_CONFIG__MODEL, "qwen3-embedding-honcho-8192"),
-      baseModel: validModel(ollamaInput.baseModel, "qwen3-embedding:8b"),
+      model,
+      baseModel: validModel(embeddingAliasBase(model) || ollamaInput.baseModel, EMBEDDING_ALIASES[DEFAULT_EMBEDDING_ALIAS]),
       contextLength,
       dimensions,
       keepAlive: keepAliveOption(ollamaInput.keepAlive),
@@ -380,7 +428,9 @@ export async function hostPlan({
     let aliasMatches = false;
     if (aliasPresent) {
       const shown = await runWith(run, topology.ollama.executable, ["show", "--modelfile", topology.ollama.model], { env, timeout: 10_000 });
-      aliasMatches = shown.ok && new RegExp(`\\bPARAMETER\\s+num_ctx\\s+${topology.ollama.contextLength}\\b`, "i").test(shown.stdout);
+      aliasMatches = shown.ok
+        && new RegExp(`\\bPARAMETER\\s+num_ctx\\s+${topology.ollama.contextLength}\\b`, "i").test(shown.stdout)
+        && !namesOtherKnownBase(shown.stdout, topology.ollama.baseModel);
     }
     ollama = {
       installed: cli.ok,
@@ -392,9 +442,8 @@ export async function hostPlan({
       aliasMatches,
     };
     if (!ollama.installed) issues.push("Ollama is not installed or is not available on PATH");
-    if (!(await exists(paths.modelfile))) issues.push("The bundled Qwen3 8192 Modelfile is missing");
-    if (topology.ollama.contextLength !== 8192 || topology.ollama.baseModel !== "qwen3-embedding:8b") {
-      issues.push("The bundled personal host profile requires qwen3-embedding:8b with an 8192-token context");
+    if (topology.ollama.contextLength !== 8192 || !KNOWN_EMBEDDING_BASES.has(topology.ollama.baseModel)) {
+      issues.push(`The personal host profile requires ${[...KNOWN_EMBEDDING_BASES].join(" or ")} with an 8192-token context`);
     }
     if (ollama.installed && !ollama.running) warnings.push("Ollama is installed but not running; prepare will try to start its local service");
   }
@@ -410,7 +459,7 @@ export async function hostPlan({
   }
   operations.push({ type: "gateway-install", directory: topology.gateway.directory, uiUrl: topology.gateway.uiUrl });
   if (topology.ollama.enabled && !ollama.baseModelPresent) operations.push({ type: "ollama-pull", model: topology.ollama.baseModel });
-  if (topology.ollama.enabled && (!ollama.aliasPresent || !ollama.aliasMatches)) operations.push({ type: "ollama-create", model: topology.ollama.model });
+  if (topology.ollama.enabled && (!ollama.aliasPresent || !ollama.aliasMatches)) operations.push({ type: "ollama-create", model: topology.ollama.model, baseModel: topology.ollama.baseModel });
   operations.push({ type: "write-host-config", target: paths.configFile });
   const result = {
     ok: issues.length === 0,
@@ -524,9 +573,17 @@ export async function hostPrepare(options = {}) {
       actions.push({ type: "ollama-pull", model: topology.ollama.baseModel, changed: true });
     }
     if (!plan.ollama.aliasPresent || !plan.ollama.aliasMatches) {
-      const created = await runWith(run, topology.ollama.executable, ["create", topology.ollama.model, "-f", plan.paths.modelfile], { env: options.env || process.env, timeout: 600_000 });
+      // The Modelfile is written from the alias's own base right before the create,
+      // so an alias is never made from another model than the one its vectors need.
+      const modelfile = plan.paths.modelfileFor(topology.ollama.model);
+      await writePrivateAtomic(modelfile, embeddingModelfile(topology.ollama), 0o600, {
+        platform: options.platform || process.platform,
+        run,
+        env: options.env || process.env,
+      });
+      const created = await runWith(run, topology.ollama.executable, ["create", topology.ollama.model, "-f", modelfile], { env: options.env || process.env, timeout: 600_000 });
       if (!created.ok) return { ok: false, ready: false, profile: plan.profile, issues: ["The Qwen3 8192 model alias could not be created"], warnings: plan.warnings, actions };
-      actions.push({ type: "ollama-create", model: topology.ollama.model, changed: true });
+      actions.push({ type: "ollama-create", model: topology.ollama.model, baseModel: topology.ollama.baseModel, changed: true });
     }
   }
 
