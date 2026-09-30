@@ -38,3 +38,14 @@ test("Codex, Claude, package, and marketplace metadata stay aligned", async () =
   assert.ok(codexMcp.mcpServers["honcho-agent-bridge"]);
   assert.ok(claudeMcp.mcpServers["honcho-agent-bridge"]);
 });
+
+test("the Claude Stop hook is outside the path Codex loads plugin hooks from", async () => {
+  const [codex, claude] = await Promise.all([json(".codex-plugin/plugin.json"), json(".claude-plugin/plugin.json")]);
+  // Codex 0.157 also reads hooks/hooks.json from a plugin and offered the Claude
+  // hook for approval next to its own. Codex's hook lives in ~/.codex/hooks.json.
+  assert.equal(claude.hooks, "./hooks/claude-hooks.json");
+  assert.equal(codex.hooks, undefined);
+  await assert.rejects(fsp.access(path.join(ROOT, "hooks", "hooks.json")));
+  const hooks = await json("hooks/claude-hooks.json");
+  assert.match(hooks.hooks.Stop[0].hooks[0].command, / hook claude$/);
+});

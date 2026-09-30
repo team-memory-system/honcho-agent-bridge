@@ -1,13 +1,22 @@
 {
   "name": "honcho-agent-bridge",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Installable self-hosted personal memory shared by Codex and Claude Code.",
   "author": {
     "name": "chenjing"
   },
   "skills": "./skills/",
-  "commands": ["./commands/memory-setup.md", "./commands/memory-doctor.md"],
+  "commands": [
+    "./commands/memory-setup.md",
+    "./commands/memory-doctor.md"
+  ],
+  "hooks": "./hooks/claude-hooks.json",
   "mcpServers": "./.mcp.claude.json",
   "license": "MIT",
-  "keywords": ["memory", "honcho", "codex", "claude-code"]
+  "keywords": [
+    "memory",
+    "honcho",
+    "codex",
+    "claude-code"
+  ]
 }

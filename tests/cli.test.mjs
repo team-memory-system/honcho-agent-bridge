@@ -8,6 +8,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
+import { WRITE_TOOLS } from "../scripts/mcp-tool-defaults.mjs";
+import { VERSION } from "../scripts/version.mjs";
+
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = path.join(ROOT, "scripts", "cli.mjs");
@@ -287,8 +290,13 @@ test("doctor verifies runtime version, host plugins, Honcho access, and MCP hand
   );
   const result = await runCli(["doctor"], env);
   assert.equal(result.ok, true);
-  assert.equal(result.checks.find((check) => check.name === "runtime").actualVersion, "0.3.0");
-  assert.equal(result.checks.find((check) => check.name === "mcp").enabledToolCount, 31);
+  assert.equal(result.checks.find((check) => check.name === "runtime").actualVersion, VERSION);
+  // Setup writes the tool file with every memory-changing tool off.
+  assert.deepEqual(
+    JSON.parse(await fsp.readFile(path.join(appHome, "data", "mcp-tools.json"), "utf8")),
+    { disabled_tools: [...WRITE_TOOLS] },
+  );
+  assert.equal(result.checks.find((check) => check.name === "mcp").enabledToolCount, 31 - WRITE_TOOLS.length);
   assert.equal(result.checks.find((check) => check.name === "codex-plugin").enabled, true);
   assert.equal(result.checks.find((check) => check.name === "claude-plugin").enabled, true);
 });

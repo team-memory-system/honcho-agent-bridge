@@ -134,8 +134,18 @@ async function logAggregate(results) {
   await fsp.appendFile(logPath, `${utcNow()} ${JSON.stringify({ results })}\n`, "utf8");
 }
 
+// A host can run a hook meant for another host: Codex 0.157 loaded the Claude
+// plugin's Stop hook too, which then queued a Codex rollout as a Claude transcript.
+function foreignTranscript(provider, input) {
+  const transcript = String(input.transcript_path || "");
+  if (provider === "claude") return /[\\/]\.codex[\\/]/.test(transcript);
+  if (provider === "codex") return /[\\/]\.claude[\\/]projects[\\/]/.test(transcript);
+  return false;
+}
+
 const { provider, passthrough } = parseArgs(process.argv.slice(2));
 const hookInput = normalizeHookInput(await readHookInput());
+if (foreignTranscript(provider, hookInput)) process.exit(0);
 const providers = provider === "all" ? DEFAULT_PROVIDERS : [provider];
 const results = providers.map((item) => runGate(item, passthrough, hookInput));
 await logAggregate(results).catch(() => {});

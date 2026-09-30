@@ -1,4 +1,5 @@
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +17,17 @@ import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { formatJson, publicUrl, sanitizeUrlsInText } from "./redact.mjs";
 import { VERSION } from "./version.mjs";
-import { installedServerDir, serverPlan, serverPrepare, serverStart, serverStatus, serverStop, serverVerify } from "./server-manager.mjs";
+import { WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
+import {
+  installedServerDir,
+  installedServerPorts,
+  serverPlan,
+  serverPrepare,
+  serverStart,
+  serverStatus,
+  serverStop,
+  serverVerify,
+} from "./server-manager.mjs";
 import { hostPlan, hostPrepare, hostStart, hostStatus, hostStop } from "./host-manager.mjs";
 import { gatewayDirectory, gatewayOpen } from "./gateway.mjs";
 
@@ -37,6 +48,9 @@ const BRIDGE_SECRET_ENV = Object.freeze({
   accessClientId: "CF_ACCESS_CLIENT_ID",
   accessClientSecret: "CF_ACCESS_CLIENT_SECRET",
 });
+
+// Where setup reads the token for a Honcho server that requires one.
+const HONCHO_API_TOKEN_ENV = "HONCHO_API_TOKEN";
 
 // A shared bridge sits behind Cloudflare, so its first answer can take far longer
 // than a local MCP server's.
@@ -85,11 +99,16 @@ async function readHostJson(target) {
   return value;
 }
 
-async function probe(url, timeoutMs = 1500) {
+/** A server that requires a token answers /health with 401 without one. */
+function authHeaders(config) {
+  return config?.honcho?.apiToken ? { Authorization: `Bearer ${config.honcho.apiToken}` } : {};
+}
+
+async function probe(url, timeoutMs = 1500, headers = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { headers, signal: controller.signal });
     return { ok: response.ok, status: response.status };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
@@ -210,18 +229,53 @@ function optionString(value, fallback) {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+/**
+ * The Honcho address setup uses when none is given: the configured one, else the
+ * server this plugin installed here (its port may not be 8001), else the default.
+ */
+async function defaultHonchoUrl(config) {
+  if (config?.honcho?.baseUrl) return { url: config.honcho.baseUrl, source: "config" };
+  const ports = await installedServerPorts(installedServerDir(config));
+  if (ports.installed) return { url: `http://127.0.0.1:${ports.api}`, source: "installed-server" };
+  return { url: "http://127.0.0.1:8001", source: "default" };
+}
+
+/**
+ * Whether a local Honcho answering at `url` is this plugin's own Docker server.
+ * Something else can hold the port - on one test machine it was an SSH tunnel to
+ * another computer's Honcho - and must not be taken for the user's own server.
+ * null when it cannot be told (not a loopback address, or no Docker).
+ */
+function managedByThisInstall(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return null; }
+  if (!isLoopbackHostname(parsed.hostname)) return null;
+  const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+  try {
+    const published = execFileSync("docker", [
+      "ps",
+      "--filter", "label=com.docker.compose.project=honcho-agent-bridge",
+      "--filter", "label=com.docker.compose.service=api",
+      "--format", "{{.Ports}}",
+    ], { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] });
+    return new RegExp(`(?:127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::\\]|::):${port}->`).test(published);
+  } catch {
+    return null;
+  }
+}
+
 async function detect() {
   const paths = installPaths();
   const hostPaths = hostConfigPaths();
   const config = await loadConfig();
-  const honchoUrl = config?.honcho?.baseUrl || "http://127.0.0.1:8001";
+  const { url: honchoUrl, source: honchoUrlSource } = await defaultHonchoUrl(config);
   const [codexConfig, claudeConfig, codexSessions, codexPlugin, claudePlugin, honcho] = await Promise.all([
     pathExists(path.dirname(hostPaths.codex)),
     pathExists(path.dirname(hostPaths.claude)),
     pathExists(path.join(userHome(), ".codex", "sessions")),
     codexPluginStatus(),
     claudePluginStatus(),
-    probe(`${honchoUrl.replace(/\/+$/, "")}/health`),
+    probe(`${honchoUrl.replace(/\/+$/, "")}/health`, 1500, authHeaders(config)),
   ]);
   return {
     ok: true,
@@ -234,7 +288,12 @@ async function detect() {
       codex: { detected: codexConfig || codexSessions, plugin: codexPlugin, configPath: hostPaths.codex },
       claude: { detected: claudeConfig, plugin: claudePlugin, configPath: hostPaths.claude },
     },
-    honcho: { baseUrl: publicUrl(honchoUrl), health: honcho },
+    honcho: {
+      baseUrl: publicUrl(honchoUrl),
+      source: honchoUrlSource,
+      health: honcho,
+      managedByThisInstall: honcho.ok ? managedByThisInstall(honchoUrl) : null,
+    },
   };
 }
 
@@ -246,13 +305,16 @@ async function setupPlan(options = {}) {
     claude: detected.agents.claude.detected,
   };
   const agents = options.agents ? parseAgents(options.agents, detectedAgents) : { ...(existing?.agents || detectedAgents) };
+  // A server that requires a token (one on another computer, behind its own auth)
+  // gets it from the environment: a command line is visible to every process.
+  const apiToken = String(process.env[HONCHO_API_TOKEN_ENV] || "").trim() || existing?.honcho?.apiToken || "";
   const config = {
     version: CONFIG_VERSION,
     user: { peerId: optionString(options.userPeer, existing?.user?.peerId || "") },
     honcho: {
-      baseUrl: optionString(options.honchoUrl, existing?.honcho?.baseUrl || "http://127.0.0.1:8001"),
+      baseUrl: optionString(options.honchoUrl, (await defaultHonchoUrl(existing)).url),
       workspaceId: optionString(options.workspace, existing?.honcho?.workspaceId || "memory"),
-      ...(existing?.honcho?.apiToken ? { apiToken: existing.honcho.apiToken } : {}),
+      ...(apiToken ? { apiToken } : {}),
       // Written by `bridge connect`, not by this plan. Rebuilding the config without
       // them would silently disconnect a shared bridge on every setup run.
       ...relayFields(existing),
@@ -284,10 +346,21 @@ async function setupPlan(options = {}) {
     issues.push("Honcho URL is invalid");
   }
   if (selectedAgents.length === 0) issues.push("at least one detected agent must be selected");
+  const onCommandLine = Object.keys(options).filter((key) => /token|secret/i.test(key));
+  if (onCommandLine.length) issues.push(`pass the API token through ${HONCHO_API_TOKEN_ENV}, not the command line`);
   for (const provider of ["codex", "claude"]) {
     if (agents[provider] && !detected.agents[provider].plugin?.enabled) {
       warnings.push(`${provider} collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in ${provider}`);
     }
+  }
+  // The address this plan writes, which is not always the one detect tried.
+  const health = await probe(`${config.honcho.baseUrl.replace(/\/+$/, "")}/health`, 1500, authHeaders(config));
+  const managed = health.ok ? managedByThisInstall(config.honcho.baseUrl) : null;
+  if (health.status === 401) {
+    warnings.push(`${publicUrl(config.honcho.baseUrl)} requires an API token; set ${HONCHO_API_TOKEN_ENV} in your shell and run setup again`);
+  }
+  if (health.ok && managed === false) {
+    warnings.push(`A Honcho server answers at ${publicUrl(config.honcho.baseUrl)}, but it is not the server this plugin installed on this computer (it may be a tunnel to another machine). Confirm it is yours before collecting into it.`);
   }
   return {
     ok: issues.length === 0,
@@ -297,7 +370,7 @@ async function setupPlan(options = {}) {
     warnings,
     choices: {
       selectedAgents,
-      honchoMode: detected.honcho.health.ok ? "connect-existing" : "external-setup-required",
+      honchoMode: !health.ok ? "external-setup-required" : managed === false ? "connect-unknown-existing" : "connect-existing",
     },
     config,
     operations: [
@@ -307,11 +380,14 @@ async function setupPlan(options = {}) {
         : [{ type: "remove-managed-hook", agent: "codex", target: hostConfigPaths().codex }]),
       ...(agents.claude
         ? [
-            { type: "use-plugin-hook", agent: "claude", target: "hooks/hooks.json" },
+            { type: "use-plugin-hook", agent: "claude", target: "hooks/claude-hooks.json" },
             { type: "remove-legacy-managed-hook", agent: "claude", target: hostConfigPaths().claude },
           ]
         : [{ type: "remove-legacy-managed-hook", agent: "claude", target: hostConfigPaths().claude }]),
       { type: "write-config", target: paths.configPath },
+      ...((await pathExists(mcpToolsPath(paths)))
+        ? []
+        : [{ type: "write-mcp-tool-defaults", target: mcpToolsPath(paths), disabled: [...WRITE_TOOLS] }]),
     ],
   };
 }
@@ -328,17 +404,46 @@ function isManagedHook(document) {
   });
 }
 
+/** A managed hook for this runtime whose node binary still exists, whatever PATH doctor runs with. */
 function hasCurrentManagedHook(document, runtimeDir, provider) {
-  const expected = hookCommand(runtimeDir, provider);
+  const suffix = ` "${path.join(runtimeDir, "cli.mjs")}" hook ${provider} ${CURRENT_HOOK_MARKER}`;
+  const current = (command) => {
+    if (typeof command !== "string" || !command.endsWith(suffix)) return false;
+    const node = command.slice(0, -suffix.length).match(/^"(.+)"$/)?.[1];
+    return Boolean(node) && fs.existsSync(node);
+  };
   return (document?.hooks?.Stop || []).some((entry) => {
-    if (entry?.command === expected) return true;
-    return Array.isArray(entry?.hooks) && entry.hooks.some((handler) => handler?.command === expected);
+    if (current(entry?.command)) return true;
+    return Array.isArray(entry?.hooks) && entry.hooks.some((handler) => current(handler?.command));
   });
+}
+
+function mcpToolsPath(paths) {
+  return path.join(paths.dataDir, "mcp-tools.json");
+}
+
+/**
+ * The node the hook command names. process.execPath is the resolved binary, which
+ * on this kind of install is a versioned folder (~/.local/opt/node-v24.19.0-...)
+ * that disappears on upgrade; the PATH entry that resolves to it survives.
+ */
+function stableNodePath() {
+  let target;
+  try { target = fs.realpathSync(process.execPath); } catch { return process.execPath; }
+  const name = process.platform === "win32" ? "node.exe" : "node";
+  for (const directory of String(process.env.PATH || "").split(path.delimiter)) {
+    if (!directory) continue;
+    const candidate = path.join(directory, name);
+    try {
+      if (fs.realpathSync(candidate) === target) return candidate;
+    } catch {}
+  }
+  return process.execPath;
 }
 
 function hookCommand(runtimeDir, provider) {
   const cliPath = path.join(runtimeDir, "cli.mjs");
-  return `"${process.execPath}" "${cliPath}" hook ${provider} ${CURRENT_HOOK_MARKER}`;
+  return `"${stableNodePath()}" "${cliPath}" hook ${provider} ${CURRENT_HOOK_MARKER}`;
 }
 
 function mergeStopHook(document, provider, runtimeDir) {
@@ -504,6 +609,26 @@ async function withSetupLock(appHome, fn) {
   }
 }
 
+/** What the user still has to do in each host; the 2026-09-30 install test missed both. */
+function setupNextSteps(agents) {
+  const steps = [];
+  if (agents.codex) {
+    steps.push({
+      agent: "codex",
+      action: "approve-hook",
+      message: "Codex asks to approve the new Stop hook when a session starts (or open /hooks). Approve 'Syncing codex conversation to personal memory'; nothing is collected from Codex until then.",
+    });
+  }
+  if (agents.claude) {
+    steps.push({
+      agent: "claude",
+      action: "reload-plugins",
+      message: "Claude Code sessions that were already open need /reload-plugins (or a restart) to load the plugin's hook and MCP server; new sessions load them by themselves. Turns from before the reload are sent with the next one.",
+    });
+  }
+  return steps;
+}
+
 async function setupApply(options = {}) {
   const plan = await setupPlan(options);
   if (!plan.ready) return plan;
@@ -540,7 +665,7 @@ async function applySetupPlan(plan, paths) {
       }
       hooks.push({
         provider,
-        target: provider === "claude" ? "hooks/hooks.json" : target,
+        target: provider === "claude" ? "hooks/claude-hooks.json" : target,
         installed: enabled,
         mode: provider === "claude" ? "bundled-plugin" : "host-settings",
         legacyHookRemoved: provider === "claude" && !documentsEqual(current, cleaned),
@@ -553,7 +678,25 @@ async function applySetupPlan(plan, paths) {
       { backup: true, privateFile: true },
     );
     await finalizeRuntime(runtime);
-    return { ok: true, version: VERSION, paths, runtime, hooks, restartRequired: true };
+    const warnings = [];
+    const toolsPath = mcpToolsPath(paths);
+    if (!(await pathExists(toolsPath))) {
+      try {
+        await writeJsonAtomic(toolsPath, { disabled_tools: [...WRITE_TOOLS] });
+      } catch (error) {
+        warnings.push(`MCP tool defaults were not written to ${toolsPath}: ${error?.message || error}`);
+      }
+    }
+    return {
+      ok: true,
+      version: VERSION,
+      paths,
+      runtime,
+      hooks,
+      restartRequired: true,
+      nextSteps: setupNextSteps(plan.config.agents),
+      ...(warnings.length ? { warnings } : {}),
+    };
   } catch (error) {
     const rollbackErrors = [];
     for (const provider of [...changedHosts].reverse()) {
@@ -690,7 +833,7 @@ async function doctor() {
     missingFiles: missingRuntimeFiles,
   });
   if (config) {
-    const health = await probe(`${config.honcho.baseUrl.replace(/\/+$/, "")}/health`);
+    const health = await probe(`${config.honcho.baseUrl.replace(/\/+$/, "")}/health`, 1500, authHeaders(config));
     checks.push({ name: "honcho-health", ...health, url: publicUrl(config.honcho.baseUrl) });
     checks.push({ name: "honcho-workspaces", ...(await probeWorkspaceAccess(config)), url: publicUrl(config.honcho.baseUrl) });
     const mcpPath = path.join(paths.runtimeDir, "mcp-server.mjs");

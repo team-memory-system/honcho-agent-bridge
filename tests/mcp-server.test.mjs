@@ -8,6 +8,8 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { WRITE_TOOLS } from "../scripts/mcp-tool-defaults.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = path.join(ROOT, "scripts", "mcp-server.mjs");
 const EXPECTED_TOOLS = [
@@ -27,6 +29,8 @@ function startApi() {
     requests.push({ method: request.method, url: request.url, body: body ? JSON.parse(body) : null });
     response.setHeader("Content-Type", "application/json");
     if (request.url === "/health") response.end(JSON.stringify({ status: "ok" }));
+    // Honcho's search answers with a bare list.
+    else if (request.url.endsWith("/search")) response.end(JSON.stringify([{ id: "message-1", content: "remembered" }]));
     else response.end(JSON.stringify({ items: [{ id: "message-1", content: "remembered" }], total: 1 }));
   });
   return new Promise((resolve) => {
@@ -54,7 +58,7 @@ function rpcClient(child) {
   };
 }
 
-test("bundled MCP exposes all 31 tools, forwards search, and honors tool toggles", async (t) => {
+test("bundled MCP starts read-only, exposes all 31 tools when enabled, forwards search, and honors tool toggles", async (t) => {
   const api = await startApi();
   t.after(() => api.server.close());
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-mcp-"));
@@ -85,8 +89,20 @@ test("bundled MCP exposes all 31 tools, forwards search, and honors tool toggles
   const negotiated = await rpc("initialize", { protocolVersion: "2099-01-01", capabilities: {} });
   assert.equal(negotiated.protocolVersion, "2025-11-25");
   await assert.rejects(rpc("initialize", { capabilities: {} }), /protocolVersion/);
+  const readOnly = await rpc("tools/list");
+  assert.deepEqual(
+    readOnly.tools.map((entry) => entry.name),
+    EXPECTED_TOOLS.filter((name) => !WRITE_TOOLS.includes(name)),
+    "without a tool file only recall tools are offered",
+  );
+
+  await fsp.writeFile(path.join(dataDir, "mcp-tools.json"), JSON.stringify({ disabled_tools: [] }));
   const listed = await rpc("tools/list");
   assert.equal(listed.tools.length, 31);
+  assert.deepEqual(
+    listed.tools.filter((entry) => entry.annotations.readOnlyHint === false).map((entry) => entry.name),
+    [...WRITE_TOOLS],
+  );
   assert.deepEqual(listed.tools.map((entry) => entry.name), EXPECTED_TOOLS);
   assert.deepEqual(
     listed.tools.find((entry) => entry.name === "chat").inputSchema.properties.reasoning_level.enum,
@@ -95,7 +111,8 @@ test("bundled MCP exposes all 31 tools, forwards search, and honors tool toggles
 
   const search = await rpc("tools/call", { name: "search", arguments: { query: "project decision", limit: 4 } });
   assert.equal(search.isError, false);
-  assert.equal(search.structuredContent.total, 1);
+  // structuredContent must be an object; the list is wrapped.
+  assert.deepEqual(search.structuredContent, { result: [{ id: "message-1", content: "remembered" }] });
   const forwarded = api.requests.find((entry) => entry.url === "/v3/workspaces/memory/search");
   assert.deepEqual(forwarded.body, { query: "project decision", limit: 4 });
 

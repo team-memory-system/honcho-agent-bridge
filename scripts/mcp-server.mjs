@@ -2,6 +2,7 @@ import path from "node:path";
 import readline from "node:readline";
 
 import { installPaths, loadConfig, readJson, userHome } from "./config.mjs";
+import { WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
 import { VERSION } from "./version.mjs";
 
 const SERVER_NAME = "Honcho Agent Bridge";
@@ -97,6 +98,8 @@ async function disabledToolNames(config) {
   }
   const values = document?.disabled_tools || document?.disabledTools;
   if (Array.isArray(values)) values.forEach((name) => names.add(String(name)));
+  // No tool file at all: an install from before setup wrote one. Default to recall only.
+  else if (!document) WRITE_TOOLS.forEach((name) => names.add(name));
   return names;
 }
 
@@ -610,7 +613,8 @@ async function handle(message) {
       const result = await callTool(params?.name, params?.arguments);
       sendResult(id, {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
+        // MCP requires an object here; search returns a list, which Claude Code rejected.
+        structuredContent: result && typeof result === "object" && !Array.isArray(result) ? result : { result },
         isError: false,
       });
     } catch (error) {
