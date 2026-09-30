@@ -9,7 +9,8 @@
 //     Cloudflare Access in front of that hostname decides which devices may reach
 //     it at all; the gate token decides which of them may use the API.
 //
-// The tunnel runs under a per-user autostart this module registers:
+// The tunnel runs under a per-user autostart this module registers through
+// autostart.mjs:
 //   launchd      ~/Library/LaunchAgents/team-memory-system.tunnel.plist (RunAtLoad, KeepAlive)
 //   windows-run  the value "TeamMemoryTunnel" under HKCU\...\CurrentVersion\Run, which
 //                runs a hidden wscript .vbs at logon
@@ -21,13 +22,30 @@
 // Everything that touches the OS goes through injectable functions (run, spawnImpl,
 // fetchImpl, composeRunner, which, sleep), so tests never reach docker,
 // cloudflared, launchctl, reg or systemctl.
-import { execFile, spawn as nodeSpawn } from "node:child_process";
+import { spawn as nodeSpawn } from "node:child_process";
 import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 
+import {
+  autostartRegistered,
+  installLaunchAgent,
+  installSystemdUnit,
+  launchAgent as launchAgentSpec,
+  launchAgentRunning,
+  registerWindowsRun,
+  RUN_KEY,
+  runCommand,
+  systemdUnit as systemdUnitSpec,
+  systemdUnitActive,
+  uninstallLaunchAgent,
+  uninstallSystemdUnit,
+  unregisterWindowsRun,
+  windowsRun,
+  writeIfChanged,
+} from "./autostart.mjs";
 import { embeddingAliasBase } from "./host-manager.mjs";
 import { findOnPath } from "./runtime-installer.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
@@ -46,35 +64,13 @@ export const TUNNEL_TOKEN_ENV = "HONCHO_TUNNEL_TOKEN";
 export const SHARE_PROFILE = "share";
 export const GATE_SERVICE = "gate";
 export const LAUNCHD_LABEL = "team-memory-system.tunnel";
-export const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const STARTUP_APPROVED_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+export { RUN_KEY };
 export const RUN_VALUE = "TeamMemoryTunnel";
 export const SYSTEMD_UNIT = "team-memory-tunnel.service";
 export const CLOUDFLARED_DOWNLOAD_BASE = "https://github.com/cloudflare/cloudflared/releases/latest/download/";
-const LAUNCHCTL = "/bin/launchctl";
 const TUNNEL_TOKEN_PATTERN = /^[A-Za-z0-9+/=_.-]{20,8192}$/;
 
 // ---------------------------------------------------------------- context
-
-async function defaultRun(command, args, options = {}) {
-  return new Promise((resolve) => {
-    execFile(command, args, {
-      env: options.env || process.env,
-      cwd: options.cwd,
-      timeout: options.timeout || 30_000,
-      windowsHide: true,
-      maxBuffer: 8 * 1024 * 1024,
-    }, (error, stdout, stderr) => {
-      if (!error) return resolve({ code: 0, stdout: String(stdout || ""), stderr: String(stderr || "") });
-      resolve({
-        code: typeof error.code === "number" ? error.code : -1,
-        stdout: String(stdout || ""),
-        stderr: String(stderr || ""),
-        error: typeof error.code === "string" ? error.code : undefined,
-      });
-    });
-  });
-}
 
 // Shared with the Docker and Ollama finders; still exported from here for callers.
 export { findOnPath };
@@ -114,7 +110,7 @@ function shareContext(options = {}) {
     homeDir,
     uid: options.uid ?? (typeof process.getuid === "function" ? process.getuid() : 0),
     paths,
-    run: options.run || defaultRun,
+    run: options.run || runCommand,
     spawnImpl: options.spawnImpl || nodeSpawn,
     fetchImpl: options.fetchImpl || globalThis.fetch,
     composeRunner: options.composeRunner || compose,
@@ -144,9 +140,6 @@ function firstLine(text) {
   return String(text || "").trim().split(/\r?\n/)[0].slice(0, 300);
 }
 
-function failure(result, fallback) {
-  return firstLine(result?.stderr || result?.stdout) || result?.error || `${fallback} (exit ${result?.code})`;
-}
 
 // ------------------------------------------------------------ environment
 
@@ -324,108 +317,50 @@ export function tunnelArguments(ctx) {
   ];
 }
 
-function xmlEscape(text) {
-  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function plistValue(value, depth) {
-  const pad = "\t".repeat(depth);
-  if (value === true) return `${pad}<true/>`;
-  if (value === false) return `${pad}<false/>`;
-  if (typeof value === "string") return `${pad}<string>${xmlEscape(value)}</string>`;
-  if (Array.isArray(value)) return [`${pad}<array>`, ...value.map((item) => plistValue(item, depth + 1)), `${pad}</array>`].join("\n");
-  const keys = Object.keys(value).sort();
-  return [`${pad}<dict>`, ...keys.flatMap((key) => [`${pad}\t<key>${xmlEscape(key)}</key>`, plistValue(value[key], depth + 1)]), `${pad}</dict>`].join("\n");
-}
-
 export function launchAgent(ctx, binary) {
-  const data = {
-    Label: LAUNCHD_LABEL,
-    ProgramArguments: [binary, ...tunnelArguments(ctx)],
-    RunAtLoad: true,
-    KeepAlive: true,
-    WorkingDirectory: ctx.paths.cloudflaredDir,
-    StandardOutPath: ctx.paths.logFile,
-    StandardErrorPath: ctx.paths.errorLogFile,
-  };
-  const text = [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-    '<plist version="1.0">',
-    plistValue(data, 0),
-    "</plist>",
-    "",
-  ].join("\n");
-  return {
+  return launchAgentSpec({
     label: LAUNCHD_LABEL,
-    plistPath: path.join(ctx.homeDir, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`),
-    target: `gui/${ctx.uid}/${LAUNCHD_LABEL}`,
-    domain: `gui/${ctx.uid}`,
-    data,
-    text,
-  };
-}
-
-function vbsString(value) {
-  return `"${String(value).replace(/"/g, '""')}"`;
-}
-
-function windowsCommandLine(parts) {
-  return parts.map((part) => (/[\s"]/.test(part) ? `"${String(part).replace(/"/g, '\\"')}"` : part)).join(" ");
+    homeDir: ctx.homeDir,
+    uid: ctx.uid,
+    programArguments: [binary, ...tunnelArguments(ctx)],
+    workingDirectory: ctx.paths.cloudflaredDir,
+    stdoutPath: ctx.paths.logFile,
+    stderrPath: ctx.paths.errorLogFile,
+    keepAlive: true,
+  });
 }
 
 export function windowsAutostart(ctx, binary) {
-  const system32 = path.win32.join(ctx.env.SystemRoot || ctx.env.SYSTEMROOT || "C:\\Windows", "System32");
-  const wscript = path.win32.join(system32, "wscript.exe");
-  const vbs = [
-    "' Team Memory: starts this computer's Cloudflare tunnel at logon, with no window.",
-    "' Written by `cli.mjs server share enable`; `cli.mjs server share disable` removes it.",
-    "Option Explicit",
-    "Dim shell",
-    'Set shell = CreateObject("WScript.Shell")',
-    `shell.CurrentDirectory = ${vbsString(ctx.paths.cloudflaredDir)}`,
-    `shell.Run ${vbsString(windowsCommandLine([binary, ...tunnelArguments(ctx)]))}, 0, False`,
-    "",
-  ].join("\r\n");
-  return {
-    reg: path.win32.join(system32, "reg.exe"),
-    powershell: path.win32.join(system32, "WindowsPowerShell", "v1.0", "powershell.exe"),
-    wscript,
+  return windowsRun({
+    env: ctx.env,
+    subject: "tunnel",
+    valueName: RUN_VALUE,
     vbsPath: ctx.paths.vbsFile,
-    vbs,
-    runValue: `"${wscript}" //B //NoLogo "${ctx.paths.vbsFile}"`,
-  };
-}
-
-function systemdQuote(value, { exec = false } = {}) {
-  let text = String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%");
-  if (exec) text = text.replace(/\$/g, "$$$$");
-  return `"${text}"`;
+    workingDirectory: ctx.paths.cloudflaredDir,
+    commandLine: [binary, ...tunnelArguments(ctx)],
+    comments: [
+      "Team Memory: starts this computer's Cloudflare tunnel at logon, with no window.",
+      "Written by `cli.mjs server share enable`; `cli.mjs server share disable` removes it.",
+    ],
+  });
 }
 
 export function systemdUnit(ctx, binary) {
-  const configHome = ctx.env.XDG_CONFIG_HOME ? path.resolve(ctx.env.XDG_CONFIG_HOME) : path.join(ctx.homeDir, ".config");
-  const text = [
-    "# Written by `cli.mjs server share enable`; `cli.mjs server share disable` removes it.",
-    "[Unit]",
-    "Description=Team Memory Cloudflare tunnel",
-    "Wants=network-online.target",
-    "After=network-online.target",
-    "",
-    "[Service]",
-    "Type=simple",
-    `WorkingDirectory=${ctx.paths.cloudflaredDir.replace(/%/g, "%%")}`,
-    `ExecStart=${[binary, ...tunnelArguments(ctx)].map((part) => systemdQuote(part, { exec: true })).join(" ")}`,
-    `StandardOutput=append:${ctx.paths.logFile.replace(/%/g, "%%")}`,
-    `StandardError=append:${ctx.paths.errorLogFile.replace(/%/g, "%%")}`,
-    "Restart=always",
-    "RestartSec=5",
-    "",
-    "[Install]",
-    "WantedBy=default.target",
-    "",
-  ].join("\n");
-  return { unitPath: path.join(configHome, "systemd", "user", SYSTEMD_UNIT), text };
+  return systemdUnitSpec({
+    env: ctx.env,
+    homeDir: ctx.homeDir,
+    subject: "tunnel",
+    unitName: SYSTEMD_UNIT,
+    comment: "Written by `cli.mjs server share enable`; `cli.mjs server share disable` removes it.",
+    description: "Team Memory Cloudflare tunnel",
+    wantsNetwork: true,
+    workingDirectory: ctx.paths.cloudflaredDir,
+    execStart: [binary, ...tunnelArguments(ctx)],
+    stdoutPath: ctx.paths.logFile,
+    stderrPath: ctx.paths.errorLogFile,
+    restart: "always",
+    restartSec: 5,
+  });
 }
 
 /** Only the processes started with this install's token file, never another cloudflared. */
@@ -446,57 +381,9 @@ async function windowsTunnelProcesses(ctx, { stop = false } = {}) {
   return String(result.stdout).split(/\r?\n/).map((line) => line.trim()).filter((line) => /^\d+$/.test(line));
 }
 
-async function writeIfChanged(target, content, mode = 0o600) {
-  const previous = await fsp.readFile(target).catch(() => null);
-  const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
-  if (previous && previous.equals(bytes)) return false;
-  await fsp.mkdir(path.dirname(target), { recursive: true });
-  const temporary = `${target}.tmp-${process.pid}`;
-  await fsp.rm(temporary, { force: true });
-  await fsp.writeFile(temporary, bytes, { mode, flag: "wx" });
-  await fsp.rename(temporary, target);
-  return true;
-}
-
-async function launchdLoaded(ctx, agent) {
-  return (await ctx.run(LAUNCHCTL, ["print", agent.target])).code === 0;
-}
-
-async function installLaunchd(ctx, binary, { restart = false } = {}) {
-  const agent = launchAgent(ctx, binary);
-  const changed = await writeIfChanged(agent.plistPath, agent.text);
-  const loaded = await launchdLoaded(ctx, agent);
-  // An unchanged agent launchd already runs is left alone: KeepAlive keeps it up.
-  // A new token file is only read at start, so it counts as a change.
-  if (loaded && !changed && !restart) return { kind: "launchd", path: agent.plistPath, changed, started: false };
-  if (loaded) await ctx.run(LAUNCHCTL, ["bootout", agent.target]);
-  let result;
-  // Right after a bootout, launchd can refuse a bootstrap for a moment (error 5).
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    result = await ctx.run(LAUNCHCTL, ["bootstrap", agent.domain, agent.plistPath]);
-    if (result.code === 0) return { kind: "launchd", path: agent.plistPath, changed, started: true };
-    await ctx.sleep(1_000);
-  }
-  throw new Error(`launchctl bootstrap failed: ${failure(result, "launchctl bootstrap")}`);
-}
-
-async function uninstallLaunchd(ctx) {
-  const agent = launchAgent(ctx, ctx.paths.binary);
-  if (await launchdLoaded(ctx, agent)) {
-    const result = await ctx.run(LAUNCHCTL, ["bootout", agent.target]);
-    if (result.code !== 0 && await launchdLoaded(ctx, agent)) {
-      throw new Error(`launchctl bootout failed: ${failure(result, "launchctl bootout")}`);
-    }
-  }
-  await fsp.rm(agent.plistPath, { force: true });
-}
-
 async function installWindows(ctx, binary, { restart = false } = {}) {
   const plan = windowsAutostart(ctx, binary);
-  const bytes = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(plan.vbs, "utf16le")]);
-  const changed = await writeIfChanged(plan.vbsPath, bytes, 0o644);
-  const added = await ctx.run(plan.reg, ["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", plan.runValue, "/f"]);
-  if (added.code !== 0) throw new Error(`The tunnel autostart could not be registered (reg add): ${failure(added, "reg add")}`);
+  const { changed } = await registerWindowsRun(ctx, plan);
   let running = (await windowsTunnelProcesses(ctx)).length > 0;
   if (running && (changed || restart)) {
     await windowsTunnelProcesses(ctx, { stop: true });
@@ -511,79 +398,39 @@ async function installWindows(ctx, binary, { restart = false } = {}) {
 }
 
 async function uninstallWindows(ctx) {
-  const plan = windowsAutostart(ctx, ctx.paths.binary);
-  const removed = await ctx.run(plan.reg, ["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
-  if (removed.code !== 0 && (await ctx.run(plan.reg, ["query", RUN_KEY, "/v", RUN_VALUE])).code === 0) {
-    throw new Error(`The tunnel autostart could not be removed (reg delete): ${failure(removed, "reg delete")}`);
-  }
-  await ctx.run(plan.reg, ["delete", STARTUP_APPROVED_KEY, "/v", RUN_VALUE, "/f"]);
+  await unregisterWindowsRun(ctx, windowsAutostart(ctx, ctx.paths.binary));
   await windowsTunnelProcesses(ctx, { stop: true });
-  await fsp.rm(plan.vbsPath, { force: true });
-}
-
-async function systemctl(ctx, args, { check = true } = {}) {
-  const result = await ctx.run("systemctl", ["--user", ...args]);
-  if (check && result.code !== 0) throw new Error(`systemctl --user ${args.join(" ")} failed: ${failure(result, "systemctl")}`);
-  return result;
-}
-
-async function installSystemd(ctx, binary, { restart = false } = {}) {
-  const probe = await ctx.run("systemctl", ["--user", "show-environment"]);
-  if (probe.code !== 0) {
-    throw new Error(`systemd --user is not available, so the tunnel cannot start by itself: ${failure(probe, "systemctl --user")}`);
-  }
-  const unit = systemdUnit(ctx, binary);
-  const changed = await writeIfChanged(unit.unitPath, unit.text, 0o644);
-  await systemctl(ctx, ["daemon-reload"]);
-  await systemctl(ctx, ["enable", SYSTEMD_UNIT]);
-  await systemctl(ctx, [changed || restart ? "restart" : "start", SYSTEMD_UNIT]);
-  return { kind: "systemd", path: unit.unitPath, changed, started: true };
-}
-
-async function uninstallSystemd(ctx) {
-  const unit = systemdUnit(ctx, ctx.paths.binary);
-  const present = await exists(unit.unitPath);
-  if (present) await systemctl(ctx, ["disable", "--now", SYSTEMD_UNIT], { check: false });
-  await fsp.rm(unit.unitPath, { force: true });
-  if (present) await systemctl(ctx, ["daemon-reload"], { check: false });
 }
 
 /** Registers the tunnel's autostart and starts the tunnel through it. */
 export async function installTunnelAutostart(ctx, binary, options = {}) {
   await fsp.mkdir(ctx.paths.logDir, { recursive: true, mode: 0o700 });
-  if (ctx.platform === "darwin") return installLaunchd(ctx, binary, options);
+  // An unchanged agent launchd already runs is left alone: KeepAlive keeps it up.
+  // A new token file is only read at start, so the caller passes `restart` then.
+  if (ctx.platform === "darwin") return installLaunchAgent(ctx, launchAgent(ctx, binary), options);
   if (ctx.platform === "win32") return installWindows(ctx, binary, options);
-  if (ctx.platform === "linux") return installSystemd(ctx, binary, options);
+  if (ctx.platform === "linux") return installSystemdUnit(ctx, systemdUnit(ctx, binary), options);
   throw new Error(`The tunnel cannot start by itself on ${ctx.platform}`);
 }
 
 /** Removes the tunnel's autostart and stops the tunnel it runs. */
 export async function uninstallTunnelAutostart(ctx) {
-  if (ctx.platform === "darwin") return uninstallLaunchd(ctx);
+  if (ctx.platform === "darwin") return uninstallLaunchAgent(ctx, launchAgent(ctx, ctx.paths.binary));
   if (ctx.platform === "win32") return uninstallWindows(ctx);
-  if (ctx.platform === "linux") return uninstallSystemd(ctx);
+  if (ctx.platform === "linux") return uninstallSystemdUnit(ctx, systemdUnit(ctx, ctx.paths.binary));
   throw new Error(`Nothing to remove on ${ctx.platform}`);
 }
 
 async function tunnelAutostartInstalled(ctx) {
-  if (ctx.platform === "darwin") return exists(launchAgent(ctx, ctx.paths.binary).plistPath);
-  if (ctx.platform === "linux") return exists(systemdUnit(ctx, ctx.paths.binary).unitPath);
-  if (ctx.platform === "win32") {
-    const plan = windowsAutostart(ctx, ctx.paths.binary);
-    return (await ctx.run(plan.reg, ["query", RUN_KEY, "/v", RUN_VALUE])).code === 0;
-  }
+  if (ctx.platform === "darwin") return autostartRegistered(ctx, launchAgent(ctx, ctx.paths.binary));
+  if (ctx.platform === "linux") return autostartRegistered(ctx, systemdUnit(ctx, ctx.paths.binary));
+  if (ctx.platform === "win32") return autostartRegistered(ctx, windowsAutostart(ctx, ctx.paths.binary));
   return false;
 }
 
 async function tunnelRunning(ctx) {
-  if (ctx.platform === "darwin") {
-    const result = await ctx.run(LAUNCHCTL, ["print", launchAgent(ctx, ctx.paths.binary).target]);
-    return result.code === 0 && /\bstate = running\b|\bpid = \d+/.test(result.stdout);
-  }
-  if (ctx.platform === "linux") {
-    const result = await ctx.run("systemctl", ["--user", "is-active", SYSTEMD_UNIT]);
-    return result.code === 0 && result.stdout.trim() === "active";
-  }
+  if (ctx.platform === "darwin") return launchAgentRunning(ctx, launchAgent(ctx, ctx.paths.binary));
+  if (ctx.platform === "linux") return systemdUnitActive(ctx, systemdUnit(ctx, ctx.paths.binary));
   if (ctx.platform === "win32") return (await windowsTunnelProcesses(ctx)).length > 0;
   return false;
 }

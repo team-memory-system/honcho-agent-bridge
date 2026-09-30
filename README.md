@@ -58,21 +58,45 @@ gets an answer, without reading the underlying messages.
 
 ### Things that will bite you
 
-- **This repository registers no OS autostart; the gateway registers its own.**
-  Nothing here touches launchd, the Windows task scheduler or registry, or systemd.
-  The gateway's own `install`, which `server prepare` and `host start` run, registers
-  the gateway's per-user autostart (launchd, the Windows Run key or systemd,
-  reported as `autostart`), so after a reboot its screen, adapters and router come
-  back by themselves. The Ollama supervisor does not: `host start` spawns it
-  detached and finds it again through its PID file, and after a reboot it stays down
-  until someone runs `host start` or presses start in the setup UI. Until then the
-  Qwen alias is not kept loaded, and Ollama answers only if its own app started it.
-  An Ollama the app downloaded itself (`runtime/ollama`) has no app or service of
-  its own, so it is down after a reboot too, and comes back with the supervisor:
-  `host start` starts its `ollama serve`, and the supervisor starts it again within
-  15 seconds whenever it stops answering.
-  `host stop` and `server stop` leave the gateway running;
-  `node <app-dir>/runtime/subscription-gateway/gateway/cli.mjs uninstall` removes it.
+- **After a reboot everything comes back at login by itself; nobody has to press
+  start.** The gateway's own `install`, which `server prepare` and `host start` run,
+  registers the gateway's per-user autostart (reported under `gateway` as
+  `autostart`). `host start`, and so `server start` and the setup UI's start button,
+  registers one for the host supervisor too, and starts the supervisor through it.
+  Neither needs admin rights:
+
+  | Platform | Host supervisor autostart | Logs |
+  | --- | --- | --- |
+  | macOS | LaunchAgent `~/Library/LaunchAgents/team-memory-system.host.plist` (RunAtLoad, `KeepAlive {SuccessfulExit: false}`) | `runtime/host/logs/supervisor.log`, `supervisor.error.log` |
+  | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `TeamMemoryHost`, a hidden `wscript` running `runtime/host/supervisor.vbs` | `runtime/host/logs/supervisor.log` |
+  | Linux | systemd user unit `team-memory-host.service` (`Restart=on-failure`) | `runtime/host/logs/supervisor.log`, `supervisor.error.log` |
+
+  Each runs exactly what `host start` would spawn: the `node` that ran `host start`
+  (by absolute path, so a `host start` after a Node upgrade rewrites it), the
+  supervisor, and `--config runtime/host/host-config.json --log
+  runtime/host/logs/supervisor.log`; the log is rotated to `supervisor.log.1` past
+  10 MB. A second supervisor finds the first through its PID file and exits 0, and a
+  stop exits 0 too, so launchd and systemd restart only a crash and never loop on a
+  duplicate; a missing host config also exits 0, since no restart fixes it. On
+  Windows the Run value takes effect at the next logon, so `host start` spawns the
+  same command itself. Where no autostart can be registered (no systemd user
+  session, say), `host start` still starts the supervisor and reports
+  `autostart.error` and a warning. `host status` and `server status --profile
+  personal` report `autostart: {registered, kind}`.
+
+  At login the supervisor may start before Docker Desktop, the gateway, or Ollama's
+  own app; it waits for them instead of exiting. It never uses Docker. An Ollama this
+  app did not download gets 60 seconds to answer before the supervisor starts
+  `ollama serve` itself, and a failed warmup is retried after 5 seconds, doubling up
+  to the 5-minute warm interval. An Ollama the app downloaded itself
+  (`runtime/ollama`) has no app or service of its own and is started at once; the
+  supervisor starts it again within 15 seconds whenever it stops answering.
+
+  `host stop` and `server stop` remove the supervisor's autostart first (launchd and
+  systemd stop the supervisor as they do), so it stays down after the next reboot;
+  if the autostart cannot be removed, they report `ok: false`. They leave the
+  gateway running; `node <app-dir>/runtime/subscription-gateway/gateway/cli.mjs
+  uninstall` removes it.
 - **A changed `gateway-source.json` replaces the gateway.** The next `server prepare`
   or `host start` fetches the new copy, runs the old copy's own `uninstall` (its
   autostart removed, what it started stopped, logins kept) so nothing holds the
@@ -469,7 +493,7 @@ personal profile only:
 Honcho containers ──> gateway router :11400 ──> the gateway's own Codex / Claude logins
 Honcho containers ──> host Ollama ────────────> Qwen3-Embedding 4B 1536d / 8192-token
 Gateway's own autostart ──────────────────────> gateway screen, adapters and router
-host start (detached supervisor) ─────────────> keeps Qwen resident
+host supervisor's own autostart ──────────────> keeps Qwen resident
 ```
 
 The queue keeps failed imports and retries them on the next agent Stop hook or an explicit queue drain. Its personal local-server defaults drain every newly queued transcript immediately. Transcript parsing is provider-specific; storage, deduplication, peer configuration, and API writes are shared.

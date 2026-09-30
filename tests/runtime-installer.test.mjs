@@ -833,6 +833,9 @@ test("host start brings the app's own ollama serve back when the supervisor is a
       startTimeoutMs: 1_000,
       statusPollMs: 10,
       gatewayRunner,
+      // launchctl as a stand-in: nothing loaded yet, every change accepted.
+      autostartRunner: async (command, args) => ({ code: args[0] === "print" ? 113 : 0, stdout: "", stderr: "" }),
+      uid: 501,
       fetchImpl: async (url) => {
         if (!serving) throw new Error("ECONNREFUSED");
         return String(url).endsWith("/api/ps") ? response({ models: [{ name: "qwen3-embedding-4b-honcho-8192" }] }) : response({ version: "0.35.0" });

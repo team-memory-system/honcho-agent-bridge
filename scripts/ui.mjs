@@ -335,11 +335,9 @@ const ROUTES = {
 /**
  * The host services have their own lifecycle, separate from the Docker stack.
  * `host start` installs the subscription gateway through its own CLI - the gateway
- * registers its own autostart - and launches the Ollama supervisor detached, so it
- * survives this UI process restarting or a terminal closing. This repository
- * registers nothing with launchd, the Windows task scheduler or systemd, so after
- * a reboot the supervisor stays down until someone opens the app or runs
- * `host start` again; the gateway comes back by itself.
+ * registers its own autostart - and registers a per-user login autostart for the
+ * Ollama supervisor and starts it, so it survives this UI process restarting, a
+ * terminal closing, and a reboot. `host stop` removes that autostart.
  */
 const HOST_ROUTES = {
   "/api/host/status": ["host", "status", "--profile", "personal"],

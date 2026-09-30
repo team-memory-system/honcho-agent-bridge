@@ -1651,7 +1651,9 @@ export async function serverStatus(options = {}) {
     serverStatusWithoutShare({ ...options, serverDirectory: directory }),
     shareSummaryFor(directory),
   ]);
-  return { ...result, share };
+  // The host supervisor's login autostart, which `server start` registers through
+  // `host start`: {registered, kind}.
+  return { ...result, ...(result.host?.autostart ? { autostart: result.host.autostart } : {}), share };
 }
 
 async function serverStatusWithoutShare({
