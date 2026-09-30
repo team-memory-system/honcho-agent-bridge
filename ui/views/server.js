@@ -43,6 +43,8 @@ const WARNING_WORDS = [
   [/^Honcho source will be downloaded from (\S+)/, (m) => `Honcho 소스를 ${m[1]}에서 받습니다.`],
   [/^Subscription gateway source will be (replaced from|downloaded from) (\S+)/, (m) => `구독 게이트웨이를 ${m[2]}에서 ${m[1].startsWith("replaced") ? "다시 받습니다" : "받습니다"}.`],
   [/^Docker Desktop is not running/, () => "Docker Desktop이 꺼져 있어 준비할 때 켭니다."],
+  [/^Docker Desktop is not installed; server prepare downloads it from (\S+)/, (m) => `Docker Desktop이 없어서 준비할 때 받아 설치합니다 (${m[1]}). 설치 뒤 Docker 창이 뜨면 약관에 동의하고 권장 설정을 고르세요. macOS가 암호를 묻습니다.`],
+  [/^Ollama is not installed; server prepare downloads it from (\S+) into (.+?) and checks it against/, (m) => `Ollama가 없어서 준비할 때 받습니다 (${m[1]}). ${m[2]}에 두고, 받은 파일이 맞는지 공개된 체크섬으로 확인합니다.`],
   [/^Docker Desktop is free for/, () => "Docker Desktop은 개인, 교육, 비영리 오픈소스, 작은 회사(직원 250명 미만이고 연 매출 1천만 달러 미만)에서는 무료입니다. 그보다 큰 회사나 정부 기관에서는 유료 구독이 필요합니다."],
   [/was not fetched by this installer/, () => "게이트웨이 폴더를 이 설치기가 받은 것이 아니라서 바꾸지 않고 그대로 씁니다."],
 ];
