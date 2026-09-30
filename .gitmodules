@@ -1,3 +1,0 @@
-[submodule "subscription-gateway"]
-	path = subscription-gateway
-	url = https://github.com/chenjingdev/subscription-gateway

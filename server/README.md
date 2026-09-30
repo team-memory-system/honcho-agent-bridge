@@ -26,10 +26,9 @@ independent `chenjingdev/subscription-gateway` repository and a full commit hash
 so a plugin release always installs the same gateway revision. The gateway is
 fetched into the app directory's `runtime/subscription-gateway`, not here: it runs
 as its own program, and its own autostart points at those files. Update the pinned
-commit only after verifying the new gateway with this installer, and record the
-same commit in the root `subscription-gateway/` Git submodule. The submodule is a
-development checkout and a visible link to the source; release bundles omit its
-contents and use the JSON pin to fetch the runtime during installation.
+commit only after verifying the new gateway with this installer, then move the
+`subscription-gateway` submodule of the `team-memory` integration repository to the
+same commit. Release bundles and installations use only the JSON pin.
 
 Never add `.env`, database exports, Docker volumes, API keys, bearer tokens, or
 Cloudflare credentials to a release.
