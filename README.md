@@ -22,11 +22,12 @@ the installed Honcho source records the official commit and patch checksums.
 | **`honcho-agent-bridge`** (this one) | Collector, installer, diagnostics, release builder, agent plugin | Every machine that runs an agent |
 | [`subscription-gateway`](https://github.com/chenjingdev/subscription-gateway) | Independent subscription-to-API gateway with its own login screen (AGPL-3.0) | The computer that runs Honcho; `server prepare` fetches the pinned source revision and runs the gateway's own install |
 
-This repository has no submodules. The three apps are linked together, each at a
-pinned commit, in [`team-memory`](https://github.com/team-memory-system/team-memory),
-the integration repository. Installations use `server/*-source.json` alone. When
-adopting a new gateway or selfhost revision, update the JSON pin here first, then
-move the matching submodule in `team-memory`; its CI checks that the two agree.
+The repository's [`subscription-gateway/`](subscription-gateway) directory is a Git
+submodule pointing to that independent project. GitHub shows it as a linked folder.
+Run `git submodule update --init subscription-gateway` to check out its source for
+development. Its commit must match `server/gateway-source.json`; update both when
+adopting a new gateway revision. Plugin and archive installations use that JSON pin
+to fetch the runtime even when submodules were not checked out.
 
 **Topology.** One Honcho and one database per person; that person's several machines
 all feed the same one. Teammates do not share a database. What is shared is a single
