@@ -6,13 +6,22 @@ import crypto from "node:crypto";
 import { getProvider } from "./providers/index.mjs";
 import { classifyAutomation as classifyCodexAutomation } from "./providers/codex.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
+import {
+  accessRefusedMessage,
+  environmentAccess,
+  fetchHoncho,
+  honchoHeaders,
+  isCloudflareAccessBlock,
+} from "./honcho-access.mjs";
 
 const ROOT_URL = (process.env.HONCHO_BASE_URL || "http://127.0.0.1:8001").replace(/\/+$/, "");
 const AUTH_TOKEN = process.env.HONCHO_API_BEARER_TOKEN || "";
 // Cloudflare Access sits in front of Honcho once it is reachable from outside this
-// machine. A browser gets a login page; a collector has to present a service token.
-const CF_ACCESS_CLIENT_ID = process.env.CF_ACCESS_CLIENT_ID || "";
-const CF_ACCESS_CLIENT_SECRET = process.env.CF_ACCESS_CLIENT_SECRET || "";
+// machine. A browser gets a login page; a collector without WARP has to present a
+// service token. The hook environment carries the one setup saved
+// (HONCHO_CF_ACCESS_CLIENT_ID/SECRET); the older CF_ACCESS_CLIENT_ID/SECRET still
+// work when those are not set.
+const CF_ACCESS = environmentAccess(process.env, { legacy: true });
 const DEFAULT_WORKSPACE = process.env.HONCHO_WORKSPACE_ID || "memory";
 const DEFAULT_USER_PEER = process.env.HONCHO_USER_NAME || "user";
 const HTTP_TIMEOUT_SECONDS = Number(
@@ -149,17 +158,15 @@ async function logLine(provider, message) {
 async function jsonRequest(method, apiPath, payload) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_SECONDS * 1000);
-  const headers = { "Content-Type": "application/json" };
-  if (AUTH_TOKEN) headers.Authorization = `Bearer ${AUTH_TOKEN}`;
-  if (CF_ACCESS_CLIENT_ID) headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID;
-  if (CF_ACCESS_CLIENT_SECRET) headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET;
+  const headers = honchoHeaders({ token: AUTH_TOKEN, access: CF_ACCESS }, { "Content-Type": "application/json" });
   try {
-    const response = await fetch(`${ROOT_URL}${apiPath}`, {
+    const response = await fetchHoncho(`${ROOT_URL}${apiPath}`, {
       method,
       headers,
       body: payload === undefined ? undefined : JSON.stringify(payload),
       signal: controller.signal,
     });
+    if (await isCloudflareAccessBlock(response)) throw new Error(`${accessRefusedMessage(ROOT_URL)} (HTTP ${response.status} for ${apiPath})`);
     const body = await response.text();
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${apiPath}: ${body}`);
     return body ? JSON.parse(body) : {};

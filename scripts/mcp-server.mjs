@@ -2,6 +2,14 @@ import path from "node:path";
 import readline from "node:readline";
 
 import { installPaths, loadConfig, readJson, userHome } from "./config.mjs";
+import {
+  accessRefusedMessage,
+  configuredAccess,
+  environmentAccess,
+  fetchHoncho,
+  honchoHeaders,
+  isCloudflareAccessBlock,
+} from "./honcho-access.mjs";
 import { WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
 import { VERSION } from "./version.mjs";
 
@@ -84,7 +92,10 @@ async function runtimeContext() {
   const configuredAssistant = config.peers?.assistants?.[PROVIDER] || config.peers?.assistant;
   const assistantName = String(configuredAssistant || (PROVIDER === "agent" ? "assistant" : `assistant_${PROVIDER}`));
   const token = String(config.honcho?.apiToken || process.env.HONCHO_API_BEARER_TOKEN || "").trim();
-  return { config, baseUrl, workspaceId, userName, assistantName, token };
+  // The memory server's own Access service token. The shared bridge's
+  // (honcho.accessClientId/Secret, CF_ACCESS_CLIENT_*) belongs to another server.
+  const access = configuredAccess(config) || environmentAccess(process.env);
+  return { config, baseUrl, workspaceId, userName, assistantName, token, access };
 }
 
 async function disabledToolNames(config) {
@@ -109,18 +120,20 @@ async function honchoRequest(context, method, apiPath, { body, params } = {}) {
     if (Array.isArray(value)) value.forEach((item) => url.searchParams.append(key, String(item)));
     else url.searchParams.set(key, String(value));
   }
-  const headers = { Accept: "application/json" };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (context.token) headers.Authorization = `Bearer ${context.token}`;
+  const headers = honchoHeaders(
+    { token: context.token, access: context.access },
+    { Accept: "application/json", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+  );
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(context.config.honcho?.timeoutMs || 60_000));
   try {
-    const response = await fetch(url, {
+    const response = await fetchHoncho(url, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
+    if (await isCloudflareAccessBlock(response)) throw new Error(accessRefusedMessage(context.baseUrl));
     const text = await response.text();
     if (!response.ok) throw new Error(`Honcho API ${response.status} for ${apiPath}: ${text.slice(0, 2000)}`);
     if (!text) return { ok: true, status_code: response.status };

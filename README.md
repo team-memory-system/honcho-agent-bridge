@@ -111,13 +111,21 @@ gets an answer, without reading the underlying messages.
   them from `HONCHO_MCP_BEARER_TOKEN`, `CF_ACCESS_CLIENT_ID` and
   `CF_ACCESS_CLIENT_SECRET`, refuses them as options, and the UI passes them to the
   CLI through its environment.
+- **Two Cloudflare service tokens, never mixed.** `honcho.accessClientId/Secret`
+  (written by `bridge connect`, cleared by `bridge disconnect`) are the shared
+  bridge's. `honcho.access.{clientId,clientSecret}` is the memory server's own,
+  written only by `setup` from `HONCHO_CF_ACCESS_CLIENT_ID/SECRET`. Every request to
+  `honcho.baseUrl` builds its headers with `honchoHeaders` in
+  `scripts/honcho-access.mjs`, and goes through `fetchHoncho`, which follows
+  redirects only within that origin so an Access login redirect is seen, not
+  followed.
 - **Secrets are never in this repository.** Tokens live in the installed private
   `config.json` and `.env`, and in 1Password. `assertNoSecretFields` rejects a host
   profile that carries one. The gateway's router key comes from its `connect-info`,
   is written only into the installed private `.env`, and appears in no result this
   CLI prints; `scripts/gateway.mjs` hands it on as a non-enumerable property.
 - **CLI output redacts by field name.** `scripts/redact.mjs` prints any field whose
-  name contains token, secret, api key or authorization as `"[redacted]"`, whatever
+  name contains token, secret, api key, authorization or client id as `"[redacted]"`, whatever
   it holds. A field that only lists setting NAMES has to be in `NAME_ONLY_FIELDS`
   there, or it prints as `"[redacted]"` too; `missingSecretFields` did until
   2026-09-30, so a portable install could not see which keys to fill in.
@@ -182,7 +190,7 @@ Company memory, folder-based sharing rules, and cross-device database synchroniz
 ## Prerequisites
 
 - Node.js 18 or newer.
-- Docker Desktop/Engine with Compose when installing the bundled local Honcho server (`server prepare` starts a closed Docker Desktop on macOS and Windows and waits for its engine), or an existing Honcho API. For your own server on another computer, give its address with `--honcho-url` and, when it requires one, its token in the `HONCHO_API_TOKEN` environment variable; setup refuses a token on the command line.
+- Docker Desktop/Engine with Compose when installing the bundled local Honcho server (`server prepare` starts a closed Docker Desktop on macOS and Windows and waits for its engine), or an existing Honcho API. For your own server on another computer, see [Collecting from another computer](#collecting-from-another-computer).
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
 
 The `personal` profile also requires macOS or Windows, git, Ollama on the host, and a Codex and/or Claude subscription. `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
@@ -225,6 +233,48 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 4. Show the exact installation plan without changing files.
 5. Apply only after confirmation.
 6. Run the diagnostic checks and pass on `nextSteps` from `setup apply`: Codex asks the user to approve the new Stop hook (or `/hooks`), and Claude Code sessions opened before setup need `/reload-plugins`.
+
+### Collecting from another computer
+
+The memory server runs on one machine; another computer (a laptop, a work machine)
+sends its conversations there through a Cloudflare Tunnel protected by Cloudflare
+Access. On that other computer, setup needs up to three things:
+
+1. **The server's address**, with `--honcho-url https://memory.example.com`.
+2. **The server's API token**, in `HONCHO_API_TOKEN`, when the server requires one.
+3. **An Access service token, only if this computer is not on WARP.** The default
+   is to connect Cloudflare WARP with the team account: Access then lets the device
+   through by identity and nothing more is needed. A machine that cannot run WARP
+   presents a service token instead, in `HONCHO_CF_ACCESS_CLIENT_ID` and
+   `HONCHO_CF_ACCESS_CLIENT_SECRET` (both, or neither).
+
+```bash
+export HONCHO_API_TOKEN=...                   # the server's bearer token
+export HONCHO_CF_ACCESS_CLIENT_ID=...         # only without WARP
+export HONCHO_CF_ACCESS_CLIENT_SECRET=...     # only without WARP
+node scripts/cli.mjs setup plan --honcho-url https://memory.example.com --agents codex,claude --user-peer <id>
+node scripts/cli.mjs setup apply --honcho-url https://memory.example.com --agents codex,claude --user-peer <id>
+```
+
+Setup refuses any of these secrets as command-line options, prints them only as
+`"[redacted]"`, and saves them in the private `config.json` (`honcho.apiToken`,
+`honcho.access`). A later setup without them keeps them while the address stays on
+the same server, and drops them with a warning when it moves to another one. The
+Team Memory app's setup form takes the same three values and hands them to the CLI
+through its environment.
+
+The collector, the MCP server, the app and `doctor` all send the bearer token and,
+when saved, the service token with every request to that server, and to no other
+program. When Access refuses this computer (a 403 from Access, or a redirect to its
+`*.cloudflareaccess.com` login page), `setup plan` warns that the server "is behind
+Cloudflare Access and refused this computer", `doctor`'s `honcho-health` check
+fails with `code: "cloudflare-access"`, and the app says so instead of reporting
+the server as down. Connect WARP with the team account, or add a service token and
+run setup again.
+
+This service token is the memory server's. The one `bridge connect` takes
+(`CF_ACCESS_CLIENT_ID/SECRET`) belongs to someone else's shared bridge, and the two
+never stand in for each other.
 
 ### Server profiles
 

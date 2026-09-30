@@ -9,6 +9,14 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 
 import { installPaths, loadConfig, readJson } from "./config.mjs";
+import {
+  ACCESS_REFUSED_KO,
+  configuredAccess,
+  environmentAccess,
+  fetchHoncho,
+  honchoHeaders,
+  isCloudflareAccessBlock,
+} from "./honcho-access.mjs";
 import { ALL_TOOLS, WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { publicUrl } from "./redact.mjs";
@@ -25,6 +33,14 @@ function trimSlash(value) {
   return String(value || "").replace(/\/+$/, "");
 }
 
+function sameOrigin(left, right) {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Where each program answers. An explicit environment value wins (tests, and
  * someone running the pieces by hand); then this install's configuration; then
@@ -37,11 +53,15 @@ export async function appEndpoints({ env = process.env, config, ports } = {}) {
     ? { apiUrl: `http://127.0.0.1:${installed.api}`, dashboardUrl: `http://127.0.0.1:${installed.dashboard}` }
     : null;
   const gatewayPort = Number.parseInt(String(env.GATEWAY_UI_PORT || ""), 10);
+  const honchoUrl = trimSlash(env.HONCHO_BASE_URL || loaded?.honcho?.baseUrl || localServer?.apiUrl || DEFAULT_HONCHO_URL);
   return {
     config: loaded,
     localServer,
-    honchoUrl: trimSlash(env.HONCHO_BASE_URL || loaded?.honcho?.baseUrl || localServer?.apiUrl || DEFAULT_HONCHO_URL),
+    honchoUrl,
     honchoToken: String(env.HONCHO_API_BEARER_TOKEN || loaded?.honcho?.apiToken || ""),
+    // The saved service token goes only to the server it was saved for.
+    honchoAccess: environmentAccess(env)
+      || (sameOrigin(honchoUrl, loaded?.honcho?.baseUrl) ? configuredAccess(loaded) : null),
     dashboardUrl: trimSlash(env.HONCHO_DASHBOARD_URL || localServer?.dashboardUrl || DEFAULT_DASHBOARD_URL),
     gatewayUiUrl: trimSlash(env.GATEWAY_UI_URL
       || `http://127.0.0.1:${Number.isInteger(gatewayPort) && gatewayPort > 0 ? gatewayPort : DEFAULT_GATEWAY_UI_PORT}`),
@@ -60,7 +80,7 @@ export async function appContext(options = {}) {
     user: { peerId: config?.user?.peerId || "" },
     workspace: config?.honcho?.workspaceId || "memory",
     agents: { codex: Boolean(config?.agents?.codex), claude: Boolean(config?.agents?.claude) },
-    honcho: { url: publicUrl(endpoints.honchoUrl), hasToken: Boolean(endpoints.honchoToken) },
+    honcho: { url: publicUrl(endpoints.honchoUrl), hasToken: Boolean(endpoints.honchoToken), hasAccess: Boolean(endpoints.honchoAccess) },
     localServer: endpoints.localServer ? { ...endpoints.localServer, chatModel: await installedServerModel() } : null,
     dashboardUrl: endpoints.dashboardUrl,
     gatewayUiUrl: endpoints.gatewayUiUrl,
@@ -91,22 +111,30 @@ function sendJson(res, status, body) {
  * Relay one request and stream the answer back. Host and Origin are the target's
  * own (fetch sets them from the URL), so each program's loopback checks apply to
  * this server exactly as they would to its own screen.
+ *
+ * Only the memory server gets `credentials`: its bearer token and its Access
+ * service token. The dashboard and the gateway are other programs.
  */
-async function relay(req, res, target, { authorization = "", unreachable } = {}) {
+async function relay(req, res, target, { credentials = null, unreachable } = {}) {
   let body;
   try {
     body = ["GET", "HEAD"].includes(req.method) ? undefined : await readBody(req);
   } catch (error) {
     return sendJson(res, error.status || 400, { ok: false, error: error.message });
   }
-  const headers = { accept: req.headers.accept || "application/json" };
-  if (body) headers["content-type"] = "application/json";
-  if (authorization) headers.authorization = authorization;
+  const base = { accept: req.headers.accept || "application/json" };
+  if (body) base["content-type"] = "application/json";
+  const headers = credentials ? honchoHeaders(credentials, base) : base;
   let upstream;
   try {
-    upstream = await fetch(target, { method: req.method, headers, body, signal: AbortSignal.timeout(PROXY_TIMEOUT_MS) });
+    const init = { method: req.method, headers, body, signal: AbortSignal.timeout(PROXY_TIMEOUT_MS) };
+    upstream = credentials ? await fetchHoncho(target, init) : await fetch(target, init);
   } catch (error) {
     return sendJson(res, 502, { ok: false, unreachable: true, error: unreachable, detail: String(error?.cause?.code || error?.message || error) });
+  }
+  if (credentials && await isCloudflareAccessBlock(upstream)) {
+    await upstream.arrayBuffer().catch(() => {});
+    return sendJson(res, 502, { ok: false, unreachable: false, access: true, error: ACCESS_REFUSED_KO });
   }
   res.writeHead(upstream.status, {
     "content-type": upstream.headers.get("content-type") || "application/json",
@@ -122,7 +150,7 @@ export async function relayHoncho(req, res, url, options = {}) {
   if (!rest.startsWith("/v3/")) return sendJson(res, 400, { ok: false, error: "Only Honcho v3 routes are relayed." });
   const endpoints = await appEndpoints(options);
   return relay(req, res, `${endpoints.honchoUrl}${rest}${url.search}`, {
-    authorization: endpoints.honchoToken ? `Bearer ${endpoints.honchoToken}` : "",
+    credentials: honchoCredentials(endpoints),
     unreachable: "기억 서버에 연결할 수 없습니다.",
   });
 }
@@ -145,17 +173,20 @@ export async function relayGateway(req, res, url, options = {}) {
   });
 }
 
+function honchoCredentials(endpoints) {
+  return { token: endpoints.honchoToken, access: endpoints.honchoAccess };
+}
+
 async function honchoPost(endpoints, pathname, body = {}) {
-  const response = await fetch(`${endpoints.honchoUrl}${pathname}`, {
+  const response = await fetchHoncho(`${endpoints.honchoUrl}${pathname}`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json",
-      ...(endpoints.honchoToken ? { authorization: `Bearer ${endpoints.honchoToken}` } : {}),
-    },
+    headers: honchoHeaders(honchoCredentials(endpoints), { "content-type": "application/json", accept: "application/json" }),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
   });
+  if (await isCloudflareAccessBlock(response)) {
+    throw Object.assign(new Error(ACCESS_REFUSED_KO), { status: 502, access: true });
+  }
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const detail = payload?.detail;

@@ -16,6 +16,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { appContext, localTools, relayDashboard, relayGateway, relayHoncho, sessionsPage, setLocalTool } from "./app-api.mjs";
+import { configEnvironment, loadConfig } from "./config.mjs";
+import { ACCESS_ENV } from "./honcho-access.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -251,11 +253,16 @@ const SETUP_OPTIONS = new Set([
 ]);
 
 /**
- * A server's API token, like the shared-bridge secrets, reaches the CLI through
- * its environment and never its arguments. Left blank, the CLI keeps the token it
- * already saved for that same server.
+ * A server's API token and its Cloudflare Access service token, like the
+ * shared-bridge secrets, reach the CLI through its environment and never its
+ * arguments. Left blank, the CLI keeps what it already saved for that same server.
+ * These are the memory server's own names; the shared bridge's are above.
  */
-const SETUP_SECRET_FIELDS = Object.freeze({ apiToken: "HONCHO_API_TOKEN" });
+const SETUP_SECRET_FIELDS = Object.freeze({
+  apiToken: "HONCHO_API_TOKEN",
+  accessClientId: ACCESS_ENV.clientId,
+  accessClientSecret: ACCESS_ENV.clientSecret,
+});
 
 function setupEnvironment(body) {
   const env = { ...process.env };
@@ -279,6 +286,26 @@ function cliOptions(body) {
   return args;
 }
 
+function sameOrigin(left, right) {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The collector reads where to send and with what credentials from its
+ * environment, as it does under a hook. An environment that names another server
+ * (HONCHO_BASE_URL) is used as it is: the saved tokens stay with their own server.
+ */
+async function importEnvironment(env = process.env) {
+  const configured = configEnvironment(await loadConfig().catch(() => null), "chatgpt");
+  if (!configured.HONCHO_BASE_URL) return env;
+  if (env.HONCHO_BASE_URL && !sameOrigin(env.HONCHO_BASE_URL, configured.HONCHO_BASE_URL)) return env;
+  return { ...env, ...configured };
+}
+
 async function importChatGpt(req, res) {
   let upload;
   try {
@@ -291,7 +318,7 @@ async function importChatGpt(req, res) {
     const { stdout } = await execFileAsync(
       process.execPath,
       [COLLECTOR, "--provider", "chatgpt", "--export", upload.target],
-      { timeout: 3_600_000, maxBuffer: 64 * 1024 * 1024 },
+      { timeout: 3_600_000, maxBuffer: 64 * 1024 * 1024, env: await importEnvironment() },
     );
     payload = parseCliOutput(stdout) || { ok: false, error: "The importer returned no result." };
   } catch (error) {
@@ -364,7 +391,11 @@ export function createUiServer() {
           source: /^[a-z0-9_-]{0,40}$/i.test(query.get("source") || "") ? query.get("source") || "" : "",
         }));
       } catch (error) {
-        return json(res, error.status === 404 ? 404 : 502, { ok: false, error: String(error?.message || error) });
+        return json(res, error.status === 404 ? 404 : 502, {
+          ok: false,
+          ...(error.access ? { unreachable: false, access: true } : {}),
+          error: String(error?.message || error),
+        });
       }
     }
     const route = ROUTES[url.pathname];

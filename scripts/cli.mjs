@@ -16,6 +16,15 @@ import {
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { formatJson, publicUrl, sanitizeUrlsInText } from "./redact.mjs";
+import {
+  ACCESS_CODE,
+  ACCESS_ENV,
+  accessRefusedMessage,
+  configuredAccess,
+  fetchHoncho,
+  honchoHeaders,
+  isCloudflareAccessBlock,
+} from "./honcho-access.mjs";
 import { VERSION } from "./version.mjs";
 import { WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
 import {
@@ -38,6 +47,9 @@ const LEGACY_HOOK_MARKERS = ["codex-honcho-sync", "honcho-turn-gate"];
 
 // The config fields that point this machine's MCP server at someone else's shared
 // bridge. `setup` owns the rest of config.json and must carry these through.
+// `accessClientId/Secret` here are the bridge's Cloudflare service token; the
+// memory server's own is `honcho.access`, which setup owns and the bridge commands
+// never touch.
 const RELAY_FIELDS = ["mcpBridgeUrl", "mcpBridgeToken", "accessClientId", "accessClientSecret"];
 
 // Where `bridge connect` reads its secrets. A command line is visible to every
@@ -112,42 +124,51 @@ function sameOrigin(left, right) {
   }
 }
 
-/** A server that requires a token answers /health with 401 without one. */
-function authHeaders(config) {
-  return config?.honcho?.apiToken ? { Authorization: `Bearer ${config.honcho.apiToken}` } : {};
+/**
+ * A server that requires a token answers /health with 401 without one, and one
+ * behind Cloudflare Access refuses a machine off WARP without its service token.
+ */
+function authHeaders(config, extra = {}) {
+  return honchoHeaders({ token: config?.honcho?.apiToken, access: configuredAccess(config) }, extra);
 }
 
-async function probe(url, timeoutMs = 1500, headers = {}) {
+/**
+ * One request to the memory server. Redirects are not followed off its origin, so
+ * Access's redirect to its login page is seen for what it is.
+ */
+async function probeHoncho(baseUrl, apiPath, { headers = {}, timeoutMs = 1500, method = "GET", body } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { headers, signal: controller.signal });
-    return { ok: response.ok, status: response.status };
-  } catch (error) {
-    return { ok: false, error: String(error?.message || error) };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function probeWorkspaceAccess(config, timeoutMs = 2000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const headers = { "Content-Type": "application/json", Accept: "application/json" };
-  if (config.honcho?.apiToken) headers.Authorization = `Bearer ${config.honcho.apiToken}`;
-  try {
-    const response = await fetch(`${config.honcho.baseUrl.replace(/\/+$/, "")}/v3/workspaces/list`, {
-      method: "POST",
+    const response = await fetchHoncho(`${String(baseUrl).replace(/\/+$/, "")}${apiPath}`, {
+      method,
       headers,
-      body: "{}",
+      body,
       signal: controller.signal,
     });
+    if (await isCloudflareAccessBlock(response)) {
+      const reason = accessRefusedMessage(baseUrl);
+      return { ok: false, status: response.status, access: true, code: ACCESS_CODE, reason, error: reason };
+    }
     return { ok: response.ok, status: response.status };
   } catch (error) {
     return { ok: false, error: sanitizeUrlsInText(error?.message || error) };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function probeHealth(baseUrl, config) {
+  return probeHoncho(baseUrl, "/health", { headers: authHeaders(config) });
+}
+
+function probeWorkspaceAccess(config, timeoutMs = 2000) {
+  return probeHoncho(config.honcho.baseUrl, "/v3/workspaces/list", {
+    method: "POST",
+    headers: authHeaders(config, { "Content-Type": "application/json", Accept: "application/json" }),
+    body: "{}",
+    timeoutMs,
+  });
 }
 
 async function inspectConfiguration() {
@@ -288,7 +309,7 @@ async function detect() {
     pathExists(path.join(userHome(), ".codex", "sessions")),
     codexPluginStatus(),
     claudePluginStatus(),
-    probe(`${honchoUrl.replace(/\/+$/, "")}/health`, 1500, authHeaders(config)),
+    probeHealth(honchoUrl, config),
   ]);
   return {
     ok: true,
@@ -326,6 +347,16 @@ async function setupPlan(options = {}) {
   const envToken = String(process.env[HONCHO_API_TOKEN_ENV] || "").trim();
   const savedToken = existing?.honcho?.apiToken && sameOrigin(existing.honcho.baseUrl, baseUrl) ? existing.honcho.apiToken : "";
   const apiToken = envToken || savedToken;
+  // The Cloudflare Access service token for a server behind Access, for a machine
+  // without WARP. Same rules as the token: environment only, kept for the same
+  // server, dropped for another one.
+  const envAccessId = String(process.env[ACCESS_ENV.clientId] || "").trim();
+  const envAccessSecret = String(process.env[ACCESS_ENV.clientSecret] || "").trim();
+  const envAccessGiven = Boolean(envAccessId || envAccessSecret);
+  const envAccess = envAccessId && envAccessSecret ? { clientId: envAccessId, clientSecret: envAccessSecret } : null;
+  const existingAccess = configuredAccess(existing);
+  const savedAccess = existingAccess && sameOrigin(existing.honcho.baseUrl, baseUrl) ? existingAccess : null;
+  const access = envAccessGiven ? envAccess : savedAccess;
   const config = {
     version: CONFIG_VERSION,
     user: { peerId: optionString(options.userPeer, existing?.user?.peerId || "") },
@@ -333,6 +364,7 @@ async function setupPlan(options = {}) {
       baseUrl,
       workspaceId: optionString(options.workspace, existing?.honcho?.workspaceId || "memory"),
       ...(apiToken ? { apiToken } : {}),
+      ...(access ? { access } : {}),
       // Written by `bridge connect`, not by this plan. Rebuilding the config without
       // them would silently disconnect a shared bridge on every setup run.
       ...relayFields(existing),
@@ -364,10 +396,22 @@ async function setupPlan(options = {}) {
     issues.push("Honcho URL is invalid");
   }
   if (selectedAgents.length === 0) issues.push("at least one detected agent must be selected");
-  const onCommandLine = Object.keys(options).filter((key) => /token|secret/i.test(key));
-  if (onCommandLine.length) issues.push(`pass the API token through ${HONCHO_API_TOKEN_ENV}, not the command line`);
+  const onCommandLine = Object.keys(options).filter((key) => /token|secret|clientid/i.test(key));
+  const accessOnCommandLine = onCommandLine.filter((key) => /access|client/i.test(key));
+  if (onCommandLine.length > accessOnCommandLine.length) {
+    issues.push(`pass the API token through ${HONCHO_API_TOKEN_ENV}, not the command line`);
+  }
+  if (accessOnCommandLine.length) {
+    issues.push(`pass the Cloudflare Access service token through ${ACCESS_ENV.clientId} and ${ACCESS_ENV.clientSecret}, not the command line`);
+  }
+  if (envAccessGiven && !envAccess) {
+    issues.push(`the Cloudflare Access service token needs both ${ACCESS_ENV.clientId} and ${ACCESS_ENV.clientSecret}`);
+  }
   if (existing?.honcho?.apiToken && !envToken && !savedToken) {
     warnings.push(`The API token saved for ${publicUrl(existing.honcho.baseUrl)} is not carried to ${publicUrl(baseUrl)}`);
+  }
+  if (existingAccess && !envAccessGiven && !savedAccess) {
+    warnings.push(`The Cloudflare Access service token saved for ${publicUrl(existing.honcho.baseUrl)} is not carried to ${publicUrl(baseUrl)}`);
   }
   // Moving from a server elsewhere to one installed here: setup keeps the saved
   // address unless told otherwise, which the 2026-09-30 install test tripped on.
@@ -382,8 +426,9 @@ async function setupPlan(options = {}) {
     }
   }
   // The address this plan writes, which is not always the one detect tried.
-  const health = await probe(`${config.honcho.baseUrl.replace(/\/+$/, "")}/health`, 1500, authHeaders(config));
+  const health = await probeHealth(config.honcho.baseUrl, config);
   const managed = health.ok ? managedByThisInstall(config.honcho.baseUrl) : null;
+  if (health.access) warnings.push(health.reason);
   if (health.status === 401) {
     warnings.push(config.honcho.apiToken
       ? `${publicUrl(config.honcho.baseUrl)} rejected the API token; check the token for that server`
@@ -848,6 +893,8 @@ async function doctor() {
     "file-lock.mjs",
     "version.mjs",
     "honcho-source.mjs",
+    "honcho-access.mjs",
+    "redact.mjs",
   ];
   const missingRuntimeFiles = [];
   for (const file of requiredRuntimeFiles) {
@@ -864,7 +911,7 @@ async function doctor() {
     missingFiles: missingRuntimeFiles,
   });
   if (config) {
-    const health = await probe(`${config.honcho.baseUrl.replace(/\/+$/, "")}/health`, 1500, authHeaders(config));
+    const health = await probeHealth(config.honcho.baseUrl, config);
     checks.push({ name: "honcho-health", ...health, url: publicUrl(config.honcho.baseUrl) });
     checks.push({ name: "honcho-workspaces", ...(await probeWorkspaceAccess(config)), url: publicUrl(config.honcho.baseUrl) });
     const mcpPath = path.join(paths.runtimeDir, "mcp-server.mjs");
@@ -1130,7 +1177,7 @@ function usage() {
       "host status [--profile personal]",
       "host stop [--profile personal]",
       "gateway open",
-      "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN)",
+      "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN; its Cloudflare Access service token in HONCHO_CF_ACCESS_CLIENT_ID, HONCHO_CF_ACCESS_CLIENT_SECRET)",
       "bridge status",
       "bridge connect --url <address> (secrets in HONCHO_MCP_BEARER_TOKEN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)",
       "bridge test",

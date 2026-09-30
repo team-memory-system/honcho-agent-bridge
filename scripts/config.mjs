@@ -2,6 +2,8 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { ACCESS_ENV, configuredAccess } from "./honcho-access.mjs";
+
 export const APP_ID = "honcho-agent-bridge";
 export const CONFIG_VERSION = 1;
 
@@ -68,6 +70,12 @@ export function configEnvironment(config, provider = "") {
     HONCHO_CODEX_EXTERNAL_BATCH_SIZE: String(config.queue?.externalBatchSize ?? 1),
   };
   if (config.honcho?.apiToken) env.HONCHO_API_BEARER_TOKEN = config.honcho.apiToken;
+  // The memory server's Access service token, never the shared bridge's.
+  const access = configuredAccess(config);
+  if (access) {
+    env[ACCESS_ENV.clientId] = access.clientId;
+    env[ACCESS_ENV.clientSecret] = access.clientSecret;
+  }
   if (config.sources?.codex?.root) env.CODEX_SESSION_ROOT = config.sources.codex.root;
   if (provider) {
     env.HONCHO_AGENT_HOOK_STATE = path.join(paths.dataDir, "state", `${provider}.json`);

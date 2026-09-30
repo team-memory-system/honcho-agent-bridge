@@ -11,7 +11,8 @@
 // a list of setting names; anything else under the same key is redacted as before.
 export const NAME_ONLY_FIELDS = new Set(["missingSecretFields"]);
 const SETTING_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
-const SECRET_FIELD = /(token|secret|api[_-]?key|authorization)/i;
+// A Cloudflare Access service token is a pair; its ID is half of the credential.
+const SECRET_FIELD = /(token|secret|api[_-]?key|authorization|client[_-]?id)/i;
 
 function isSettingNameList(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string" && SETTING_NAME.test(item));
