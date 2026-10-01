@@ -46,7 +46,7 @@ function installControls(item, { onInstall, team = "", onTeam }) {
   const box = h("input", {
     class: "input",
     value: team,
-    placeholder: "Cloudflare 계정 관리자에게 받은 이름",
+    placeholder: "로그인 주소 <이름>.cloudflareaccess.com의 앞부분",
     "aria-label": "팀 이름",
     autocomplete: "off",
     spellcheck: "false",

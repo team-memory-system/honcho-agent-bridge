@@ -26,7 +26,7 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | WARP install, before running it | 곧 암호 창이 뜹니다. Mac 암호를 넣으면 WARP가 설치됩니다(Windows는 허용 창에서 예). |
 | WARP installer open (`warp-installer`, the fallback) | WARP 설치 창을 열었습니다. 계속 → 설치를 누르고 Mac 암호를 넣어 주세요. 처음 화면에서 1.1.1.1과 Cloudflare One 중에 고르라고 하면 Cloudflare One을 고르고 팀 이름 <team>을 넣으세요. 끝나면 "했어"라고 말해 주세요. |
 | WARP install cancelled | 설치를 취소했습니다. 다시 하려면 "다시"라고 말해 주세요. |
-| WARP team join | WARP를 팀에 등록합니다. 팀 이름을 알려 주세요. 모르면 Cloudflare 계정을 관리하는 사람에게 받으세요. |
+| WARP team join | WARP를 Cloudflare 계정에 등록합니다. 계정의 팀 이름(로그인 주소 `<이름>.cloudflareaccess.com`의 앞부분)을 알려 주세요. 모르면 그 Cloudflare 계정을 만든 사람에게 받으세요. |
 | WARP login | 브라우저에 팀 로그인 창이 열렸습니다. 팀이 정한 방법(보통 이메일로 받은 코드)으로 로그인해 주세요. 끝나면 "했어"라고 말해 주세요. |
 | WARP login failed ("Enrollment request is invalid" or another error page) | 로그인이 끝나지 않았습니다. 제가 로그인 창을 새로 띄우겠습니다. 이번 창에서 바로 로그인해 주세요. (then run `warp-cli registration new <team>` again; if it fails twice, the email is probably not allowed in the team's device enrollment rules — tell the user to ask whoever runs the Cloudflare account to allow it) |
 | Server plan confirmation | Question "서버를 이렇게 설치합니다. 진행할까요?" whose text lists, one line each and only those in the plan: Docker Desktop 설치 (첫 실행 때 약관 동의와 Mac 암호 필요) / Ollama와 임베딩 모델(Qwen3-Embedding 4B, 약 2.5GB) 받기 / 구독 게이트웨이 설치 (로그인하면 자동으로 켜짐) / 기억 서버 설치 (주소 <apiUrl>), then the Docker license warning: 회사 직원이 250명 이상이거나 매출이 1천만 달러 이상이면 Docker 유료 구독이 필요합니다. Options "진행", "취소" |
