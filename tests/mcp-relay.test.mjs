@@ -1,6 +1,7 @@
-// When the config names an MCP bridge, this process stops implementing the tools and
-// relays to that bridge instead. That is what keeps a teammate's call inside the
-// owner's audit log and judgment gate, and what keeps one tool list rather than two.
+// When the config names an MCP bridge and this computer has no memory of its own,
+// this process stops implementing the tools and relays to that bridge instead. That
+// is what keeps a teammate's call inside the owner's audit log and judgment gate.
+// A computer with both is tests/mcp-shared.test.mjs.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fsp from "node:fs/promises";

@@ -49,12 +49,31 @@ gets an answer, without reading the underlying messages.
    `host ...` installs the subscription gateway through its own CLI and supervises
    Ollama. Every chat model Honcho uses goes through the gateway's router; the router
    key comes from the gateway, not from the person installing.
-5. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server. Given
-   `honcho.mcpBridgeUrl` in its config it stops implementing the tools itself and
-   relays to that bridge instead, so the tool definitions live in one place and the
-   call is recorded in the bridge's audit log. `bridge connect` writes that address
-   and its three credentials, and keeps them only if the plugin's own MCP server
-   then reaches the bridge with them.
+5. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server. It serves this
+   computer's own recall tools, and relays a teammate's shared bridge
+   (`honcho.mcpBridgeUrl`), so the shared tool definitions live in one place and
+   every shared call is recorded in the bridge's audit log. `bridge connect` writes
+   that address and its three credentials, and keeps them only if the plugin's own
+   MCP server then reaches the bridge with them. What the agent sees depends on what
+   this computer has (`scripts/mcp-shared-tools.mjs`):
+
+   | This computer has | Tool list |
+   | --- | --- |
+   | Its own memory (a server address, a user, an agent with sync on) | The local tools, filtered by `mcp-tools.json` |
+   | Only a shared bridge | The bridge's tools under their own names (`chat`), a pure relay |
+   | Both | The local tools as above, plus the bridge's tools renamed `shared_<name>` (`shared_chat`) |
+
+   With both, a `shared_*` tool's description starts with "Asks the shared memory at
+   &lt;bridge host&gt; (a teammate's memory), not yours.", its input schema is the
+   bridge's, and a call is relayed with the prefix stripped; every other name is
+   answered locally. The local switches never hide or store a shared tool, and the
+   app's switch list (`ALL_TOOLS`) holds local tools only. An unreachable bridge
+   never breaks local recall: its tools are left out of the list (or, if it answered
+   in the last minute, kept with a note that it is unreachable), and a `shared_*`
+   call returns an error naming the bridge. A shared name that would equal a local
+   one is skipped. The CLI's probes pass `--only bridge` (`bridge connect`, `bridge
+   test`, `doctor`'s `shared-bridge` check) or `--only local` (`doctor`'s `mcp`
+   check), so a down bridge still fails its own check.
 
 ### Things that will bite you
 

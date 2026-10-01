@@ -29,6 +29,8 @@ The memory's owner gives the user four values: the shared bridge address, a brid
 
 This path installs no hooks and needs no local Honcho server. `bridge disconnect` removes the four values.
 
+On a computer that also syncs its own conversations, `bridge connect` adds to what the agent has rather than replacing it. After the restart the agent keeps its own recall tools (`search`, `chat`, `get_peer_context` and the rest) for the user's own memory, and asks the teammate's memory with `shared_chat` (each shared tool is the bridge's tool with `shared_` in front). `bridge test` still reports the bridge's own names (`chat`). If the bridge is unreachable, the user's own tools keep working and only `shared_*` calls fail.
+
 ## Own memory workflow
 
 1. Run `node <plugin-root>/scripts/cli.mjs detect` and inspect the JSON.

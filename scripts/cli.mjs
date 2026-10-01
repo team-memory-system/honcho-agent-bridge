@@ -837,9 +837,12 @@ async function installedRuntimeVersion(runtimeDir) {
   }
 }
 
-async function probeMcpServer(serverPath, timeoutMs = 2500, env = process.env) {
+// `only` is mcp-server.mjs's `--only bridge|local`. On a computer with its own
+// memory and a shared bridge the server lists both, and keeps listing its own tools
+// when the bridge is down, so a plain probe would not prove the bridge answers.
+async function probeMcpServer(serverPath, timeoutMs = 2500, env = process.env, { only = "" } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [serverPath, "--provider", "doctor"], {
+    const child = spawn(process.execPath, [serverPath, "--provider", "doctor", ...(only ? ["--only", only] : [])], {
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -921,6 +924,7 @@ async function doctor() {
     "queue.mjs",
     "collector.mjs",
     "mcp-server.mjs",
+    "mcp-shared-tools.mjs",
     "ui.mjs",
     "file-lock.mjs",
     "version.mjs",
@@ -948,11 +952,11 @@ async function doctor() {
     checks.push({ name: "honcho-health", ...health, url: publicUrl(config.honcho.baseUrl) });
     checks.push({ name: "honcho-workspaces", ...(await probeWorkspaceAccess(config)), url: publicUrl(config.honcho.baseUrl) });
     const mcpPath = path.join(paths.runtimeDir, "mcp-server.mjs");
+    // Own memory and a shared bridge: the agent gets both, so both are checked.
+    checks.push({ name: "mcp", ...(await probeMcpServer(mcpPath, undefined, undefined, { only: "local" })), path: mcpPath });
     if (relaysToBridge(config)) {
-      const probe = await probeMcpServer(mcpPath, BRIDGE_PROBE_TIMEOUT_MS, bridgeProbeEnvironment());
+      const probe = await probeMcpServer(mcpPath, BRIDGE_PROBE_TIMEOUT_MS, bridgeProbeEnvironment(), { only: "bridge" });
       checks.push({ name: "shared-bridge", ...probe, path: mcpPath, url: publicUrl(config.honcho.mcpBridgeUrl) });
-    } else {
-      checks.push({ name: "mcp", ...(await probeMcpServer(mcpPath)), path: mcpPath });
     }
     for (const [provider, enabled] of Object.entries(config.agents || {})) {
       if (!enabled) continue;
@@ -1031,7 +1035,7 @@ function bridgeProbeEnvironment() {
 }
 
 function probeBridge() {
-  return probeMcpServer(path.join(SCRIPT_DIR, "mcp-server.mjs"), BRIDGE_PROBE_TIMEOUT_MS, bridgeProbeEnvironment());
+  return probeMcpServer(path.join(SCRIPT_DIR, "mcp-server.mjs"), BRIDGE_PROBE_TIMEOUT_MS, bridgeProbeEnvironment(), { only: "bridge" });
 }
 
 async function bridgeStatus() {
