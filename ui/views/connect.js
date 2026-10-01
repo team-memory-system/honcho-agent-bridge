@@ -239,7 +239,7 @@ export default {
       const form = template.querySelector("form");
       clear(share,
         h("div", { class: "panel" },
-          h("p", { class: "muted", style: { margin: "0 0 12px", fontSize: "13px" } }, "기억 주인에게 받은 네 값을 넣습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요."),
+          h("p", { class: "muted", style: { margin: "0 0 12px", fontSize: "13px" } }, "기억을 공유한 팀원에게 받은 네 값을 넣습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요."),
           template,
           h("div", { class: "form-actions" }, button("연결", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
             if (!form.reportValidity()) return;

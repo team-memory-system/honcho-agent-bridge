@@ -9,13 +9,13 @@ Use the deterministic CLI bundled at `<plugin-root>/scripts/cli.mjs`. Resolve `<
 
 ## First: which features
 
-Ask one question before anything else: which of these three features this computer should have. They are independent and combine; ask it as a multi-select. Use these labels and descriptions as written, in the user's language (Korean shown). Do not rename them, do not present them as mutually exclusive paths, do not add options, and never name a particular computer (such as the user's home machine) in them. Prefer the host's structured question tool. Skip the question when the request already says which.
+Ask one question before anything else: which of these three features this computer should have. They are independent and combine; ask it as a multi-select. Use these labels and descriptions as written, in the user's language (Korean shown). Do not rename them, do not present them as mutually exclusive paths, do not add options, and never name a particular computer in them. Present the three neutrally: do not recommend, discourage or presume any of them, do not say what people "usually" pick or how many servers a person has, and never describe the user's setup from examples in this file or the docs; anything you add beyond the labels below is noise. Prefer the host's structured question tool. Skip the question when the request already says which.
 
-- **서버 설치** — 이 컴퓨터에 내 기억 서버를 둡니다. 한 사람에게 하나면 되고, 내 다른 컴퓨터의 대화도 여기로 모을 수 있습니다. → "Own memory workflow" below, step 1 (the server).
-- **대화 동기화** — 이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 보냅니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다. → "Own memory workflow" below, steps 2–10, with "Own server on another computer" when the server is elsewhere.
-- **다른 사람 기억에 묻기 (chat)** — 팀원이 열어 준 창구에 연결해 그 사람의 기억에 질문합니다. → "Asking someone else's memory" below.
+- **서버 설치** — 이 컴퓨터에 기억 서버를 설치합니다. 다른 컴퓨터의 대화도 이 서버로 받을 수 있습니다. → "Own memory workflow" below, step 1 (the server).
+- **대화 동기화** — 이 컴퓨터의 Claude Code·Codex 대화를 기억 서버로 보냅니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다. → "Own memory workflow" below, steps 2–10, with "Own server on another computer" when the server is elsewhere.
+- **다른 사람 기억에 묻기 (chat)** — 팀원이 공유한 기억에 질문합니다. → "Asking someone else's memory" below.
 
-Typical combinations: the computer that keeps the server takes 서버 설치 + 대화 동기화; another of the person's computers takes 대화 동기화 (and chat if they want); a computer that only asks teammates takes chat alone. With 서버 설치 but not 대화 동기화, install and start the server and skip the hooks. With 대화 동기화 but not 서버 설치, never install a server here; ask for the address of the server they already have. Do them in this order: server, then sync, then chat.
+With 서버 설치 but not 대화 동기화, install and start the server and skip the hooks. With 대화 동기화 but not 서버 설치, never install a server here; ask for the address of the server they already have. Do them in this order: server, then sync, then chat.
 
 Sending some folders to a company server as well is not a fourth feature; offer it after 대화 동기화 is set up, only if the user asks (see "Also sending some folders to another server").
 
@@ -33,7 +33,7 @@ Once the features are chosen, check the software they need and get it installed 
 
 ## Asking someone else's memory
 
-The memory's owner gives the user four values: the shared bridge address, a bridge token, and a Cloudflare service token ID and secret. The user enters them in the Team Memory app, not in chat.
+The teammate who shares their memory gives the user four values: the shared bridge address, a bridge token, and a Cloudflare service token ID and secret. The user enters them in the Team Memory app, not in chat.
 
 1. Run `node <plugin-root>/scripts/cli.mjs ui open`. It starts the local Team Memory app if it is not already running, opens it in the browser, and returns its `url`. Give the user that address as text as well, in case no browser window appeared.
 2. Tell the user to open 연결 → "다른 사람의 기억에 묻기", fill in the four fields, and press 연결. The screen saves the values only after it has reached the bridge with them, and shows the tools the bridge offers (normally just `chat`).
@@ -98,7 +98,7 @@ For a user whose own Honcho already runs on another of their computers (reachabl
 
 To make that possible for a personal server on the other computer, share it there first (Cloudflare Tunnel plus Access only; never Tailscale):
 
-1. The owner creates a tunnel in the Cloudflare Zero Trust dashboard (Networks → Tunnels → Create a tunnel → Cloudflared), sets its public hostname's service to `http://localhost:<gate port>` (`server share status` shows the port), and puts an Access application with a WARP-group or email policy on that hostname. For a team, an admin can do this and hand over only the tunnel token.
+1. The person running the server creates a tunnel in the Cloudflare Zero Trust dashboard (Networks → Tunnels → Create a tunnel → Cloudflared), sets its public hostname's service to `http://localhost:<gate port>` (`server share status` shows the port), and puts an Access application with a WARP-group or email policy on that hostname. For a team, an admin can do this and hand over only the tunnel token.
 2. On the server's computer the user runs `HONCHO_TUNNEL_TOKEN=... node <plugin-root>/scripts/cli.mjs server share enable --public-url https://<hostname>` in their own terminal. Never ask for the tunnel token in chat or pass it as an option; the CLI refuses a token option. The app's server screen does the same with the token kept off the command line.
 3. `server share status --check` reports `publicCheck.state`: `access` means Cloudflare Access did not let this device in (check the WARP group or the policy), `token` a wrong gate token, `unreachable` the tunnel or the gate being down.
 4. The gate token is the `HONCHO_API_TOKEN` for setup on the other computer. The user copies it from the app's server screen, or runs `server share token` in their own terminal; do not run that command yourself, since its output is the secret. `server share disable` turns sharing off and keeps both tokens; `server share rotate` replaces the gate token.

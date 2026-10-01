@@ -200,7 +200,7 @@ export default {
         clear(box, share.enabled ? shareOn(share, drawShare) : shareOff(share, drawShare));
       };
       drawShare(false);
-      return section({ id: "share", title: "다른 컴퓨터에서 쓰기", note: "회사 맥북 같은 내 다른 컴퓨터가 대화를 이 서버로 보내게 합니다. Cloudflare 통로로만 열고, 서버 토큰이 없는 요청은 받지 않습니다." }, box);
+      return section({ id: "share", title: "다른 컴퓨터에서 쓰기", note: "다른 컴퓨터가 대화를 이 서버로 보내게 합니다. Cloudflare 통로로만 열고, 서버 토큰이 없는 요청은 받지 않습니다." }, box);
     }
 
     const PUBLIC_STATES = {
@@ -408,7 +408,7 @@ export default {
       ];
       // Looking at the plan is optional; the next thing to do is the first unfinished step after it.
       const current = steps.findIndex((step, index) => index > 0 && !step.done);
-      return section({ title: "서버 설치", note: "기억 서버, 구독 게이트웨이, 임베딩 모델을 이 컴퓨터에 설치합니다. 한 사람에게 서버는 하나면 됩니다. 이미 다른 컴퓨터에 내 서버가 있으면 설치하지 마세요." },
+      return section({ title: "서버 설치", note: "기억 서버, 구독 게이트웨이, 임베딩 모델을 이 컴퓨터에 설치합니다." },
         h("div", { class: "steps" }, steps.map((step, index) => h("div", { class: `step ${step.done ? "done" : index === current ? "current" : ""}` },
           h("span", { class: "step-num" }),
           h("div", {},

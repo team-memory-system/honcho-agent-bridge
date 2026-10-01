@@ -8,23 +8,21 @@ import { app, go, loadContext, refreshStatus, savePrefs, workspace } from "../li
 import { button, busy, pageHead, spinner, tag, toast } from "../lib/ui.js";
 
 // Three features, not three exclusive paths: a computer turns on what it needs.
-// The computer that keeps the server usually does server + sync; another of the
-// person's computers does sync; chat can sit on any of them.
 const FEATURES = [
   {
     key: "server",
     title: "서버 설치",
-    text: "이 컴퓨터에 내 기억 서버를 둡니다. 한 사람에게 하나면 되고, 내 다른 컴퓨터의 대화도 여기로 모을 수 있습니다. Docker와 Ollama는 없으면 앱이 설치하고, Codex나 Claude 구독이 필요합니다.",
+    text: "이 컴퓨터에 기억 서버를 설치합니다. 다른 컴퓨터의 대화도 이 서버로 받을 수 있습니다. Docker와 Ollama는 없으면 앱이 설치하고, Codex나 Claude 구독이 필요합니다.",
   },
   {
     key: "sync",
     title: "대화 동기화",
-    text: "이 컴퓨터에서 Claude Code·Codex와 나눈 대화를 내 기억 서버로 보냅니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다.",
+    text: "이 컴퓨터에서 Claude Code·Codex와 나눈 대화를 기억 서버로 보냅니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다.",
   },
   {
     key: "chat",
     title: "다른 사람 기억에 묻기 (chat)",
-    text: "팀원이 열어 준 창구에 연결해, 에이전트가 그 사람의 기억에 질문하게 합니다. 원문은 보지 않고 답만 받습니다. 팀원에게 받은 네 값이 필요합니다.",
+    text: "에이전트가 팀원이 공유한 기억에 질문하게 합니다. 원문은 보지 않고 답만 받습니다. 팀원에게 받은 네 값이 필요합니다.",
   },
 ];
 
@@ -67,7 +65,7 @@ export default {
       const go_ = button("이대로 준비하기", { kind: "primary", onClick: () => { savePrefs({ startFeatures: [...picked] }); drawSteps(); } });
       const sync = () => { go_.disabled = picked.size === 0; };
       clear(body,
-        h("p", { class: "section-note", style: { margin: "0 0 16px" } }, "이 컴퓨터에서 쓸 기능을 고르세요. 여러 개를 같이 켤 수 있고, 나중에 더 켤 수도 있습니다. 서버는 한 사람에게 한 대면 됩니다."),
+        h("p", { class: "section-note", style: { margin: "0 0 16px" } }, "이 컴퓨터에서 쓸 기능을 고르세요. 여러 개를 같이 켤 수 있고, 나중에 더 켤 수도 있습니다."),
         h("div", { class: "choices" }, FEATURES.map((feature) => {
           const card = h("button", {
             class: `choice ${picked.has(feature.key) ? "picked" : ""}`,
@@ -126,7 +124,7 @@ export default {
           { title: "기억 서버 준비", done: Boolean(server?.installed), text: server?.installed ? "이 컴퓨터에 설치돼 있습니다." : server && !server.docker?.installed ? "Docker Desktop과 Ollama부터 이 앱이 받아서 설치합니다." : "서버 소스와 게이트웨이를 설치합니다.", action: ["서버 화면에서 준비", () => go("server")] },
           { title: "구독 계정 로그인", done: gatewayReady, text: gatewayReady ? app.status.gateway.text : "기억 서버가 생각할 모델을 쓰려면 Codex나 Claude 계정이 필요합니다.", action: ["게이트웨이에서 로그인", () => go("models/add/codex")] },
           { title: "기억 서버 시작", done: Boolean(server?.running && server?.health?.ok), text: server?.running ? "답하는 중입니다." : "로그인 뒤 서버 화면에서 준비를 한 번 더 누르고 시작합니다.", action: ["서버 화면으로", () => go("server")] },
-          { title: "다른 컴퓨터에서 쓰게 열기 (선택)", done: Boolean(server?.share?.enabled), text: server?.share?.enabled ? `${server.share.publicUrl}로 열려 있습니다.` : "회사 맥북 같은 다른 컴퓨터의 대화도 여기로 모으려면 Cloudflare 통로를 엽니다. 이 컴퓨터 하나만 쓰면 건너뜁니다.", action: ["서버 화면에서 열기", () => go("server")], optional: true },
+          { title: "다른 컴퓨터에서 쓰게 열기 (선택)", done: Boolean(server?.share?.enabled), text: server?.share?.enabled ? `${server.share.publicUrl}로 열려 있습니다.` : "다른 컴퓨터의 대화도 이 서버로 받으려면 Cloudflare 통로를 엽니다.", action: ["서버 화면에서 열기", () => go("server")], optional: true },
         );
       }
       if (features.includes("sync")) {
