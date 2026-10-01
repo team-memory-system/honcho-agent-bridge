@@ -12,18 +12,25 @@ const FEATURES = [
   {
     key: "server",
     title: "서버 설치",
-    text: "이 컴퓨터에 기억 서버를 설치합니다. 다른 컴퓨터의 대화도 이 서버로 받을 수 있습니다. Docker와 Ollama는 없으면 앱이 설치하고, Codex나 Claude 구독이 필요합니다.",
+    text: "이 컴퓨터에 기억 서버를 설치합니다. 내 다른 컴퓨터의 대화도 이 서버로 모을 수 있습니다. Docker와 Ollama는 없으면 앱이 설치하고, Codex나 Claude 구독이 필요합니다.",
   },
   {
     key: "sync",
-    title: "대화 동기화",
-    text: "이 컴퓨터에서 Claude Code·Codex와 나눈 대화를 기억 서버로 보냅니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다.",
+    title: "대화 보내기",
+    text: "이 컴퓨터에서 Claude Code·Codex와 나눈 대화를 내 기억 서버로 보내고, 에이전트가 내 기억을 꺼내 쓰게 합니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다.",
   },
   {
     key: "chat",
-    title: "다른 사람 기억에 묻기 (chat)",
-    text: "에이전트가 팀원이 공유한 기억에 질문하게 합니다. 원문은 보지 않고 답만 받습니다. 팀원에게 받은 연결 정보가 필요합니다.",
+    title: "팀원 기억에 묻기",
+    text: "에이전트가 팀원이 열어 준 기억에 질문하게 합니다. 원문은 보지 않고 답만 받습니다. 팀원에게 받은 주소와 토큰이 필요합니다.",
   },
+];
+
+// Turned on after setup, from the screen that does it, never in the first question.
+const LATER = [
+  { feature: "server", title: "다른 컴퓨터에서 쓰기", text: "내 다른 컴퓨터가 이 서버로 대화를 보내고 기억을 꺼내 쓰게 엽니다.", screen: "server" },
+  { feature: "sync", title: "회사 서버에도 보내기", text: "정한 폴더의 대화만 다른 기억 서버에도 보냅니다.", screen: "connect/targets" },
+  { feature: "sync", title: "ChatGPT 기록 가져오기", text: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다.", screen: "connect/import" },
 ];
 
 function chosenFeatures() {
@@ -193,12 +200,11 @@ export default {
           { title: "기억 서버 준비", done: Boolean(server?.installed), text: server?.installed ? "이 컴퓨터에 설치돼 있습니다." : server && !server.docker?.installed ? "Docker Desktop과 Ollama부터 이 앱이 받아서 설치합니다." : "서버 소스와 게이트웨이를 설치합니다.", action: ["서버 화면에서 준비", () => go("server")] },
           { title: "구독 계정 로그인", done: gatewayReady, text: gatewayReady ? app.status.gateway.text : "기억 서버가 생각할 모델을 쓰려면 Codex나 Claude 계정이 필요합니다.", action: ["게이트웨이에서 로그인", () => go("models/add/codex")] },
           { title: "기억 서버 시작", done: Boolean(server?.running && server?.health?.ok), text: server?.running ? "답하는 중입니다." : "로그인 뒤 서버 화면에서 준비를 한 번 더 누르고 시작합니다.", action: ["서버 화면으로", () => go("server")] },
-          { title: "다른 컴퓨터에서 쓰게 열기 (선택)", done: Boolean(server?.share?.enabled), text: server?.share?.enabled ? `${server.share.publicUrl}로 열려 있습니다.` : "다른 컴퓨터의 대화도 이 서버로 받으려면 Cloudflare 통로를 엽니다.", action: ["서버 화면에서 열기", () => go("server")], optional: true },
         );
       }
       if (features.includes("sync")) {
         steps.push({
-          title: "대화 동기화 설정",
+          title: "대화 보내기 설정",
           done: Boolean(context?.configured),
           text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "내 이름과 모을 에이전트를 고릅니다. 서버 주소는 비워 두면 이 컴퓨터 서버로 보냅니다." : "서버를 둔 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두세요.",
           action: ["연결 화면에서 설정", () => go("connect/collect")],
@@ -242,7 +248,17 @@ export default {
         ),
       )));
       if (firstOpen === -1 && steps.length) {
-        list.after(h("div", { class: "notice ok", style: { marginTop: "16px" } }, h("div", {}, h("b", {}, "준비가 끝났습니다. "), "이제 대화가 끝날 때마다 기억이 쌓입니다.")));
+        const later = LATER.filter((item) => features.includes(item.feature));
+        list.after(
+          h("div", { class: "notice ok", style: { marginTop: "16px" } }, h("div", {}, h("b", {}, "준비가 끝났습니다. "), features.includes("sync") ? "이제 대화가 끝날 때마다 기억이 쌓입니다." : "")),
+          later.length ? h("div", { class: "rows", style: { marginTop: "16px" } },
+            h("p", { class: "section-note", style: { margin: "0 0 8px" } }, "필요하면 나중에 더 켤 수 있습니다."),
+            later.map((item) => h("div", { class: "row" },
+              h("div", { style: { minWidth: "0" } }, h("div", { class: "title" }, item.title), h("div", { class: "sub" }, item.text)),
+              h("div", { class: "end" }, button("열기", { kind: "small quiet", onClick: () => go(item.screen) })),
+            )),
+          ) : null,
+        );
       }
     }
 

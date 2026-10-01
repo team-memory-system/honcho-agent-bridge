@@ -46,7 +46,7 @@ function renderMachine() {
   clear($("#machine"),
     h("a", { href: "#/server" }, light(honcho.state), h("span", {}, "기억 서버"), h("small", {}, honcho.text)),
     h("a", { href: "#/models" }, light(gateway.state), h("span", {}, "구독 게이트웨이"), h("small", {}, gateway.text)),
-    h("a", { href: "#/connect" }, light(collector.state), h("span", {}, "대화 동기화"), h("small", {}, collector.text)),
+    h("a", { href: "#/connect" }, light(collector.state), h("span", {}, "대화 보내기"), h("small", {}, collector.text)),
   );
   $("#who-name").textContent = me() || "이름 미설정";
   $("#who-space").textContent = `작업공간 ${workspace()}`;
@@ -105,7 +105,7 @@ function palette() {
     { label: "기억에서 찾기", hint: "기억", run: () => { go("memory"); setTimeout(() => $("#memory-search")?.focus(), 50); } },
     { label: "내 기억에 묻기", hint: "묻기", run: () => go("ask") },
     { label: "구독 계정 추가", hint: "게이트웨이", run: () => go("models") },
-    { label: "대화 동기화 설정", hint: "연결", run: () => go("connect/collect") },
+    { label: "대화 보내기 설정", hint: "연결", run: () => go("connect/collect") },
     { label: "ChatGPT 기록 가져오기", hint: "연결", run: () => go("connect/import") },
     { label: "서버 점검", hint: "서버", run: () => go("server") },
     { label: "MCP 도구 켜고 끄기", hint: "도구·기록", run: () => go("tools") },

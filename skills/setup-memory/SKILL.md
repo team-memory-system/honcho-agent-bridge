@@ -10,7 +10,7 @@ Use the deterministic CLI bundled at `<plugin-root>/scripts/cli.mjs`. Resolve `<
 
 Speak to the user in the language they wrote in: progress notes, questions, warnings and summaries alike (Korean for a Korean request). This file and the CLI's JSON are in English; translate what you pass on and never switch to English mid-setup.
 
-The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버), `models` (게이트웨이), `connect` (대화 동기화), `connect/share` (다른 사람 기억에 묻기). Do not send them to the gateway's own page at 11450.
+The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버), `models` (게이트웨이), `connect` (대화 보내기), `connect/share` (팀원 기억에 묻기). Do not send them to the gateway's own page at 11450.
 
 ## Fixed lines
 
@@ -38,13 +38,13 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | Agents question | Question "어느 에이전트의 대화를 보낼까요?" Options "찾은 에이전트 모두 (<이름들>)", "지금 쓰는 <이름>만", "직접 고르기" |
 | Peer ID question (only when none is configured) | 기억에서 나를 가리킬 이름을 정해 주세요. 영문 소문자와 밑줄로 씁니다. 예: user_hong |
 | Server elsewhere | 기억 서버의 주소를 알려 주세요. 서버 토큰은 채팅에 쓰지 말고, 제가 알려 드리는 명령을 터미널에서 직접 실행하세요. |
-| Setup plan confirmation | Question "대화 동기화를 이렇게 설정합니다. 진행할까요?" whose text lists the files from `operations`. Options "진행", "취소" |
+| Setup plan confirmation | Question "대화 보내기를 이렇게 설정합니다. 진행할까요?" whose text lists the files from `operations`. Options "진행", "취소" |
 | `approve-hook` | Codex를 새로 열면 훅 승인 창이 뜹니다. "Syncing codex conversation to personal memory"만 승인하세요. 승인하기 전에는 Codex 대화가 모이지 않습니다. |
 | `reload-plugins` | 이미 열려 있는 Claude Code 창에서는 `/reload-plugins`를 입력하세요. |
 | Chat connection | 팀원에게 받은 주소와 토큰을 방금 연 앱 화면(<url>)에 넣고 "연결"을 누르세요. 채팅에는 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
 | Chat connected | 팀원 기억에 연결했습니다. 에이전트를 다시 시작하면 <chat 또는 shared_chat> 도구로 물을 수 있습니다. |
 | Stopped on an error | <단계>에서 멈췄습니다. <오류를 사용자의 말로 옮긴 것> |
-| Done | 설치가 끝났습니다. 켠 기능: <기능들>. 문제가 생기면 `/memory-doctor`를 입력하세요. |
+| Done | 설치가 끝났습니다. 켠 기능: <기능들>. 필요하면 나중에 팀 메모리 앱에서 더 켤 수 있습니다: <켠 기능에 해당하는 것만: 다른 컴퓨터에서 쓰기(서버 화면) / 회사 서버에도 보내기, ChatGPT 기록 가져오기(대화 보내기 화면)>. 문제가 생기면 `/memory-doctor`를 입력하세요. |
 
 Use the detected default data directory without asking; ask about it only when the user brings it up.
 
@@ -52,13 +52,13 @@ Use the detected default data directory without asking; ask about it only when t
 
 Ask one question before anything else: which of these three features this computer should have. They are independent and combine; ask it as a multi-select. Use these labels and descriptions as written, in the user's language (Korean shown). Do not rename them, do not present them as mutually exclusive paths, do not add options (no "plugin only", "later" or "skip"; the question tool already lets the user answer otherwise), and never name a particular computer in them. Present the three neutrally: do not recommend, discourage or presume any of them, do not say what people "usually" pick or how many servers a person has, and never describe the user's setup from examples in this file or the docs; anything you add beyond the labels below is noise. Prefer the host's structured question tool. Skip the question when the request already says which.
 
-- **서버 설치** — 이 컴퓨터에 기억 서버를 설치합니다. 다른 컴퓨터의 대화도 이 서버로 받을 수 있습니다. → "Own memory workflow" below, step 1 (the server).
-- **대화 동기화** — 이 컴퓨터의 Claude Code·Codex 대화를 기억 서버로 보냅니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다. → "Own memory workflow" below, steps 2–10, with "Own server on another computer" when the server is elsewhere.
-- **다른 사람 기억에 묻기 (chat)** — 팀원이 공유한 기억에 질문합니다. 팀원에게 받은 연결 정보가 필요합니다. → "Asking someone else's memory" below.
+- **서버 설치** — 이 컴퓨터에 기억 서버를 설치합니다. 내 다른 컴퓨터의 대화도 이 서버로 모을 수 있습니다. → "Own memory workflow" below, step 1 (the server).
+- **대화 보내기** — 이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 보내고, 에이전트가 내 기억을 꺼내 쓰게 합니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다. → "Own memory workflow" below, steps 2–10, with "Own server on another computer" when the server is elsewhere.
+- **팀원 기억에 묻기** — 에이전트가 팀원이 열어 준 기억에 질문합니다. 팀원에게 받은 주소와 토큰이 필요합니다. → "Asking someone else's memory" below.
 
-With 서버 설치 but not 대화 동기화, install and start the server and skip the hooks. With 대화 동기화 but not 서버 설치, never install a server here; ask for the address of the server they already have. Do them in this order: server, then sync, then chat.
+With 서버 설치 but not 대화 보내기, install and start the server and skip the hooks. With 대화 보내기 but not 서버 설치, never install a server here; ask for the address of the server they already have. Do them in this order: server, then sync, then chat.
 
-Sending some folders to a company server as well is not a fourth feature; offer it after 대화 동기화 is set up, only if the user asks (see "Also sending some folders to another server").
+Opening the server to the user's other computers (다른 컴퓨터에서 쓰기), sending some folders to a company server as well, and importing past ChatGPT conversations are not features of this question. Do not ask about them or set them up during the first setup; the "Done" line names them once. Set one up only when the user asks for it: opening the server in "Own server on another computer", a company server in "Also sending some folders to another server", a ChatGPT import on the app's `connect/import` screen. The one exception: 대화 보내기 to a server on another computer needs that server opened first, as "Own server on another computer" describes.
 
 ## Then: required software, before anything else
 
