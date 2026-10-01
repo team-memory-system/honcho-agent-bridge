@@ -491,7 +491,10 @@ export function gatewayLoginAction(uiUrl, then, reason = "") {
   return {
     kind: "gateway-login",
     url,
-    message: `${reason ? `${reason}. ` : ""}Open ${url} and log in with Codex and/or Claude in the gateway screen, then ${then}.`,
+    // The Team Memory app's 게이트웨이 screen does the same login; agents open it
+    // with `ui open --screen models` rather than the gateway's own page.
+    appScreen: "models",
+    message: `${reason ? `${reason}. ` : ""}Open the Team Memory app's gateway screen (ui open --screen models) or ${url} and log in with Codex and/or Claude in the gateway screen, then ${then}.`,
   };
 }
 

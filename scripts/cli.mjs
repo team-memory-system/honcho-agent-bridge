@@ -1648,6 +1648,10 @@ function openBrowser(url) {
 async function uiOpen(options = {}) {
   const port = Number(process.env.HONCHO_AGENT_BRIDGE_UI_PORT || 4180);
   const url = `http://${UI_HOST}:${port}/`;
+  // `--screen models` opens the app on that screen (its #/models route).
+  const screen = typeof options.screen === "string" ? options.screen.replace(/^[#/]+/, "") : "";
+  if (screen && !/^[a-z0-9/_-]+$/i.test(screen)) return { ok: false, url, error: `Not a screen name: ${screen}` };
+  const pageUrl = screen ? `${url}#/${screen}` : url;
   const state = await uiState(url);
   if (state === "other") {
     return { ok: false, url, error: `Something else is answering at ${url}. Close it, or set HONCHO_AGENT_BRIDGE_UI_PORT.` };
@@ -1670,8 +1674,8 @@ async function uiOpen(options = {}) {
     }
     if (!ready) return { ok: false, url, pid, error: "The setup screen did not start." };
   }
-  const browserRequested = options.noBrowser === true ? false : openBrowser(url);
-  return { ok: true, url, started: state === "down", pid, browserRequested };
+  const browserRequested = options.noBrowser === true ? false : openBrowser(pageUrl);
+  return { ok: true, url: pageUrl, started: state === "down", pid, browserRequested };
 }
 
 async function runHook(provider) {
@@ -1721,7 +1725,7 @@ function usage() {
       "target test <id>",
       "target backfill <id> [--since YYYY-MM-DD] [--limit <n>]",
       "target remove <id>",
-      "ui open [--no-browser]",
+      "ui open [--screen <name>] [--no-browser]",
       "doctor",
       "status",
     ],

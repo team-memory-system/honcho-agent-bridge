@@ -24,8 +24,10 @@ export function publicUrl(value) {
     url.username = "";
     url.password = "";
     url.search = "";
+    // An app screen route (#/models) is kept; any other fragment could carry a value.
+    const route = /^#\/[a-z0-9/_-]+$/i.test(url.hash) ? url.hash : "";
     url.hash = "";
-    return url.toString().replace(/\/$/, "");
+    return `${url.toString().replace(/\/$/, "")}${route ? `/${route}` : ""}`;
   } catch {
     return "[invalid URL]";
   }

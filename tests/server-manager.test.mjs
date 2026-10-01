@@ -1479,7 +1479,7 @@ test("a gateway that offers only embedding models stops prepare with the reason 
   assert.equal(result.nextAction.kind, "gateway-login");
   const reason = "The gateway offers no chat model, only embedding models (qwen3-embedding-honcho-8192, qwen3-embedding:8b)";
   assert.equal(result.gateway.reason, reason);
-  assert.equal(result.nextAction.message.startsWith(`${reason}. Open http://127.0.0.1:11450 and log in`), true, result.nextAction.message);
+  assert.equal(result.nextAction.message.startsWith(`${reason}. Open the Team Memory app's gateway screen (ui open --screen models) or http://127.0.0.1:11450 and log in`), true, result.nextAction.message);
   assert.equal(result.next, result.nextAction.message);
   assert.equal("chatModel" in result, false);
   assert.equal(hostCalled, false);

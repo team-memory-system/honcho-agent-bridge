@@ -354,9 +354,9 @@ For development or recovery, the same deterministic workflow is available direct
 node scripts/cli.mjs detect
 node scripts/cli.mjs server plan --profile personal
 node scripts/cli.mjs server prepare --profile personal
-# If it returns nextAction "gateway-login": open the gateway screen, log in there
-# with Codex and/or Claude, then rerun prepare.
-node scripts/cli.mjs gateway open
+# If it returns nextAction "gateway-login": open the app's gateway screen, log in
+# there with Codex and/or Claude, then rerun prepare.
+node scripts/cli.mjs ui open --screen models
 node scripts/cli.mjs server start --profile personal
 node scripts/cli.mjs server status --profile personal
 node scripts/cli.mjs server verify --profile personal

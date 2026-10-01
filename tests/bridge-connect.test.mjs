@@ -215,6 +215,12 @@ test("ui open starts one detached setup screen and reuses it", async (t) => {
   const second = await cli(["ui", "open", "--no-browser"], uiEnv);
   assert.equal(second.body.ok, true);
   assert.equal(second.body.started, false, "a running screen is reused, not doubled");
+
+  const onScreen = await cli(["ui", "open", "--screen", "models", "--no-browser"], uiEnv);
+  assert.equal(onScreen.body.ok, true);
+  assert.match(onScreen.body.url, /#\/models$/, "--screen opens the app on that screen");
+  const bad = await cli(["ui", "open", "--screen", "x?y=1", "--no-browser"], uiEnv);
+  assert.equal(bad.body.ok, false);
 });
 
 test("ui open does not mistake another program on its port for the setup screen", async (t) => {
