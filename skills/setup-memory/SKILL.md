@@ -11,6 +11,36 @@ Speak to the user in the language they wrote in: progress notes, questions, warn
 
 The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버), `models` (게이트웨이), `connect` (대화 동기화), `connect/share` (다른 사람 기억에 묻기). Do not send them to the gateway's own page at 11450.
 
+## Fixed lines
+
+Say these lines exactly as written whenever their moment comes, in Korean for a Korean user (keep the meaning, not a paraphrase, in another language). Fill in only the `<...>` parts. Do not add commentary, recaps or tips around them; between them, say nothing but a CLI error translated into the user's language. Structured questions use the question text and options given here.
+
+| When | Say |
+|---|---|
+| Start | 팀 메모리 설치를 시작합니다. 먼저 이 컴퓨터에서 쓸 기능을 고르세요. 여러 개를 같이 골라도 됩니다. |
+| Feature question | Question "이 컴퓨터에서 쓸 기능을 고르세요." with the three options in "First: which features" |
+| Prerequisites all present | 필요한 프로그램이 모두 있습니다. |
+| A required program missing | <프로그램>이 없습니다. 공식 설치 방법(<install.command 또는 install.url>)으로 설치할까요? |
+| WARP team join | Cloudflare WARP를 팀에 등록해야 합니다. 팀 이름을 알려 주세요. 모르면 Cloudflare 계정을 관리하는 사람에게 받으세요. |
+| Server plan confirmation | Question "서버를 이렇게 설치합니다. 진행할까요?" whose text lists, one line each and only those in the plan: Docker Desktop 설치 (첫 실행 때 약관 동의와 Mac 암호 필요) / Ollama와 임베딩 모델(Qwen3-Embedding 4B, 약 2.5GB) 받기 / 구독 게이트웨이 설치 (로그인하면 자동으로 켜짐) / 기억 서버 설치 (주소 <apiUrl>, 대시보드 <dashboardUrl>), then the Docker license warning: 회사 직원이 250명 이상이거나 매출이 1천만 달러 이상이면 Docker 유료 구독이 필요합니다. Options "진행", "취소" |
+| Before prepare, when it installs Docker | 곧 Docker Desktop 창이 뜹니다. 약관에 동의(Accept)하고, 추천 설정(Use recommended settings)을 고른 뒤 Mac 암호를 넣어 주세요. 로그인이나 설문은 건너뛰어도 됩니다. 끝나면 제가 이어서 진행합니다. |
+| Before prepare otherwise | 서버를 준비합니다. 몇 분 걸릴 수 있습니다. |
+| `docker-first-run` | Docker Desktop 첫 실행이 아직 끝나지 않았습니다. Docker 창에서 약관 동의, 추천 설정, Mac 암호까지 마친 뒤 "했어"라고 말해 주세요. |
+| `gateway-login` | 구독 계정 로그인이 필요합니다. 방금 연 팀 메모리 앱의 게이트웨이 화면(<url>)에서 "Codex 추가"나 "Claude 추가"를 누르고 브라우저 로그인을 마치세요. 끝나면 "했어"라고 말해 주세요. 비밀번호나 토큰은 채팅에 붙여 넣지 마세요. |
+| Server started and verified | 기억 서버가 켜졌습니다. 대시보드: <dashboardUrl> |
+| Agents question | Question "어느 에이전트의 대화를 보낼까요?" Options "찾은 에이전트 모두 (<이름들>)", "지금 쓰는 <이름>만", "직접 고르기" |
+| Peer ID question (only when none is configured) | 기억에서 나를 가리킬 이름을 정해 주세요. 영문 소문자와 밑줄로 씁니다. 예: user_hong |
+| Server elsewhere | 기억 서버의 주소를 알려 주세요. 서버 토큰은 채팅에 쓰지 말고, 제가 알려 드리는 명령을 터미널에서 직접 실행하세요. |
+| Setup plan confirmation | Question "대화 동기화를 이렇게 설정합니다. 진행할까요?" whose text lists the files from `operations`. Options "진행", "취소" |
+| `approve-hook` | Codex를 새로 열면 훅 승인 창이 뜹니다. "Syncing codex conversation to personal memory"만 승인하세요. 승인하기 전에는 Codex 대화가 모이지 않습니다. |
+| `reload-plugins` | 이미 열려 있는 Claude Code 창에서는 `/reload-plugins`를 입력하세요. |
+| Chat connection | 팀원에게 받은 연결 정보를 방금 연 앱 화면(<url>)에 넣고 "연결"을 누르세요. 채팅에는 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
+| Chat connected | 팀원 기억에 연결했습니다. 에이전트를 다시 시작하면 <chat 또는 shared_chat> 도구로 물을 수 있습니다. |
+| Stopped on an error | <단계>에서 멈췄습니다. <오류를 사용자의 말로 옮긴 것> |
+| Done | 설치가 끝났습니다. 켠 기능: <기능들>. 문제가 생기면 `/memory-doctor`를 입력하세요. |
+
+Use the detected default data directory without asking; ask about it only when the user brings it up.
+
 ## First: which features
 
 Ask one question before anything else: which of these three features this computer should have. They are independent and combine; ask it as a multi-select. Use these labels and descriptions as written, in the user's language (Korean shown). Do not rename them, do not present them as mutually exclusive paths, do not add options (no "plugin only", "later" or "skip"; the question tool already lets the user answer otherwise), and never name a particular computer in them. Present the three neutrally: do not recommend, discourage or presume any of them, do not say what people "usually" pick or how many servers a person has, and never describe the user's setup from examples in this file or the docs; anything you add beyond the labels below is noise. Prefer the host's structured question tool. Skip the question when the request already says which.
@@ -70,7 +100,7 @@ On a computer that also syncs its own conversations, `bridge connect` adds to wh
    - Prefer the host's native structured question tool when available (`request_user_input` in supported Codex modes or `AskUserQuestion` in Claude Code).
    - Offer all detected agents as the recommended choice, the current agent only, and manual selection.
    - If no structured question tool exists, ask one concise question using the host's permitted interaction style.
-3. Ask whether to use the detected OS application-data location or a custom data directory. Recommend the detected default. Ask for a path only when the user chooses custom storage, then pass it as `--data-dir`.
+3. Use the detected OS application-data location. Only when the user asks for another place, pass it as `--data-dir`.
 4. Ask for a user peer ID only when none is already configured. Default the workspace to `memory`. Leave out `--honcho-url` for a server installed here: setup uses the installed server's port. Pass it for a server elsewhere. Use `--codex-root` only when the Codex session directory is nonstandard. If the portable profile needs an API key, have the user place it in the installed private `server/.env`; never request that they paste a secret into chat or pass it as a command-line argument. The personal profile gets its router key from the gateway and writes it into the installed private `.env` itself; the user never handles it.
 5. Run the plan without mutation:
 
