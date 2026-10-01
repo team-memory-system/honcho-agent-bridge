@@ -70,7 +70,7 @@ export const DOCKER_LICENSE_WARNING = "Docker Desktop is free for personal use, 
 
 // ------------------------------------------------------------------ helpers
 
-async function defaultRun(command, args, options = {}) {
+export async function defaultRun(command, args, options = {}) {
   return new Promise((resolve) => {
     execFile(command, args, {
       env: options.env || process.env,
@@ -94,7 +94,7 @@ async function defaultRun(command, args, options = {}) {
  * One shape for both runner styles in this repository: host-manager's
  * `{ ok, stdout, stderr }` and share-manager's `{ code, stdout, stderr }`.
  */
-async function runCommand(run, command, args, options = {}) {
+export async function runCommand(run, command, args, options = {}) {
   let result;
   try { result = await run(command, args, options); }
   catch (error) { return { ok: false, code: -1, stdout: "", stderr: "", error: String(error?.message || error) }; }
