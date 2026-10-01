@@ -224,6 +224,23 @@ export function shareEnableInvocation(body) {
   };
 }
 
+/**
+ * What `/api/server/share/mesh/enable` runs. No secret is involved: the gate token
+ * is made by the CLI, and the port, when given, is checked here first.
+ */
+export function shareMeshEnableInvocation(body) {
+  const args = ["server", "share", "enable", "--mesh"];
+  if (body?.port === undefined || body.port === null || body.port === "") return { args };
+  const port = Number(body.port);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) return { error: "The port must be a number from 1024 to 65535." };
+  return { args: [...args, `--port=${port}`] };
+}
+
+/** What `/api/server/share/disable` runs: `{ mode: "tunnel" }` closes only the tunnel. */
+export function shareDisableInvocation(body) {
+  return ["server", "share", "disable", ...(body?.mode === "tunnel" ? ["--tunnel"] : [])];
+}
+
 // POST only, so a cross-site GET can never read the gate token; the Host and
 // Origin checks above apply as they do to every route.
 const SHARE_ROUTES = {
@@ -232,9 +249,17 @@ const SHARE_ROUTES = {
     const { args, env } = shareEnableInvocation(body);
     return runCli(args, { timeout: 900_000, env });
   },
-  "/api/server/share/disable": async () => runCli(["server", "share", "disable"], { timeout: 300_000 }),
+  "/api/server/share/disable": async (body) => runCli(shareDisableInvocation(body), { timeout: 300_000 }),
   "/api/server/share/token": async () => runCli(["server", "share", "token"], { timeout: 30_000 }),
   "/api/server/share/rotate": async () => runCli(["server", "share", "rotate"], { timeout: 300_000 }),
+  // Mesh: no domain, only devices of the same Cloudflare One account. On Windows the
+  // enable waits for the user at one administrator prompt (the firewall rule).
+  "/api/server/share/mesh/enable": async (body) => {
+    const invocation = shareMeshEnableInvocation(body);
+    if (invocation.error) return { ok: false, error: invocation.error };
+    return runCli(invocation.args, { timeout: 900_000, env: secretEnvironment({}, SHARE_SECRET_FIELDS) });
+  },
+  "/api/server/share/mesh/disable": async () => runCli(["server", "share", "disable", "--mesh"], { timeout: 300_000 }),
 };
 
 /**

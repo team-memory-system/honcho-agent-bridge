@@ -23,6 +23,8 @@ owner shares this server with their other computers through a Cloudflare tunnel.
 It publishes only `127.0.0.1:${HONCHO_GATE_PORT:-8010}` and forwards only
 `GET /health` and `/v3/*`, and only with the gate token.
 
+`host/mesh-forwarder.mjs` is the Mesh way in (`server share enable --mesh`, for an owner with no domain). The host supervisor runs it as a child process while `runtime/share.json` has `mesh.enabled`. It listens on `0.0.0.0:<mesh.port>`, passes only connections that arrived on a `100.96.0.0/12` address to `127.0.0.1:<mesh.gatePort>`, and writes `runtime/host/mesh-forwarder.json` while it listens. `share.json` holds `tunnel` (true while the Cloudflare tunnel is on) and `mesh: {enabled, port, gatePort, enabledAt, lastAddress}`.
+
 `env.personal.example` is the personal profile's template. Every chat model
 points at the subscription gateway's router (`host.docker.internal:11400`) and
 embeddings at Ollama; secret-looking values are always blank. `server prepare

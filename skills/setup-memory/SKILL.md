@@ -139,7 +139,15 @@ For a user whose own Honcho already runs on another of their computers (reachabl
 3. If the plan warns that the address "is behind Cloudflare Access and refused this computer", the default fix is for the user to connect Cloudflare WARP with the team account and run `setup plan` again. On a machine without WARP, the user sets both `HONCHO_CF_ACCESS_CLIENT_ID` and `HONCHO_CF_ACCESS_CLIENT_SECRET` (an Access service token) in their own terminal and runs `setup apply` there, the same way as the API token. These are not the `CF_ACCESS_CLIENT_*` values `bridge connect` takes.
 4. Continue with `doctor` and `nextSteps` as above.
 
-To make that possible for a personal server on the other computer, share it there first (Cloudflare Tunnel plus Access only; never Tailscale):
+To make that possible for a personal server on the other computer, share it there first. Ask one question: does the person running the server have a domain on Cloudflare? Without one, use Mesh; with one, either works, and the public address is the established way. Never Tailscale.
+
+**Without a domain (Mesh).** Every computer involved must be enrolled in the same Cloudflare One account.
+1. The account owner turns on "Allow all Cloudflare One traffic to reach enrolled devices" once (Networking → Mesh in the Cloudflare One dashboard). This has no API, so the user does it. An agent with the Cloudflare plugin can do the rest, with the user's go-ahead: `PATCH /accounts/{id}/devices/settings` `{use_zt_virtual_ip, gateway_proxy_enabled, gateway_udp_proxy_enabled: true}`, and `100.96.0.0/12` in the split-tunnel Include list (read the list, add the entry, write it back) or out of the Exclude list.
+2. On the server's computer run `node <plugin-root>/scripts/cli.mjs server share enable --mesh`. On Windows it asks once for approval to add the firewall rule. Report `mesh.address` and translate every `mesh.problems` entry. `local-only` from `--check` is normal on macOS.
+3. On the other computer, `setup apply --honcho-url <mesh.address>` with the gate token in `HONCHO_API_TOKEN`, as below. If `setup plan` warns about WARP or the split tunnel there, that computer's WARP needs fixing, not the server.
+4. If `server share status` reports `address-changed`, every other computer needs the new address.
+
+**With a domain (public address, Cloudflare Tunnel plus Access):**
 
 1. The person running the server creates a tunnel in the Cloudflare Zero Trust dashboard (Networks → Tunnels → Create a tunnel → Cloudflared), sets its public hostname's service to `http://localhost:<gate port>` (`server share status` shows the port), and puts an Access application with a WARP-group or email policy on that hostname. For a team, an admin can do this and hand over only the tunnel token.
 2. On the server's computer the user runs `HONCHO_TUNNEL_TOKEN=... node <plugin-root>/scripts/cli.mjs server share enable --public-url https://<hostname>` in their own terminal. Never ask for the tunnel token in chat or pass it as an option; the CLI refuses a token option. The app's server screen does the same with the token kept off the command line.

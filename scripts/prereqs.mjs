@@ -336,7 +336,7 @@ function warpInstall({ platform, brew }) {
   return install;
 }
 
-function locateWarpCli({ platform, env, which, fileExists }) {
+export function locateWarpCli({ platform, env, which, fileExists = defaultFileExists }) {
   const onPath = which("warp-cli", env, platform);
   if (onPath) return onPath;
   const candidates = [];
@@ -435,11 +435,11 @@ function firstLine(text) {
   return String(text || "").replace(/\0/g, "").trim().split(/\r?\n/)[0].slice(0, 200);
 }
 
-function powershellPath(env) {
+export function powershellPath(env) {
   return path.win32.join(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
-function psQuote(value) {
+export function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
@@ -576,7 +576,7 @@ export function macInstallArgs(file, { mdm } = {}) {
 }
 
 // A "runas" start failed before msiexec ran; the Win32 error code follows.
-const START_FAILED = "start-failed";
+export const START_FAILED = "start-failed";
 
 /**
  * PowerShell that starts `msiexec /i <msi> [ORGANIZATION=.. ONBOARDING="false"]

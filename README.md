@@ -409,6 +409,28 @@ The public address must be `https://<hostname>` with no path, query or credentia
 
 `server share disable` removes the autostart, stops the tunnel, stops and removes the gate container, and removes `share` from `COMPOSE_PROFILES`. It keeps the gate token and the tunnel token file, so turning sharing on again keeps every other computer working. `server share rotate` makes a new gate token and recreates the gate; every other computer then needs the new one.
 
+### Without a domain: Cloudflare Mesh
+
+For a server owner with no domain on Cloudflare. Every computer that should reach the server is enrolled in the same Cloudflare One account (see Prerequisites), and Mesh gives each one a fixed address in `100.96.0.0/12` that only devices in that account can reach, from any network.
+
+```sh
+node scripts/cli.mjs server share enable --mesh [--port <n>]
+```
+
+- **What it does.** It opens the gate (as above, without a tunnel or tunnel token) and turns on `server/host/mesh-forwarder.mjs` under the host supervisor. That forwarder listens on `0.0.0.0:<port>` (8011, or the next free port that is not the gate's), passes a connection on to the gate only when it arrived on a `100.96.0.0/12` address, and drops everything else at once, so the LAN never reaches the gate. If the supervisor is not running, `enable --mesh` starts it, and it comes back after a reboot with the `team-memory-system.host` login item.
+- **The address.** It is `http://100.96.x.y:<port>`, read from WARP's tunnel interface (`warp-cli -j debug network` → `tunnel_iface.name`, then that interface's IPv4). It stays the same until this computer's WARP registration is deleted or redone. `server share status` reports `address-changed` when it differs from the last one shown.
+- **One-time account settings**, done by the account owner:
+  - "Allow all Cloudflare One traffic to reach enrolled devices" (Networking → Mesh). This one exists only in the dashboard.
+  - `PATCH /accounts/{id}/devices/settings` with `{"use_zt_virtual_ip": true, "gateway_proxy_enabled": true, "gateway_udp_proxy_enabled": true}`.
+  - `100.96.0.0/12` in the split-tunnel Include list (Include mode), or not covered by an Exclude entry (Exclude mode; the default `100.64.0.0/10` exclusion covers it).
+  - An agent with the Cloudflare plugin can do the last two.
+- **Windows.** An inbound firewall rule "Team Memory Mesh" (TCP, the port, from `100.96.0.0/12`) is added behind one UAC prompt and kept when Mesh is turned off.
+- **`--check`.** It reports `ok`, `local-only`, `token`, `unreachable`, `no-address` or `error`. `local-only` (the forwarder runs and the gate answers) is what macOS shows, because a request to the computer's own Mesh address goes into the WARP tunnel instead of to the computer itself.
+- **Problem codes** in `mesh.problems`, which the app shows in Korean: `warp-missing`, `warp-not-team`, `warp-disconnected`, `no-mesh-ip`, `split-tunnel-include`, `split-tunnel-exclude`, `firewall-missing`, `forwarder-down`, `host-down`, `host-config-old` (rerun `server prepare --profile personal`), `port-taken`, `address-changed`.
+- **Turning it off.** `server share disable` closes both ways in; `--mesh` or `--tunnel` closes one, and the gate stays while the other is on.
+
+On the other computer, `setup` takes the Mesh address like any other, with the gate token in `HONCHO_API_TOKEN`. `setup plan` warns, and `doctor`'s `honcho-health` check adds `hints`, when that computer's WARP is not connected to an account or its split tunnel leaves out `100.96.0.0/12`.
+
 ### On each other computer
 
 Install the plugin, then run setup against the public address with the gate token in the environment, as for any server that needs an API token:

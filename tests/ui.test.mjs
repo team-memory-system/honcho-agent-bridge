@@ -9,7 +9,7 @@ import path from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createUiServer, rejectUnsafeRequest, shareEnableInvocation } from "../scripts/ui.mjs";
+import { createUiServer, rejectUnsafeRequest, shareDisableInvocation, shareEnableInvocation, shareMeshEnableInvocation } from "../scripts/ui.mjs";
 import { BRIDGE_TOKEN, startBridge } from "./fake-bridge.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -396,6 +396,38 @@ test("the share form's tunnel token goes to the CLI through its environment, nev
     assert.match(routes, new RegExp(`"/api/server/share/${action}"`), action);
   }
   assert.match(routes, /runCli\(args, \{ timeout: 900_000, env \}\)/);
+});
+
+test("the Mesh routes exist, run the CLI with --mesh, and pass no secret", async () => {
+  assert.deepEqual(shareMeshEnableInvocation({}), { args: ["server", "share", "enable", "--mesh"] });
+  assert.deepEqual(shareMeshEnableInvocation({ port: 8015 }), { args: ["server", "share", "enable", "--mesh", "--port=8015"] });
+  assert.deepEqual(shareMeshEnableInvocation({ port: "8016" }), { args: ["server", "share", "enable", "--mesh", "--port=8016"] });
+  for (const bad of [80, "8011; rm", 70000, "--public-url"]) assert.ok(shareMeshEnableInvocation({ port: bad }).error, String(bad));
+  assert.deepEqual(shareDisableInvocation({}), ["server", "share", "disable"]);
+  assert.deepEqual(shareDisableInvocation({ mode: "tunnel" }), ["server", "share", "disable", "--tunnel"]);
+  assert.deepEqual(shareDisableInvocation({ mode: "--rm" }), ["server", "share", "disable"]);
+
+  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  const routes = server.match(/const SHARE_ROUTES = \{([\s\S]*?)\n\};/)[1];
+  assert.match(routes, /"\/api\/server\/share\/mesh\/enable"/);
+  assert.match(routes, /"\/api\/server\/share\/mesh\/disable": async \(\) => runCli\(\["server", "share", "disable", "--mesh"\]/);
+  // The screen calls both, and its public path closes only the tunnel.
+  const screen = await fsp.readFile(path.join(ROOT, "ui", "views", "server.js"), "utf8");
+  assert.match(screen, /"\/api\/server\/share\/mesh\/enable"/);
+  assert.match(screen, /"\/api\/server\/share\/mesh\/disable"/);
+  assert.match(screen, /"\/api\/server\/share\/disable", \{ mode: "tunnel" \}/);
+  assert.match(screen, /도메인이 있음 \(공개 주소\)/);
+  assert.match(screen, /도메인이 없음 \(Mesh: 같은 Cloudflare 계정의 기기만\)/);
+
+  // Like every share route, POST only and refused before the CLI runs.
+  const read = await send("/api/server/share/mesh/enable");
+  assert.equal(read.status, 405);
+  const crossSite = await send("/api/server/share/mesh/disable", { method: "POST", body: {}, headers: { origin: "http://evil.example" } });
+  assert.equal(crossSite.status, 403);
+  const badPort = await send("/api/server/share/mesh/enable", { method: "POST", body: { port: 80 } });
+  assert.equal(badPort.status, 200);
+  assert.equal(badPort.body.ok, false);
+  assert.match(badPort.body.error, /1024 to 65535/);
 });
 
 test("the gate token is read with a same-origin POST only", async (t) => {
