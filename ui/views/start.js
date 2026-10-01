@@ -80,7 +80,6 @@ export default {
           }, h("b", {}, feature.title), h("span", {}, feature.text));
           return card;
         })),
-        h("p", { class: "muted", style: { fontSize: "12.5px", margin: "12px 0 0" } }, "예: 서버를 두는 컴퓨터는 서버 설치 + 대화 동기화, 회사 노트북은 대화 동기화 + chat."),
         h("div", { class: "form-actions" }, go_),
       );
       sync();

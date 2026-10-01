@@ -129,7 +129,7 @@ export default {
         nodes.push(section({ title: "기억 서버" },
           external
             ? notice("", h("b", {}, `이 컴퓨터는 ${context?.honcho?.url}의 기억 서버로 대화를 보냅니다.`), h("div", {}, "그 서버는 다른 컴퓨터에 있어 여기서 켜고 끌 수 없습니다. 서버를 둔 컴퓨터에서 이 앱을 여세요."))
-            : notice("warn", h("b", {}, "이 컴퓨터에는 기억 서버가 없습니다."), h("div", {}, "내 다른 컴퓨터에 서버가 있으면 연결 화면에서 그 주소를 넣으세요.")),
+            : notice("warn", h("b", {}, "이 컴퓨터에는 기억 서버가 없습니다."), h("div", {}, "다른 컴퓨터에 서버가 있으면 연결 화면에서 그 주소를 넣으세요.")),
         ));
         // Installing a second server beside one that already answers would split a person's memories.
         nodes.push(external
@@ -173,7 +173,7 @@ export default {
       h("div", { class: "rows" },
         h("div", { class: "row" },
           h("div", {}, h("div", { class: "title" }, statusTag(running && server.health?.ok, ["답하는 중", running ? "답하지 않음" : "멈춤"]), "API"), h("div", { class: "sub mono" }, server.apiUrl || "")),
-          h("div", { class: "end" }, server.dashboardUrl ? h("a", { class: "btn small quiet", href: server.dashboardUrl, target: "_blank", rel: "noreferrer" }, "예전 대시보드") : null),
+          h("div", { class: "end" }),
         ),
         services.map((service) => h("div", { class: "row" },
           h("div", {}, h("div", { class: "title" }, statusTag(service.State === "running"), service.Service || service.Name), h("div", { class: "sub" }, [service.Status, service.Health ? `상태 검사 ${service.Health}` : null].filter(Boolean).join(" · "))),

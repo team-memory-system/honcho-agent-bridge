@@ -94,6 +94,9 @@ services:
       MCP_CONTROL_MODE: file
       MCP_CONTROL_ALLOW_REMOTE: "1"
       HONCHO_MCP_TOOL_CONFIG: /honcho-agent-bridge-data/mcp-tools.json
+      # The Team Memory app is the screen; this container keeps only the /api routes
+      # the app relays (tool switches, audit log) and sends a browser to the app.
+      DASHBOARD_APP_URL: "http://127.0.0.1:${HONCHO_AGENT_BRIDGE_UI_PORT:-4180}/"
     ports:
       - "127.0.0.1:${HONCHO_DASHBOARD_PORT:-4173}:4173"
     volumes:
