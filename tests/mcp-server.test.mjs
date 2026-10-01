@@ -62,6 +62,22 @@ function rpcClient(child) {
   };
 }
 
+test("before setup the bundled MCP offers no tools", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-mcp-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const appHome = path.join(root, "app");
+  const userHome = path.join(root, "user");
+  await fsp.mkdir(appHome, { recursive: true });
+  const child = spawn(process.execPath, [SERVER, "--provider", "claude"], {
+    env: { ...process.env, HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: userHome, HOME: userHome },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  t.after(() => child.kill());
+  const rpc = rpcClient(child);
+  await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {} });
+  assert.deepEqual((await rpc("tools/list")).tools, []);
+});
+
 test("bundled MCP starts read-only, exposes all 31 tools when enabled, forwards search, and honors tool toggles", async (t) => {
   const api = await startApi();
   t.after(() => api.server.close());

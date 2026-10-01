@@ -62,6 +62,7 @@ gets an answer, without reading the underlying messages.
    | Its own memory (a server address, a user, an agent with sync on) | The local tools, filtered by `mcp-tools.json` |
    | Only a shared bridge | The bridge's tools under their own names (`chat`), a pure relay |
    | Both | The local tools as above, plus the bridge's tools renamed `shared_<name>` (`shared_chat`) |
+   | Neither (the plugin is installed, setup has not run) | No tools |
 
    With both, a `shared_*` tool's description starts with "Asks the shared memory at
    &lt;bridge host&gt; (a teammate's memory), not yours.", its input schema is the

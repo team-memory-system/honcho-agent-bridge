@@ -613,7 +613,9 @@ function sendError(id, code, message) {
 
 async function availableTools() {
   const config = await loadConfig();
-  if (!config) return TOOLS;
+  // Before setup every call would only fail with "not configured", so offer none
+  // rather than tools the agent cannot use.
+  if (!String(config?.user?.peerId || "").trim()) return [];
   const disabled = await disabledToolNames(config);
   return TOOLS.filter((entry) => !disabled.has(entry.name));
 }
