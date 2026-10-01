@@ -484,3 +484,41 @@ test("the install route takes a same-origin POST naming warp, and refuses anythi
   const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
   assert.match(server, /const INSTALLABLE_PREREQS = Object\.freeze\(\["warp"\]\)/);
 });
+
+test("every screen a link opens exists, and the 연결 pages other screens link to are there", async () => {
+  const screens = await uiSources();
+  const shell = await fsp.readFile(path.join(ROOT, "ui", "app.js"), "utf8");
+  const views = shell.match(/const VIEWS = \{([^}]*)\}/)[1].split(",").map((name) => name.trim()).filter(Boolean);
+  const connect = await fsp.readFile(path.join(ROOT, "ui", "views", "connect.js"), "utf8");
+  const tasks = [...connect.matchAll(/\{ key: "([a-z]+)", title:/g)].map((match) => match[1]).sort();
+  assert.deepEqual(tasks, ["collect", "import", "share", "targets"]);
+
+  const links = [
+    ...screens.matchAll(/go\("([a-z/]+)"\)/g),
+    ...screens.matchAll(/href: "#\/([a-z/]+)"/g),
+    ...screens.matchAll(/screen: "([a-z/]+)"/g),
+    ...screens.matchAll(/fix: \[[^\]]*"([a-z/]+)"\]/g),
+  ].map((match) => match[1]);
+  assert.ok(links.length >= 20, `only ${links.length} links were found`);
+  for (const link of links) {
+    const [view, page] = link.split("/");
+    assert.ok(views.includes(view), `a link opens #/${link}, which no screen serves`);
+    if (view === "connect" && page) assert.ok(tasks.includes(page), `#/${link} is not one of the 연결 pages`);
+  }
+  // The audit log left 도구 for its own screen; the old address still reaches it.
+  assert.ok(views.includes("audit"));
+  assert.match(shell, /name === "tools" && params\[0\] === "audit"/);
+});
+
+test("the setup steps send the one form, so a secret never leaves it except to the setup routes", async () => {
+  const connect = await fsp.readFile(path.join(ROOT, "ui", "views", "connect.js"), "utf8");
+  const markup = await fsp.readFile(path.join(ROOT, "ui", "index.html"), "utf8");
+  const form = markup.slice(markup.indexOf('<form id="setup-form"'), markup.indexOf("</form>", markup.indexOf('<form id="setup-form"')));
+  // Every step is a group inside the same form; nothing is sent until the last one.
+  assert.deepEqual([...form.matchAll(/data-step="([a-z]+)"/g)].map((match) => match[1]), ["server", "agents", "name"]);
+  const sends = [...connect.matchAll(/post\("(\/api\/setup\/[a-z]+)", formBody\(form\)\)/g)].map((match) => match[1]);
+  assert.deepEqual([...new Set(sends)].sort(), ["/api/setup/apply", "/api/setup/plan"]);
+  for (const secret of ["apiToken", "accessClientId", "accessClientSecret"]) {
+    assert.equal(new RegExp(`(go|location|history|console)[^\\n]*${secret}`).test(connect), false, `${secret} must not reach a URL or a log`);
+  }
+});

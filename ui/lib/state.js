@@ -13,7 +13,8 @@ export const app = {
   prefs: readPrefs(),
   status: {
     honcho: { state: "idle", text: "확인 중" },
-    gateway: { state: "idle", text: "확인 중", report: null },
+    // `pending` until the first check answers, so nothing is locked on a guess.
+    gateway: { state: "idle", text: "확인 중", report: null, pending: true },
     collector: { state: "idle", text: "확인 중" },
   },
   listeners: new Set(),
