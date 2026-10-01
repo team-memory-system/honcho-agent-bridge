@@ -729,3 +729,70 @@ details.group[open] > summary::before { content: "▾"; }
 
 .step .prereqs { margin: 4px 0 12px; }
 .step .prereqs .row { padding: 10px 2px; }
+
+/* ── Gateway screen (게이트웨이) ───────────────────────────
+   Accounts grouped by backend, the way the gateway orders them; models as tiles
+   with 써 보기; the programs inside the gateway folded under 고급. */
+
+.gw-add { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 4px; }
+.gw-group { margin-top: 18px; }
+.gw-group-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin: 0 0 6px; font-size: 12.5px; color: var(--ink-3); }
+.gw-group-head b { color: var(--ink); font-size: 13px; font-weight: 650; margin-right: 2px; }
+.gw-name { overflow-wrap: anywhere; }
+.gw-rank {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--sunk);
+  box-shadow: inset 0 0 0 1px var(--line-2);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.gw-move { display: inline-flex; gap: 2px; }
+.gw-mode {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--sunk);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.gw-mode .title { font-weight: 550; }
+.gw-mode .sub { color: var(--ink-3); font-size: 12.5px; margin-top: 2px; }
+.gw-mode .sub b { color: var(--ink-2); font-weight: 600; }
+.gw-mode .segmented { justify-self: start; }
+.gw-empty .empty { padding: 18px 20px 20px; max-width: none; border: 1px dashed var(--line-2); border-radius: 8px; }
+.gw-empty .empty .form-actions { margin-top: 6px; }
+.gw-models { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+.gw-model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 6px 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+.gw-model-name { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.gw-model code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.gw-model .btn { flex: none; }
+.btn.gw-go { flex-direction: row-reverse; }
+.gw-model.current { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.gw-foot { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 12px 0 0; color: var(--ink-3); font-size: 12.5px; }
+.gw-advanced { margin-top: 4px; padding-top: 14px; border-top: 1px solid var(--line); }
+.gw-advanced > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; font-weight: 550; }
+.gw-advanced[open] > summary { margin-bottom: 12px; }
+.gw-advanced .section-note { margin: 0 0 10px; }
+@media (max-width: 860px) {
+  .gw-mode { grid-template-columns: 1fr; }
+  .gw-models { grid-template-columns: 1fr; }
+}

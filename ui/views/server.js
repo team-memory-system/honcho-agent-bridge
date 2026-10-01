@@ -1,8 +1,9 @@
-// 서버: the memory server on this computer. Install it, start and stop it, check
-// it end to end, and see the pieces beside it (the gateway's host services and the
-// Ollama embedding model). Building or restarting it is a deployment, so every
-// button that does that says so first.
+// 서버: the memory server on this computer. Install it, start and stop it, choose
+// the gateway model it thinks with, check it end to end, and see the pieces beside
+// it (the gateway's host services and the Ollama embedding model). Building or
+// restarting it is a deployment, so every button that does that says so first.
 import { cli, gateway, post } from "../lib/api.js";
+import { modelGroups } from "../lib/accounts.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { api, app, go, loadContext, refreshStatus } from "../lib/state.js";
 import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, tag, toast } from "../lib/ui.js";
@@ -124,7 +125,7 @@ export default {
       if (!server) {
         nodes.push(errorNotice(status.reason));
       } else if (server.installed) {
-        nodes.push(serverSection(server), shareSection(), hostSection(hostStatus), verifySection());
+        nodes.push(serverSection(server), modelSection(gatewayReport), shareSection(), hostSection(hostStatus), verifySection());
       } else {
         nodes.push(section({ title: "기억 서버" },
           external
@@ -181,6 +182,50 @@ export default {
         )),
       ),
       h("p", { class: "muted", style: { fontSize: "12.5px", marginTop: "10px" } }, `설치 위치 ${server.directory}`),
+      );
+    }
+
+    // 기억 서버가 쓰는 모델: the gateway model the server sorts conversations and
+    // answers with. Only a server this app installed on this computer can be
+    // changed here; changing it rewrites the server's settings and restarts it.
+    function modelSection(gatewayReport) {
+      const local = app.context?.localServer;
+      if (!local) return null;
+      const current = local.chatModel || "";
+      const groups = modelGroups(gatewayReport?.models?.models, gatewayReport?.accounts);
+      const known = groups.some((group) => group.models.includes(current));
+      const note = "대화를 정리하고, 묻기에 답할 때 쓰는 모델입니다. 바꾸면 기억 서버를 다시 시작합니다.";
+      const now = h("div", {}, h("div", { class: "title" }, current ? h("code", { class: "mono" }, current) : "정해지지 않음"), h("div", { class: "sub" }, "지금 설정"));
+      if (!groups.length) {
+        return section({ id: "server-model", title: "기억 서버가 쓰는 모델", note },
+          h("div", { class: "rows" }, h("div", { class: "row" }, now, h("div", { class: "end" }))),
+          h("div", { style: { marginTop: "12px" } }, notice("warn",
+            h("b", {}, "고를 수 있는 모델이 없습니다."),
+            h("div", {}, gatewayReport ? "게이트웨이에 연결된 계정이 없습니다. 게이트웨이 화면에서 계정을 로그인하고 연결하세요." : "구독 게이트웨이가 답하지 않습니다. 게이트웨이를 켜면 모델 목록이 보입니다."),
+            h("div", { class: "form-actions", style: { marginTop: "8px" } }, button("게이트웨이 화면으로", { kind: "small", onClick: () => go("models") })),
+          )),
+        );
+      }
+      const choice = h("select", { class: "select", style: { width: "auto", minWidth: "220px" }, "aria-label": "기억 서버 모델" },
+        current && !known ? h("option", { value: current, selected: true }, `${current} (게이트웨이에 없음)`) : null,
+        groups.map((group) => h("optgroup", { label: group.label },
+          group.models.map((id) => h("option", { value: id, selected: id === current ? true : null }, id)))),
+      );
+      return section({ id: "server-model", title: "기억 서버가 쓰는 모델", note },
+        h("div", { class: "rows" }, h("div", { class: "row" },
+          now,
+          h("div", { class: "end" }, choice, button("바꾸기", { kind: "small", onClick: async (event) => {
+            if (choice.value === current) return toast("이미 이 모델을 씁니다");
+            const ok = await confirmSheet({ title: `${choice.value}로 바꿀까요?`, text: "기억 서버 설정을 고치고 다시 시작합니다. 1~2분 동안 기억을 쓰거나 찾을 수 없습니다.", confirm: "바꾸고 다시 시작" });
+            if (!ok) return;
+            await busy(event.currentTarget, async () => {
+              await cli("/api/server/start", { profile: "personal", model: choice.value });
+              await loadContext();
+              await draw();
+              refreshStatus();
+            }, { done: "모델을 바꿨습니다" });
+          } })),
+        )),
       );
     }
 
