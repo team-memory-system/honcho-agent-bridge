@@ -33,6 +33,9 @@ const PATHS = {
   warn: '<path d="M8 2.5l6 10.5H2z"/><path d="M8 6.5v3M8 11.5h.01"/>',
   dot: '<circle cx="8" cy="8" r="2.5"/>',
   quote: '<path d="M3.5 5.5h3.5v3.5c0 1.5-1 2.5-2.5 2.75M9 5.5h3.5v3.5c0 1.5-1 2.5-2.5 2.75"/>',
+  chevron: '<path d="M4.5 6.25L8 9.75l3.5-3.5"/>',
+  layers: '<path d="M8 2.5l5.5 3L8 8.5l-5.5-3z"/><path d="M2.5 8.5L8 11.5l5.5-3"/>',
+  gauge: '<path d="M2.75 11.5a5.25 5.25 0 0110.5 0"/><path d="M8 11.5l2.25-3.25"/>',
 };
 
 export function icon(name, className = "icon") {

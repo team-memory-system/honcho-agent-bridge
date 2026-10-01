@@ -345,7 +345,7 @@ export default {
 
     async function openSession(id, target = null) {
       state.selected = { kind: "session", id, target };
-      history.replaceState(null, "", `#/memory/s/${encodeURIComponent(id)}`);
+      history.replaceState(null, "", `#/memory/s/${encodeURIComponent(id)}${target ? `/${encodeURIComponent(target)}` : ""}`);
       drawList();
       drawReader();
       const ticket = ++readerTicket;
@@ -516,13 +516,15 @@ export default {
     drawFilters();
     drawReader();
     await reload();
-    if (params[0] === "s" && params[1]) openSession(params[1]);
+    // `#/memory/s/<session>/<message>` opens a conversation where that message was said.
+    if (params[0] === "s" && params[1]) openSession(params[1], params[2] || null);
     if (params[0] === "peer" && params[1]) { state.tab = "people"; drawTabs(); drawFilters(); drawList(); openPeer(params[1]); }
 
     return {
       cleanup: () => document.removeEventListener("keydown", keyHandler),
       update: (next) => {
-        if (next[0] === "s" && next[1] && state.selected?.id !== next[1]) openSession(next[1]);
+        const target = next[2] || null;
+        if (next[0] === "s" && next[1] && (state.selected?.id !== next[1] || (state.selected?.target || null) !== target)) openSession(next[1], target);
       },
     };
   },
