@@ -2,10 +2,10 @@
 // how this computer takes part, then each step says whether it is done and opens
 // the screen that does it.
 import { get, post } from "../lib/api.js";
-import { h, clear } from "../lib/dom.js";
+import { h, clear, copyText } from "../lib/dom.js";
 import { ago } from "../lib/format.js";
 import { app, go, loadContext, refreshStatus, savePrefs, workspace } from "../lib/state.js";
-import { button, busy, pageHead, spinner, tag } from "../lib/ui.js";
+import { button, busy, pageHead, spinner, tag, toast } from "../lib/ui.js";
 
 // Three features, not three exclusive paths: a computer turns on what it needs.
 // The computer that keeps the server usually does server + sync; another of the
@@ -31,6 +31,26 @@ const FEATURES = [
 function chosenFeatures() {
   const picked = Array.isArray(app.prefs.startFeatures) ? app.prefs.startFeatures : [];
   return FEATURES.map((feature) => feature.key).filter((key) => picked.includes(key));
+}
+
+const NEEDED = { required: ["꼭 필요", ""], "app-installs": ["없으면 앱이 설치", "accent"], optional: ["있으면 좋음", ""] };
+
+function prereqList(items) {
+  if (!items.length) return null;
+  return h("div", { class: "rows prereqs" }, items.map((item) => {
+    const [label, kind] = NEEDED[item.needed] || NEEDED.optional;
+    return h("div", { class: "row" },
+      h("div", { style: { minWidth: "0" } },
+        h("div", { class: "title" }, item.ok ? tag("있음", "ok") : item.needed === "required" ? tag("없음", "bad") : tag("없음"), item.label, item.version ? h("span", { class: "muted mono", style: { fontSize: "12px" } }, item.version) : null, tag(label, kind)),
+        item.detail ? h("div", { class: "sub" }, item.detail) : null,
+        !item.ok && item.install?.note ? h("div", { class: "sub" }, item.install.note) : null,
+      ),
+      h("div", { class: "end", style: { flexWrap: "wrap", justifyContent: "flex-end" } },
+        !item.ok && item.install?.command ? button("설치 명령 복사", { kind: "small", title: item.install.command, onClick: async () => { await copyText(item.install.command); toast(`복사했습니다: ${item.install.command}`); } }) : null,
+        !item.ok && item.install?.url ? h("a", { class: "btn small quiet", href: item.install.url, target: "_blank", rel: "noreferrer" }, "내려받는 곳") : null,
+      ),
+    );
+  }));
 }
 
 export default {
@@ -85,6 +105,20 @@ export default {
       const steps = [];
       const serverHere = features.includes("server");
 
+      // Required software first: what the chosen features need, with how to get it.
+      const remote = features.includes("sync") && !serverHere;
+      const prereqs = await get(`/api/app/prereqs?${new URLSearchParams({ features: features.join(","), ...(remote ? { remote: "1" } : {}) })}`).catch((error) => ({ ok: false, error: error.message, items: [] }));
+      const missing = (prereqs.items || []).filter((item) => item.needed === "required" && !item.ok);
+      steps.push({
+        title: "필요한 프로그램",
+        done: Boolean(prereqs.ok),
+        text: prereqs.error
+          ? `확인하지 못했습니다: ${prereqs.error}`
+          : prereqs.ok ? "고른 기능에 필요한 프로그램이 모두 있습니다." : `${missing.map((item) => item.label).join(", ")}부터 설치하세요. 설치한 뒤 다시 확인을 누릅니다.`,
+        body: prereqList(prereqs.items || []),
+        action: prereqs.ok ? null : ["다시 확인", "recheck"],
+      });
+
       if (serverHere) {
         const server = await post("/api/server/status", { profile: "personal" }).catch(() => null);
         const gatewayReady = app.status.gateway.state === "on";
@@ -133,6 +167,7 @@ export default {
         h("div", {},
           h("h3", {}, step.title),
           h("p", {}, step.text),
+          step.body || null,
           step.action ? button(step.action[0], {
             kind: `small ${index === firstOpen ? "primary" : ""}`,
             onClick: (event) => step.action[1] === "recheck" ? busy(event.currentTarget, drawSteps) : step.action[1](),

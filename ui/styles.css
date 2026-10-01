@@ -726,3 +726,6 @@ details.group[open] > summary::before { content: "▾"; }
 .item .p.snippet { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .reader-head .actions { flex-wrap: wrap; }
 .reader-head .actions .mono { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+
+.step .prereqs { margin: 4px 0 12px; }
+.step .prereqs .row { padding: 10px 2px; }

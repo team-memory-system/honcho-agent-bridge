@@ -19,6 +19,18 @@ Typical combinations: the computer that keeps the server takes 서버 설치 + �
 
 Sending some folders to a company server as well is not a fourth feature; offer it after 대화 동기화 is set up, only if the user asks (see "Also sending some folders to another server").
 
+## Then: required software, before anything else
+
+Once the features are chosen, check the software they need and get it installed first. Do not start the plugin's setup, `server plan` or `bridge connect` while something required is missing.
+
+1. Node.js 18 or later must exist before the plugin's CLI can run. Check it with the shell (`node --version`). If it is missing, install it from nodejs.org (the LTS installer), or with `brew install node` when Homebrew is already there (macOS), or with `winget install --id OpenJS.NodeJS.LTS -e` (Windows).
+2. Then run `node <plugin-root>/scripts/cli.mjs prereqs --features <chosen,features>` (add `--remote` when 대화 동기화 goes to a server on another computer). It reports each item as `required`, `app-installs` or `optional`, with its `install.command`/`install.url`/`install.note`.
+   - `required` and missing (git; Cloudflare WARP for 대화 동기화 to another computer): offer to install it with the reported official command or installer, as its own explicit confirmation, because it installs system software. Never pipe a downloaded script into a shell. Rerun `prereqs` after.
+   - WARP also has to join the user's team: `warp-cli registration new <team>` opens a browser login the user completes; then `warp-cli connect`. Ask the user for the team name if they do not know it from whoever runs their Cloudflare account; never guess it. `prereqs` reports the team it is connected to.
+   - `app-installs` (Docker Desktop and Ollama for 서버 설치): nothing to do now. Tell the user `server prepare` installs them and what Docker will ask of them.
+   - `optional` (WARP for chat): mention it; chat works with the teammate's Access service token too.
+3. The app's 시작하기 screen shows the same check as its first step.
+
 ## Asking someone else's memory
 
 The memory's owner gives the user four values: the shared bridge address, a bridge token, and a Cloudflare service token ID and secret. The user enters them in the Team Memory app, not in chat.
