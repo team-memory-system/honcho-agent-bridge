@@ -419,3 +419,18 @@ test("the gate token is read with a same-origin POST only", async (t) => {
   assert.equal(shown.status, 200);
   assert.deepEqual(shown.body, { ok: true, token: gateToken });
 });
+
+test("the prerequisite route validates its features before running the CLI", async () => {
+  for (const query of ["features=server,docker", "features=sync%20--remote", "features=sync&features=chat", "features=chat&remote=yes"]) {
+    const response = await send(`/api/app/prereqs?${query}`);
+    assert.equal(response.status, 400, query);
+    assert.equal(response.body.ok, false, query);
+  }
+  const posted = await send("/api/app/prereqs", { method: "POST", body: {} });
+  assert.equal(posted.status, 405);
+  // With no feature only Node and Git are checked; this runs the same CLI a terminal would.
+  const response = await send("/api/app/prereqs?features=");
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.items.map((item) => item.key), ["node", "git"]);
+  assert.equal(response.body.platform, process.platform);
+});

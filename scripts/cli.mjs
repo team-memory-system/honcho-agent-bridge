@@ -62,6 +62,7 @@ import {
   targetWorkspace,
 } from "./targets.mjs";
 import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
+import { checkPrereqs, FEATURES, parseFeatures } from "./prereqs.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
@@ -1691,6 +1692,7 @@ function usage() {
     version: VERSION,
     usage: [
       "detect",
+      "prereqs [--features server,sync,chat] [--remote]",
       "server plan [--profile portable|personal]",
       "server prepare [--profile portable|personal] [--model <id>]",
       "server start [--profile portable|personal] [--no-build] [--model <id>]",
@@ -1749,12 +1751,30 @@ async function serverShare(args) {
   return { ok: false, error: `Unknown share action: ${action}. Expected status, enable, disable, token or rotate.` };
 }
 
+/**
+ * `prereqs [--features server,sync,chat] [--remote]`: what this computer needs
+ * before setup, for the features chosen on it. `--remote` means sync goes to a
+ * server on another computer.
+ */
+async function prereqs(options = {}) {
+  const value = options.features;
+  if (value !== undefined && typeof value !== "string" && value !== true) {
+    return { ok: false, error: `--features takes ${FEATURES.join(",")}` };
+  }
+  const { features, invalid } = parseFeatures(typeof value === "string" ? value : "");
+  if (invalid.length) return { ok: false, error: `unknown feature: ${invalid.join(", ")} (expected ${FEATURES.join(", ")})` };
+  if (options.remote !== undefined && options.remote !== true) return { ok: false, error: "--remote takes no value" };
+  const config = await loadConfig().catch(() => null);
+  return checkPrereqs({ features, remote: options.remote === true, serverDir: installedServerDir(config) });
+}
+
 async function main() {
   const args = process.argv.slice(2);
   // `setup apply --help` ran apply in the 2026-09-30 install test. Help never acts.
   if (args.some((item) => item === "--help" || item === "-h")) return usage();
   const command = args.shift() || "help";
   if (command === "detect") return detect();
+  if (command === "prereqs") return prereqs(parseOptions(args));
   if (command === "doctor" || command === "status") return doctor();
   if (command === "hook") return runHook((args.shift() || "").trim().toLowerCase());
   if (command === "server") {

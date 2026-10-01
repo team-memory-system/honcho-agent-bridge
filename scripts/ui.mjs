@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import { appContext, localTools, relayDashboard, relayGateway, relayHoncho, sessionsPage, setLocalTool } from "./app-api.mjs";
 import { configEnvironment, loadConfig } from "./config.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
+import { FEATURES, parseFeatures } from "./prereqs.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
 
@@ -446,6 +447,22 @@ async function importChatGpt(req, res) {
   return json(res, 200, { ...payload, uploaded_bytes: upload.size });
 }
 
+/**
+ * `?features=server,sync&remote=1` as `cli.mjs prereqs` arguments. Only the
+ * three feature names pass; `remote` is "1"/"true" or "0"/"false" or absent.
+ */
+export function prereqsInvocation(query) {
+  const values = query.getAll("features");
+  if (values.length > 1) return { error: "features is given once, as a comma-separated list" };
+  const { features, invalid } = parseFeatures(values[0] || "");
+  if (invalid.length) return { error: `unknown feature: ${invalid.join(", ")} (expected ${FEATURES.join(", ")})` };
+  const remote = query.get("remote");
+  if (remote !== null && !["1", "true", "0", "false", ""].includes(remote)) return { error: "remote takes 1 or 0" };
+  const args = ["prereqs", `--features=${features.join(",")}`];
+  if (remote === "1" || remote === "true") args.push("--remote");
+  return { args };
+}
+
 async function staticFile(req, res) {
   const requested = new URL(req.url, "http://ui").pathname;
   const relative = requested === "/" ? "index.html" : requested.replace(/^\/+/, "");
@@ -512,6 +529,12 @@ export function createUiServer() {
           error: String(error?.message || error),
         });
       }
+    }
+    if (url.pathname === "/api/app/prereqs") {
+      if (req.method !== "GET") return json(res, 405, { ok: false, error: "Method not allowed" });
+      const invocation = prereqsInvocation(url.searchParams);
+      if (invocation.error) return json(res, 400, { ok: false, error: invocation.error });
+      return json(res, 200, await runCli(invocation.args, { timeout: 60_000 }));
     }
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];
