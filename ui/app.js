@@ -46,7 +46,7 @@ function renderMachine() {
   clear($("#machine"),
     h("a", { href: "#/server" }, light(honcho.state), h("span", {}, "기억 서버"), h("small", {}, honcho.text)),
     h("a", { href: "#/models" }, light(gateway.state), h("span", {}, "구독 게이트웨이"), h("small", {}, gateway.text)),
-    h("a", { href: "#/connect" }, light(collector.state), h("span", {}, "대화 수집"), h("small", {}, collector.text)),
+    h("a", { href: "#/connect" }, light(collector.state), h("span", {}, "대화 동기화"), h("small", {}, collector.text)),
   );
   $("#who-name").textContent = me() || "이름 미설정";
   $("#who-space").textContent = `작업공간 ${workspace()}`;
