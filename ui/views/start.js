@@ -10,17 +10,17 @@ import { button, busy, pageHead, spinner, tag } from "../lib/ui.js";
 const PATHS = [
   {
     key: "server",
-    title: "이 컴퓨터를 내 기억 서버로",
-    text: "내 대화가 이 컴퓨터에 쌓입니다. 디스크 몇 GB와 Codex나 Claude 구독이 필요합니다. Docker Desktop과 Ollama는 없으면 이 앱이 설치합니다.",
+    title: "서버로 구축하기",
+    text: "이 컴퓨터에 내 기억 서버를 만듭니다. 내 대화가 이 컴퓨터에 쌓입니다. 디스크 몇 GB와 Codex나 Claude 구독이 필요합니다. Docker Desktop과 Ollama는 없으면 이 앱이 설치합니다.",
   },
   {
     key: "remote",
-    title: "내 다른 컴퓨터의 서버로 보내기",
-    text: "서버는 이미 집 컴퓨터 같은 곳에 있고, 이 컴퓨터의 대화도 거기로 모읍니다. Docker는 필요 없습니다. 서버 컴퓨터에서 받은 주소와 서버 토큰, 그리고 Cloudflare WARP가 필요합니다.",
+    title: "다른 서버와 동기화만 진행",
+    text: "이 컴퓨터에는 서버를 두지 않고, 대화를 이미 있는 내 서버로 보냅니다. Docker는 필요 없습니다. 그 서버의 주소와 서버 토큰, 그리고 Cloudflare WARP가 필요합니다.",
   },
   {
     key: "ask-only",
-    title: "다른 사람의 기억에 묻기만",
+    title: "다른 서버 기억 물어오기",
     text: "내 대화는 모으지 않고, 팀원이 열어 준 창구에 질문만 합니다. 팀원에게 받은 네 값이 필요합니다.",
   },
 ];
