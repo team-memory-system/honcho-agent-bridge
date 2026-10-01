@@ -10,6 +10,13 @@ import {
   honchoHeaders,
   isCloudflareAccessBlock,
 } from "./honcho-access.mjs";
+import {
+  bridgeHost,
+  hasOwnMemory,
+  isSharedName,
+  sharedTools,
+  unsharedName,
+} from "./mcp-shared-tools.mjs";
 import { WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
 import { VERSION } from "./version.mjs";
 
@@ -27,6 +34,12 @@ let negotiatedProtocolVersion = DEFAULT_PROTOCOL_VERSION;
 
 const providerIndex = process.argv.indexOf("--provider");
 const PROVIDER = providerIndex >= 0 ? String(process.argv[providerIndex + 1] || "agent").trim().toLowerCase() : "agent";
+// `--only bridge` and `--only local` are for the CLI's probes: `bridge connect`,
+// `bridge test` and `doctor` must check the bridge itself, which the combined list
+// would hide (an unreachable bridge still leaves the local tools listed), and the
+// local check must not wait on a bridge.
+const onlyIndex = process.argv.indexOf("--only");
+const ONLY = onlyIndex >= 0 ? String(process.argv[onlyIndex + 1] || "").trim().toLowerCase() : "";
 
 const STRING = { type: "string" };
 const BOOLEAN = { type: "boolean" };
@@ -153,11 +166,16 @@ async function honchoRequest(context, method, apiPath, { body, params } = {}) {
 //
 // A teammate reaches someone else's memory through that person's MCP bridge, not
 // through their Honcho REST API: the bridge is where the audit log and the
-// judgment gate live, and where the tool list is narrowed to what is shared. When
-// the config names a bridge, this process stops being a second implementation of
-// the tools and becomes a stdio-to-streamable-http relay, so the tool definitions
-// exist in exactly one place. Credentials stay in the external config file, never
-// in the plugin cache.
+// judgment gate live, and where the tool list is narrowed to what is shared.
+// Credentials stay in the external config file, never in the plugin cache.
+//
+// How the bridge's tools appear depends on what else this computer has
+// (mcp-shared-tools.mjs):
+//   - a bridge and no memory of its own ("chat only"): this process is a pure
+//     stdio-to-streamable-http relay, the bridge's tools under their own names;
+//   - a bridge and its own memory (sync set up): the local tools as always, plus
+//     the bridge's tools as `shared_<name>`, relayed with the prefix stripped. An
+//     unreachable bridge never takes the local tools down with it.
 
 let bridgeSession = null;
 
@@ -167,6 +185,10 @@ async function bridgeContext() {
   if (!url) return null;
   return {
     url,
+    host: bridgeHost(url),
+    // The combined list: local tools plus `shared_*`. `--only bridge` asks for the
+    // plain relay whatever else is configured.
+    combined: ONLY !== "bridge" && hasOwnMemory(config),
     token: String(config.honcho?.mcpBridgeToken || config.honcho?.apiToken || process.env.HONCHO_MCP_BEARER_TOKEN || "").trim(),
     accessClientId: String(config.honcho?.accessClientId || process.env.CF_ACCESS_CLIENT_ID || "").trim(),
     accessClientSecret: String(config.honcho?.accessClientSecret || process.env.CF_ACCESS_CLIENT_SECRET || "").trim(),
@@ -205,9 +227,9 @@ function bridgePayload(text, contentType, id) {
 
 let bridgeRequestId = 0;
 
-async function bridgeSend(context, protocolVersion, message, { notification = false } = {}) {
+async function bridgeSend(context, protocolVersion, message, { notification = false, timeoutMs = context.timeoutMs } = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), context.timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(context.url, {
       method: "POST",
@@ -231,7 +253,7 @@ async function bridgeSend(context, protocolVersion, message, { notification = fa
   }
 }
 
-async function bridgeReady(context, protocolVersion) {
+async function bridgeReady(context, protocolVersion, options = {}) {
   if (bridgeSession?.initialized) return;
   bridgeSession = { id: null, initialized: false };
   await bridgeSend(context, protocolVersion, {
@@ -243,19 +265,47 @@ async function bridgeReady(context, protocolVersion) {
       capabilities: {},
       clientInfo: { name: `${SERVER_NAME} relay`, version: SERVER_VERSION },
     },
-  });
-  await bridgeSend(context, protocolVersion, { jsonrpc: "2.0", method: "notifications/initialized" }, { notification: true });
+  }, options);
+  await bridgeSend(context, protocolVersion, { jsonrpc: "2.0", method: "notifications/initialized" }, { ...options, notification: true });
   bridgeSession.initialized = true;
 }
 
-async function bridgeCall(context, protocolVersion, method, params) {
+async function bridgeCall(context, protocolVersion, method, params, options = {}) {
   try {
-    await bridgeReady(context, protocolVersion);
-    return await bridgeSend(context, protocolVersion, { jsonrpc: "2.0", id: (bridgeRequestId += 1), method, params });
+    await bridgeReady(context, protocolVersion, options);
+    return await bridgeSend(context, protocolVersion, { jsonrpc: "2.0", id: (bridgeRequestId += 1), method, params }, options);
   } catch (error) {
     // A dropped session must not strand the relay; the next call re-initializes.
     bridgeSession = null;
     throw error;
+  }
+}
+
+// Next to the local tools, the bridge's list is asked for with a short timeout, so a
+// bridge behind a slow or broken tunnel cannot hold up the local tools, and it is
+// kept for a minute, so a client that lists often does not ask the bridge each time.
+const SHARED_LIST_TIMEOUT_MS = 10_000;
+const SHARED_LIST_TTL_MS = 60_000;
+let sharedListCache = null;
+
+async function sharedToolList(bridge) {
+  const now = Date.now();
+  if (sharedListCache?.url === bridge.url && now - sharedListCache.at < SHARED_LIST_TTL_MS) {
+    return { tools: sharedListCache.tools, unreachable: false };
+  }
+  try {
+    const result = await bridgeCall(bridge, negotiatedProtocolVersion, "tools/list", {}, {
+      timeoutMs: Math.min(bridge.timeoutMs, SHARED_LIST_TIMEOUT_MS),
+    });
+    const tools = Array.isArray(result?.tools) ? result.tools : [];
+    sharedListCache = { url: bridge.url, at: now, tools };
+    return { tools, unreachable: false };
+  } catch {
+    // A bridge seen before keeps its tools listed, marked unreachable, so the agent
+    // still knows they exist; one never reached is left out. Either way the local
+    // tools are listed.
+    const known = sharedListCache?.url === bridge.url ? sharedListCache.tools : [];
+    return { tools: known, unreachable: true };
   }
 }
 
@@ -590,7 +640,7 @@ async function handle(message) {
       protocolVersion: negotiatedProtocolVersion,
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-      instructions: "Self-hosted Honcho personal memory. For broad recall, read the configured user's representation from the user's own observer perspective and also run workspace-wide search.",
+      instructions: "Self-hosted Honcho personal memory. For broad recall, read the configured user's representation from the user's own observer perspective and also run workspace-wide search. Tools named shared_* ask a teammate's shared memory, not the user's own.",
     });
     return;
   }
@@ -599,8 +649,8 @@ async function handle(message) {
     return;
   }
   if (method === "tools/list") {
-    const bridge = await bridgeContext();
-    if (bridge) {
+    const bridge = ONLY === "local" ? null : await bridgeContext();
+    if (bridge && !bridge.combined) {
       try {
         sendResult(id, await bridgeCall(bridge, negotiatedProtocolVersion, "tools/list", {}));
       } catch (error) {
@@ -609,16 +659,48 @@ async function handle(message) {
       return;
     }
     const entries = await availableTools();
-    sendResult(id, { tools: entries.map(({ run, ...definition }) => definition) });
+    const local = entries.map(({ run, ...definition }) => definition);
+    if (!bridge) {
+      sendResult(id, { tools: local });
+      return;
+    }
+    // The local switches (mcp-tools.json) apply to the local tools only; the shared
+    // ones are whatever the bridge's owner chose to share.
+    const shared = await sharedToolList(bridge);
+    sendResult(id, {
+      tools: [
+        ...local,
+        ...sharedTools(shared.tools, { host: bridge.host, localNames: TOOL_BY_NAME.keys(), unreachable: shared.unreachable }),
+      ],
+    });
     return;
   }
   if (method === "tools/call") {
-    const bridge = await bridgeContext();
-    if (bridge) {
+    const bridge = ONLY === "local" ? null : await bridgeContext();
+    if (bridge && !bridge.combined) {
       try {
         sendResult(id, await bridgeCall(bridge, negotiatedProtocolVersion, "tools/call", params || {}));
       } catch (error) {
         sendResult(id, { content: [{ type: "text", text: String(error?.message || error) }], isError: true });
+      }
+      return;
+    }
+    // A name the local server knows is always answered here (see the clash rule in
+    // mcp-shared-tools.mjs); only another `shared_*` name goes to the bridge.
+    if (bridge && !TOOL_BY_NAME.has(params?.name) && isSharedName(params?.name)) {
+      try {
+        sendResult(id, await bridgeCall(bridge, negotiatedProtocolVersion, "tools/call", {
+          ...params,
+          name: unsharedName(params.name),
+        }));
+      } catch (error) {
+        sendResult(id, {
+          content: [{
+            type: "text",
+            text: `Asking the shared memory at ${bridge.host} (a teammate's memory) failed: ${String(error?.message || error)}. This computer's own memory tools are unaffected.`,
+          }],
+          isError: true,
+        });
       }
       return;
     }
