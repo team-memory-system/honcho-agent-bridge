@@ -7,23 +7,31 @@ import { ago } from "../lib/format.js";
 import { app, go, loadContext, refreshStatus, savePrefs, workspace } from "../lib/state.js";
 import { button, busy, pageHead, spinner, tag } from "../lib/ui.js";
 
-const PATHS = [
+// Three features, not three exclusive paths: a computer turns on what it needs.
+// The computer that keeps the server usually does server + sync; another of the
+// person's computers does sync; chat can sit on any of them.
+const FEATURES = [
   {
     key: "server",
-    title: "서버로 구축하기",
-    text: "이 컴퓨터에 내 기억 서버를 만듭니다. 내 대화가 이 컴퓨터에 쌓입니다. 디스크 몇 GB와 Codex나 Claude 구독이 필요합니다. Docker Desktop과 Ollama는 없으면 이 앱이 설치합니다.",
+    title: "서버 설치",
+    text: "이 컴퓨터에 내 기억 서버를 둡니다. 한 사람에게 하나면 되고, 내 다른 컴퓨터의 대화도 여기로 모을 수 있습니다. Docker와 Ollama는 없으면 앱이 설치하고, Codex나 Claude 구독이 필요합니다.",
   },
   {
-    key: "remote",
-    title: "다른 서버와 동기화만 진행",
-    text: "이 컴퓨터에는 서버를 두지 않고, 대화를 이미 있는 내 서버로 보냅니다. Docker는 필요 없습니다. 그 서버의 주소와 서버 토큰, 그리고 Cloudflare WARP가 필요합니다.",
+    key: "sync",
+    title: "대화 동기화",
+    text: "이 컴퓨터에서 Claude Code·Codex와 나눈 대화를 내 기억 서버로 보냅니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다.",
   },
   {
-    key: "ask-only",
-    title: "다른 서버 기억 물어오기",
-    text: "내 대화는 모으지 않고, 팀원이 열어 준 창구에 질문만 합니다. 팀원에게 받은 네 값이 필요합니다.",
+    key: "chat",
+    title: "다른 사람 기억에 묻기 (chat)",
+    text: "팀원이 열어 준 창구에 연결해, 에이전트가 그 사람의 기억에 질문하게 합니다. 원문은 보지 않고 답만 받습니다. 팀원에게 받은 네 값이 필요합니다.",
   },
 ];
+
+function chosenFeatures() {
+  const picked = Array.isArray(app.prefs.startFeatures) ? app.prefs.startFeatures : [];
+  return FEATURES.map((feature) => feature.key).filter((key) => picked.includes(key));
+}
 
 export default {
   title: "시작하기",
@@ -35,24 +43,39 @@ export default {
     );
 
     function drawChoice() {
+      const picked = new Set(chosenFeatures());
+      const go_ = button("이대로 준비하기", { kind: "primary", onClick: () => { savePrefs({ startFeatures: [...picked] }); drawSteps(); } });
+      const sync = () => { go_.disabled = picked.size === 0; };
       clear(body,
-        h("p", { class: "section-note", style: { margin: "0 0 16px" } }, "나중에 바꾸려면 기억을 옮겨야 하니 먼저 정합니다. 한 사람에게 기억 서버는 하나면 됩니다."),
-        h("div", { class: "choices" }, PATHS.map((path) => h("button", {
-          class: `choice ${app.prefs.startPath === path.key ? "picked" : ""}`,
-          type: "button",
-          onclick: () => { savePrefs({ startPath: path.key }); drawSteps(); },
-        }, h("b", {}, path.title), h("span", {}, path.text)))),
+        h("p", { class: "section-note", style: { margin: "0 0 16px" } }, "이 컴퓨터에서 쓸 기능을 고르세요. 여러 개를 같이 켤 수 있고, 나중에 더 켤 수도 있습니다. 서버는 한 사람에게 한 대면 됩니다."),
+        h("div", { class: "choices" }, FEATURES.map((feature) => {
+          const card = h("button", {
+            class: `choice ${picked.has(feature.key) ? "picked" : ""}`,
+            type: "button",
+            "aria-pressed": picked.has(feature.key) ? "true" : "false",
+            onclick: () => {
+              if (picked.has(feature.key)) picked.delete(feature.key); else picked.add(feature.key);
+              card.classList.toggle("picked", picked.has(feature.key));
+              card.setAttribute("aria-pressed", picked.has(feature.key) ? "true" : "false");
+              sync();
+            },
+          }, h("b", {}, feature.title), h("span", {}, feature.text));
+          return card;
+        })),
+        h("p", { class: "muted", style: { fontSize: "12.5px", margin: "12px 0 0" } }, "예: 서버를 두는 컴퓨터는 서버 설치 + 대화 동기화, 회사 노트북은 대화 동기화 + chat."),
+        h("div", { class: "form-actions" }, go_),
       );
-      if (app.prefs.startPath) drawSteps();
+      sync();
     }
 
     async function drawSteps() {
-      const choice = PATHS.find((path) => path.key === app.prefs.startPath);
+      const features = chosenFeatures();
+      if (!features.length) { drawChoice(); return; }
       const list = h("div", { class: "steps" }, h("div", { class: "empty" }, spinner()));
       clear(body,
-        h("div", { style: { display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" } },
-          tag(choice.title, "accent"),
-          button("다르게 고르기", { kind: "small quiet", onClick: () => { savePrefs({ startPath: "" }); drawChoice(); } }),
+        h("div", { style: { display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px", flexWrap: "wrap" } },
+          features.map((key) => tag(FEATURES.find((feature) => feature.key === key).title, "accent")),
+          button("기능 바꾸기", { kind: "small quiet", onClick: drawChoice }),
         ),
         list,
       );
@@ -60,8 +83,9 @@ export default {
       await refreshStatus();
       const context = app.context;
       const steps = [];
+      const serverHere = features.includes("server");
 
-      if (choice.key === "server") {
+      if (serverHere) {
         const server = await post("/api/server/status", { profile: "personal" }).catch(() => null);
         const gatewayReady = app.status.gateway.state === "on";
         steps.push(
@@ -71,11 +95,11 @@ export default {
           { title: "다른 컴퓨터에서 쓰게 열기 (선택)", done: Boolean(server?.share?.enabled), text: server?.share?.enabled ? `${server.share.publicUrl}로 열려 있습니다.` : "회사 맥북 같은 다른 컴퓨터의 대화도 여기로 모으려면 Cloudflare 통로를 엽니다. 이 컴퓨터 하나만 쓰면 건너뜁니다.", action: ["서버 화면에서 열기", () => go("server")], optional: true },
         );
       }
-      if (choice.key === "server" || choice.key === "remote") {
+      if (features.includes("sync")) {
         steps.push({
-          title: "에이전트 대화 수집",
+          title: "대화 동기화 설정",
           done: Boolean(context?.configured),
-          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : choice.key === "remote" ? "서버 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두세요." : "내 이름과 모을 에이전트를 고릅니다.",
+          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "내 이름과 모을 에이전트를 고릅니다. 서버 주소는 비워 두면 이 컴퓨터 서버로 보냅니다." : "서버를 둔 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두세요.",
           action: ["연결 화면에서 설정", () => go("connect/collect")],
         });
         // Only a conversation from an agent this computer collects, after setup, proves it works.
@@ -95,11 +119,11 @@ export default {
           action: fresh ? ["기억 보기", () => go("memory")] : ["다시 확인", "recheck"],
         });
       }
-      if (choice.key === "ask-only") {
+      if (features.includes("chat")) {
         const connected = Boolean(context?.sharedBridge?.connected);
         steps.push(
           { title: "공유 창구에 연결", done: connected, text: connected ? context.sharedBridge.url : "창구 주소, 창구 토큰, Cloudflare 서비스 토큰 ID와 비밀을 넣습니다.", action: ["연결 화면에서 넣기", () => go("connect/share")] },
-          { title: "에이전트 다시 시작", done: false, text: "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 그러면 에이전트가 창구의 chat 도구로 물어볼 수 있습니다.", action: null },
+          { title: "에이전트 다시 시작", done: false, optional: true, text: features.includes("sync") ? "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 에이전트는 내 기억 도구를 그대로 쓰고, 팀원 기억에는 shared_chat 도구로 묻습니다." : "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 그러면 에이전트가 창구의 chat 도구로 물어볼 수 있습니다.", action: null },
         );
       }
 

@@ -274,7 +274,7 @@ export default {
         foot.textContent = `“${state.query.trim()}” 대화 속 ${number(state.hits.length)}곳`;
       } else if (state.tab === "talks") {
         nodes.push(state.sessions.map(sessionItem));
-        if (!state.sessions.length && !state.error && !state.loading) nodes.push(h("div", { style: { padding: "0 16px" } }, empty("아직 모인 대화가 없습니다", "연결 화면에서 에이전트 대화 수집을 켜면 대화가 끝날 때마다 여기에 쌓입니다.", button("대화 수집 설정", { onClick: () => go("connect/collect") }))));
+        if (!state.sessions.length && !state.error && !state.loading) nodes.push(h("div", { style: { padding: "0 16px" } }, empty("아직 모인 대화가 없습니다", "연결 화면에서 대화 동기화를 켜면 대화가 끝날 때마다 여기에 쌓입니다.", button("대화 동기화 설정", { onClick: () => go("connect/collect") }))));
         if (state.sessionPage < state.sessionPages) nodes.push(h("div", { class: "more-messages" }, state.loading ? spinner() : button("더 보기", { kind: "small", onClick: () => moreSessions() })));
         foot.textContent = state.sessionTotal === null ? "" : `${number(state.sessionTotal)}개 중 ${number(state.sessions.length)}개 · 최근 순`;
       } else if (state.tab === "notes") {

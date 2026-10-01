@@ -408,7 +408,7 @@ export default {
       ];
       // Looking at the plan is optional; the next thing to do is the first unfinished step after it.
       const current = steps.findIndex((step, index) => index > 0 && !step.done);
-      return section({ title: "서버로 구축하기", note: "기억 서버, 구독 게이트웨이, 임베딩 모델을 이 컴퓨터에 설치합니다. 한 사람에게 서버는 하나면 됩니다. 이미 다른 컴퓨터에 내 서버가 있으면 설치하지 마세요." },
+      return section({ title: "서버 설치", note: "기억 서버, 구독 게이트웨이, 임베딩 모델을 이 컴퓨터에 설치합니다. 한 사람에게 서버는 하나면 됩니다. 이미 다른 컴퓨터에 내 서버가 있으면 설치하지 마세요." },
         h("div", { class: "steps" }, steps.map((step, index) => h("div", { class: `step ${step.done ? "done" : index === current ? "current" : ""}` },
           h("span", { class: "step-num" }),
           h("div", {},

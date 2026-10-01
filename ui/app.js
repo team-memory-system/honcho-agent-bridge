@@ -105,7 +105,7 @@ function palette() {
     { label: "기억에서 찾기", hint: "기억", run: () => { go("memory"); setTimeout(() => $("#memory-search")?.focus(), 50); } },
     { label: "내 기억에 묻기", hint: "묻기", run: () => go("ask") },
     { label: "구독 계정 추가", hint: "게이트웨이", run: () => go("models") },
-    { label: "에이전트 대화 수집 설정", hint: "연결", run: () => go("connect/collect") },
+    { label: "대화 동기화 설정", hint: "연결", run: () => go("connect/collect") },
     { label: "ChatGPT 기록 가져오기", hint: "연결", run: () => go("connect/import") },
     { label: "서버 점검", hint: "서버", run: () => go("server") },
     { label: "MCP 도구 켜고 끄기", hint: "도구·기록", run: () => go("tools") },

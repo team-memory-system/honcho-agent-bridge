@@ -66,9 +66,9 @@ export default {
     const importer = h("div", {});
     const targets = h("div", {}, spinner());
     clear(body,
-      section({ id: "collect", title: "에이전트 대화 수집", note: "에이전트와 나눈 대화가 끝날 때마다 내 기억 서버로 보냅니다. 내 컴퓨터가 여러 대여도 모두 같은 서버로 모읍니다." }, collect),
+      section({ id: "collect", title: "대화 동기화", note: "이 컴퓨터의 Claude Code·Codex 대화가 끝날 때마다 내 기억 서버로 보냅니다. 내 컴퓨터가 여러 대여도 모두 같은 서버로 모읍니다." }, collect),
       section({ id: "targets", title: "회사 서버에도 보내기", note: "정한 폴더에서 한 대화만 회사 서버 같은 다른 기억 서버에도 보냅니다. 내 서버에는 지금처럼 모든 대화가 가고, 다른 서버가 꺼져 있어도 내 서버는 멈추지 않습니다." }, targets),
-      section({ id: "share", title: "다른 사람의 기억에 묻기", note: "팀원이 열어 준 공유 창구에 연결하면, 에이전트가 그 사람의 기억에 질문할 수 있습니다. 원문은 볼 수 없고 답만 받습니다." }, share),
+      section({ id: "share", title: "다른 사람 기억에 묻기 (chat)", note: "팀원이 열어 준 공유 창구에 연결하면, 에이전트가 그 사람의 기억에 질문할 수 있습니다. 원문은 볼 수 없고 답만 받습니다. 이 컴퓨터가 대화 동기화도 하면 내 기억 도구는 그대로 두고 shared_chat 도구가 더해집니다." }, share),
       section({ id: "import", title: "ChatGPT 기록 가져오기", note: "ChatGPT 설정 → 데이터 제어 → 내보내기로 받은 파일 안의 conversations.json을 올립니다. 같은 파일을 다시 올려도 겹쳐 쌓이지 않습니다." }, importer),
     );
     if (params[0]) setTimeout(() => document.getElementById(params[0])?.scrollIntoView({ block: "start" }), 50);

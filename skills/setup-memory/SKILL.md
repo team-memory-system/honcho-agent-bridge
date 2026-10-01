@@ -7,15 +7,17 @@ description: Connect to someone else's shared memory, or install, update, or dia
 
 Use the deterministic CLI bundled at `<plugin-root>/scripts/cli.mjs`. Resolve `<plugin-root>` as the directory two levels above this `SKILL.md`. Never reconstruct its mutations manually when the CLI supports them.
 
-## First: which path
+## First: which features
 
-Ask one question before anything else, with exactly these three options. Use these labels and descriptions as written, in the user's language (Korean shown); do not rename them, do not add options, and never name a particular computer (such as the user's home machine) in them. Prefer the host's structured question tool. Skip the question when the request already says which.
+Ask one question before anything else: which of these three features this computer should have. They are independent and combine; ask it as a multi-select. Use these labels and descriptions as written, in the user's language (Korean shown). Do not rename them, do not present them as mutually exclusive paths, do not add options, and never name a particular computer (such as the user's home machine) in them. Prefer the host's structured question tool. Skip the question when the request already says which.
 
-1. **서버로 구축하기** — 이 컴퓨터에 내 기억 서버를 만듭니다. 내 대화가 이 컴퓨터에 쌓입니다. Docker와 Ollama는 없으면 설치합니다. → "Own memory workflow" below.
-2. **다른 서버와 동기화만 진행** — 이 컴퓨터에는 서버를 두지 않고, 대화를 이미 있는 내 서버로 보냅니다. 그 서버의 주소와 서버 토큰이 필요합니다. → "Own server on another computer" below.
-3. **다른 서버 기억 물어오기** — 내 대화는 모으지 않고, 다른 사람이 열어 준 창구에 질문만 합니다. → "Asking someone else's memory" below.
+- **서버 설치** — 이 컴퓨터에 내 기억 서버를 둡니다. 한 사람에게 하나면 되고, 내 다른 컴퓨터의 대화도 여기로 모을 수 있습니다. → "Own memory workflow" below, step 1 (the server).
+- **대화 동기화** — 이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 보냅니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다. → "Own memory workflow" below, steps 2–10, with "Own server on another computer" when the server is elsewhere.
+- **다른 사람 기억에 묻기 (chat)** — 팀원이 열어 준 창구에 연결해 그 사람의 기억에 질문합니다. → "Asking someone else's memory" below.
 
-Sending some folders to a company server as well is not a fourth path; offer it after path 1 or 2 is set up, only if the user asks (see "Also sending some folders to another server").
+Typical combinations: the computer that keeps the server takes 서버 설치 + 대화 동기화; another of the person's computers takes 대화 동기화 (and chat if they want); a computer that only asks teammates takes chat alone. With 서버 설치 but not 대화 동기화, install and start the server and skip the hooks. With 대화 동기화 but not 서버 설치, never install a server here; ask for the address of the server they already have. Do them in this order: server, then sync, then chat.
+
+Sending some folders to a company server as well is not a fourth feature; offer it after 대화 동기화 is set up, only if the user asks (see "Also sending some folders to another server").
 
 ## Asking someone else's memory
 
