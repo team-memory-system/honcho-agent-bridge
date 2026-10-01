@@ -10,7 +10,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { checkPrereqs, installWarp, openInstaller, parseFeatures, WARP_INSTALLERS } from "../scripts/prereqs.mjs";
+import { checkPrereqs, installWarp, macInstallArgs, openInstaller, parseFeatures, WARP_INSTALLERS, windowsInstallScript } from "../scripts/prereqs.mjs";
 import { prereqsInstallInvocation, prereqsInvocation } from "../scripts/ui.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -420,8 +420,18 @@ async function exists(target) {
   try { await fsp.access(target); return true; } catch { return false; }
 }
 
-function macInstall(t, directory, { signature, calls = [], opened = [], requested = [], ...rest } = {}) {
+const MAC_CANCELLED = { code: 1, stderr: "0:251: execution error: User canceled. (-128)\n" };
+const MAC_NO_GUI = { code: 1, stderr: "0:251: execution error: No user interaction allowed. (-1713)\n" };
+const MAC_NOT_AUTHORIZED = { code: 1, stderr: "0:251: execution error: Not authorized to send Apple events to System Events. (-1743)\n" };
+
+/**
+ * A macOS install with every outside effect replaced: pkgutil answers `signature`,
+ * osascript answers `osascript` (a finished install by default), and warp-cli is
+ * at /usr/local/bin once osascript has succeeded.
+ */
+function macInstall(directory, { signature, osascript = { code: 0 }, calls = [], opened = [], requested = [], ...rest } = {}) {
   const file = path.join(directory, "Cloudflare_WARP.pkg");
+  let installed = false;
   return installWarp({
     platform: "darwin",
     arch: "arm64",
@@ -429,37 +439,115 @@ function macInstall(t, directory, { signature, calls = [], opened = [], requeste
     homeDir: "/Users/test",
     downloadDir: directory,
     which: () => null,
-    fileExists: () => false,
+    fileExists: (target) => installed && target === MAC_WARP,
     fetchImpl: installerFetch(WARP_INSTALLERS.darwin.url, requested),
-    run: fakeRun({ [`/usr/sbin/pkgutil --check-signature ${file}`]: signature ?? { stdout: pkgutilSigned(file) } }, calls),
-    opener: async (target, options) => { opened.push({ target, platform: options.platform, present: await exists(target), checked: calls.length }); },
+    run: async (command, args) => {
+      calls.push({ command, args });
+      if (command === "/usr/sbin/pkgutil") {
+        assert.deepEqual(args, ["--check-signature", file]);
+        return { code: 0, stdout: "", stderr: "", ...(signature ?? { stdout: pkgutilSigned(file) }) };
+      }
+      if (command === "/usr/bin/osascript") {
+        const answer = { code: 0, stdout: "", stderr: "", ...osascript };
+        if (answer.code === 0) installed = true;
+        return answer;
+      }
+      return { code: -1, stdout: "", stderr: "", error: "ENOENT" };
+    },
+    opener: async (target, options) => { opened.push({ target, platform: options.platform, present: await exists(target) }); },
     ...rest,
   });
 }
 
-test("macOS: the official pkg lands in Downloads, is checked by pkgutil, and is opened for the user", async (t) => {
+test("macOS: the official pkg is checked by pkgutil, then installed behind macOS's password dialog", async (t) => {
   const directory = await downloads(t);
   const file = path.join(directory, "Cloudflare_WARP.pkg");
   const calls = [];
   const opened = [];
   const requested = [];
-  const result = await macInstall(t, directory, { calls, opened, requested });
+  const result = await macInstall(directory, { calls, opened, requested });
   assert.equal(result.ok, true, result.error);
-  assert.equal(result.installed, false);
+  assert.equal(result.installed, true);
   assert.equal(result.changed, true);
-  assert.equal(result.file, file);
+  assert.equal(result.method, "silent");
+  assert.equal(result.cli, MAC_WARP, "warp-cli is looked for again after the install");
   assert.equal(result.bytes, INSTALLER_BYTES.length);
   assert.match(result.verified, /Developer ID Installer: Cloudflare Inc\. \(68WVV388M8\)/);
-  assert.equal(result.nextAction.kind, "warp-installer");
-  for (const word of [/설치 창을 열었습니다/, /계속/, /설치/, /Mac 암호/, /에이전트에게 알려/]) assert.match(result.nextAction.message, word);
+  assert.equal(result.nextAction.kind, "warp-team-join");
+  for (const word of [/설치했습니다/, /팀에 가입/, /VPN 구성/, /'허용'/]) assert.match(result.nextAction.message, word);
   assert.deepEqual(requested, ["https://downloads.cloudflareclient.com/v1/download/macos/ga"]);
-  assert.deepEqual(calls, [`/usr/sbin/pkgutil --check-signature ${file}`]);
-  assert.deepEqual(opened, [{ target: file, platform: "darwin", present: true, checked: 1 }], "opened once, after the signature check");
-  assert.equal((await fsp.readFile(file)).length, INSTALLER_BYTES.length, "the pkg stays for the installer to read");
-  assert.ok(!calls.some((call) => /sudo|installer -pkg/.test(call)), "nothing installs it behind the user's back");
+  assert.deepEqual(calls.map((call) => call.command), ["/usr/sbin/pkgutil", "/usr/bin/osascript"], "signature first, then the install");
+  assert.deepEqual(calls[1].args, macInstallArgs(file));
+  assert.deepEqual(opened, [], "no wizard when the password dialog did the job");
+  assert.equal(await exists(file), false, "a finished install removes the pkg");
+  assert.ok(!calls.some((call) => /sudo/.test(call.command)), "macOS asks for the password, not this program");
 });
 
-test("macOS: a pkg not signed by Cloudflare is refused, deleted and never opened", async (t) => {
+test("macOS: the pkg path reaches osascript as an argument and the shell through quoted form, never inside the script", async (t) => {
+  const root = await downloads(t);
+  const directory = path.join(root, `O'Brien "WARP" $(touch pwned) dir`);
+  await fsp.mkdir(directory);
+  const file = path.join(directory, "Cloudflare_WARP.pkg");
+  const calls = [];
+  const result = await macInstall(directory, { calls });
+  assert.equal(result.ok, true, result.error);
+  const args = calls.find((call) => call.command === "/usr/bin/osascript").args;
+  assert.deepEqual(args.slice(0, 2), ["-e", "on run argv"]);
+  assert.deepEqual(args.slice(4, 6), ["-e", "end run"]);
+  assert.equal(args[6], file, "the path is argv's first item, as it is");
+  assert.equal(args.length, 7);
+  const script = args[3];
+  assert.equal(args[2], "-e");
+  assert.equal(script, 'do shell script "/usr/sbin/installer -pkg " & quoted form of (item 1 of argv) & " -target /" with prompt "팀 메모리가 Cloudflare WARP를 설치하려고 합니다." with administrator privileges');
+  assert.ok(!script.includes("O'Brien") && !script.includes(directory));
+});
+
+test("macOS: quoted form of hands an awkward path to the shell as one word", { skip: process.platform !== "darwin" }, async (t) => {
+  // The real osascript, with the installer swapped for echo and no password asked.
+  const root = await downloads(t);
+  const file = path.join(root, `O'Brien "WARP" $(touch pwned) dir`, "Cloudflare_WARP.pkg");
+  const args = macInstallArgs(file);
+  args[3] = args[3]
+    .replace('"/usr/sbin/installer -pkg "', '"/bin/echo "')
+    .replace(/ with prompt ".*" with administrator privileges$/, "");
+  assert.ok(!args[3].includes("administrator"), "this check never asks for a password");
+  const { stdout } = await execFileAsync("/usr/bin/osascript", args, { cwd: root });
+  assert.equal(stdout.replace(/\n$/, ""), `${file} -target /`);
+  assert.equal(await exists(path.join(root, "pwned")), false, "nothing in the path ran");
+});
+
+test("macOS: cancelling the password dialog installs nothing, keeps the pkg and says how to try again", async (t) => {
+  const directory = await downloads(t);
+  const file = path.join(directory, "Cloudflare_WARP.pkg");
+  const opened = [];
+  const result = await macInstall(directory, { osascript: MAC_CANCELLED, opened });
+  assert.equal(result.ok, false);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.installed, false);
+  assert.equal(result.changed, false);
+  assert.match(result.error, /^설치를 취소했습니다\. 다시 하려면 /);
+  assert.deepEqual(opened, [], "a no is not answered with another window");
+  assert.equal(await exists(file), true, "the checked pkg is kept");
+});
+
+test("macOS: with no password dialog to show, the pkg opens in macOS's Installer instead", async (t) => {
+  const directory = await downloads(t);
+  const file = path.join(directory, "Cloudflare_WARP.pkg");
+  for (const [label, osascript, code] of [["no GUI session", MAC_NO_GUI, /-1713/], ["Apple events refused", MAC_NOT_AUTHORIZED, /-1743/]]) {
+    const opened = [];
+    const result = await macInstall(directory, { osascript, opened });
+    assert.equal(result.ok, true, label);
+    assert.equal(result.installed, false, label);
+    assert.equal(result.changed, true, label);
+    assert.equal(result.method, "wizard", label);
+    assert.match(result.silentError, code, label);
+    assert.equal(result.nextAction.kind, "warp-installer", label);
+    for (const word of [/설치 창을 열었습니다/, /계속/, /Mac 암호/, /에이전트에게 알려/]) assert.match(result.nextAction.message, word, label);
+    assert.deepEqual(opened, [{ target: file, platform: "darwin", present: true }], label);
+  }
+});
+
+test("macOS: a pkg not signed by Cloudflare is refused, deleted and never installed or opened", async (t) => {
   const directory = await downloads(t);
   const file = path.join(directory, "Cloudflare_WARP.pkg");
   for (const [label, signature] of [
@@ -468,11 +556,13 @@ test("macOS: a pkg not signed by Cloudflare is refused, deleted and never opened
     ["a certificate Apple did not issue", { stdout: pkgutilSigned(file, undefined, "signed by untrusted certificate") }],
     ["no signature", { code: 1, stdout: `Package "Cloudflare_WARP.pkg":\n   Status: no signature\n` }],
   ]) {
+    const calls = [];
     const opened = [];
-    const result = await macInstall(t, directory, { signature, opened });
+    const result = await macInstall(directory, { signature, calls, opened });
     assert.equal(result.ok, false, label);
     assert.equal(result.changed, false, label);
     assert.match(result.error, /Cloudflare가 서명한 설치 파일인지 확인되지 않아 지웠고, 설치하지 않았습니다/, label);
+    assert.deepEqual(calls.map((call) => call.command), ["/usr/sbin/pkgutil"], label);
     assert.deepEqual(opened, [], label);
     assert.equal(await exists(file), false, `${label}: the download is removed`);
     assert.equal(await exists(`${file}.part`), false, label);
@@ -530,51 +620,135 @@ test("Linux: the plugin does not install WARP and points to Cloudflare's package
   assert.deepEqual(requested, []);
 });
 
-test("Windows: the msi runs with msiexec only with Cloudflare's valid Authenticode signature", async (t) => {
-  const directory = await downloads(t);
-  const file = path.join(directory, "Cloudflare_WARP.msi");
-  const env = { SystemRoot: "C:\\Windows", ProgramFiles: "C:\\Program Files" };
-  const signed = (status, subject) => async (command, args) => {
-    assert.equal(command, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-    assert.deepEqual(args.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
-    assert.ok(args[3].includes(`Get-AuthenticodeSignature -LiteralPath '${file}'`));
-    assert.ok(args[3].includes("SignerCertificate.Subject"));
-    return { code: 0, stdout: `${status}\r\n${subject}\r\n`, stderr: "" };
-  };
-  const install = (run, opened) => installWarp({
+const WIN_ENV = { SystemRoot: "C:\\Windows", ProgramFiles: "C:\\Program Files" };
+const POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+const CLOUDFLARE_SUBJECT = 'CN="Cloudflare, Inc.", O="Cloudflare, Inc.", L=San Francisco, S=California, C=US';
+
+/**
+ * A Windows install with every outside effect replaced: the signature check
+ * answers `status`/`subject`, the elevated msiexec answers `install`, and
+ * warp-cli is in Program Files once msiexec has exited 0 or 3010.
+ */
+function windowsInstall(directory, { status = "Valid", subject = CLOUDFLARE_SUBJECT, install = { code: 0 }, scripts = [], opened = [] } = {}) {
+  let installed = false;
+  return installWarp({
     platform: "win32",
     arch: "x64",
-    env,
+    env: WIN_ENV,
     downloadDir: directory,
     which: () => null,
-    fileExists: () => false,
+    fileExists: (target) => installed && target === WIN_WARP,
     fetchImpl: installerFetch(WARP_INSTALLERS.win32.url),
-    run,
+    run: async (command, args) => {
+      assert.equal(command, POWERSHELL);
+      assert.deepEqual(args.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
+      scripts.push(args[3]);
+      if (args[3].includes("Get-AuthenticodeSignature")) return { code: 0, stdout: `${status}\r\n${subject}\r\n`, stderr: "" };
+      if (args[3].includes("System.Diagnostics.ProcessStartInfo")) {
+        const answer = { code: 0, stdout: "", stderr: "", ...install };
+        if (answer.code === 0 || answer.code === 3010) installed = true;
+        return answer;
+      }
+      return { code: 1, stdout: "", stderr: "unexpected script" };
+    },
     opener: async (target, options) => { opened.push({ target, platform: options.platform }); },
   });
+}
+
+test("Windows: a Cloudflare-signed msi installs quietly behind UAC, and warp-cli is found after", async (t) => {
+  const root = await downloads(t);
+  const directory = path.join(root, "O'Brien dir");
+  await fsp.mkdir(directory);
+  const file = path.join(directory, "Cloudflare_WARP.msi");
+  const scripts = [];
+  const opened = [];
+  const result = await windowsInstall(directory, { scripts, opened });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.installed, true);
+  assert.equal(result.changed, true);
+  assert.equal(result.method, "silent");
+  assert.equal(result.cli, WIN_WARP);
+  assert.equal(result.restartRequired, undefined);
+  assert.equal(result.nextAction.kind, "warp-team-join");
+  assert.match(result.nextAction.message, /설치했습니다.*팀에 가입/);
+  assert.deepEqual(opened, []);
+  assert.equal(await exists(file), false, "a finished install removes the msi");
+
+  assert.equal(scripts.length, 2, "the signature check, then the install");
+  assert.ok(scripts[0].includes(`Get-AuthenticodeSignature -LiteralPath '${file.replace(/'/g, "''")}'`));
+  const install = scripts[1];
+  assert.equal(install, windowsInstallScript(file, WIN_ENV));
+  assert.ok(install.includes("$i.FileName = 'C:\\Windows\\System32\\msiexec.exe'"));
+  assert.ok(install.includes(`$i.Arguments = '/i "${file.replace(/'/g, "''")}" /qn /norestart'`), "PowerShell quoting outside, msiexec quoting inside");
+  assert.ok(install.includes("$i.Verb = 'runas'"), "Windows asks through UAC");
+  assert.ok(install.includes("exit $p.ExitCode"));
+});
+
+test("Windows: a declined UAC prompt is a cancel, 3010 is installed with a restart, other codes are errors", async (t) => {
+  const directory = await downloads(t);
+  const file = path.join(directory, "Cloudflare_WARP.msi");
+  for (const stdout of ["start-failed 1223 The operation was canceled by the user.\r\n", "start-failed 1223 작업을 사용자가 취소했습니다.\r\n"]) {
+    const opened = [];
+    const cancelled = await windowsInstall(directory, { install: { code: 1, stdout }, opened });
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.cancelled, true, "known by its code, in any display language");
+    assert.equal(cancelled.installed, false);
+    assert.match(cancelled.error, /^설치를 취소했습니다\. 다시 하려면 .*'예'/);
+    assert.deepEqual(opened, []);
+    assert.equal(await exists(file), true, "the checked msi is kept");
+  }
+
+  const restart = await windowsInstall(directory, { install: { code: 3010 } });
+  assert.equal(restart.ok, true);
+  assert.equal(restart.installed, true);
+  assert.equal(restart.restartRequired, true);
+  assert.equal(restart.nextAction.kind, "warp-team-join");
+  assert.match(restart.nextAction.message, /Windows를 다시 시작/);
 
   const opened = [];
-  const result = await install(signed("Valid", 'CN="Cloudflare, Inc.", O="Cloudflare, Inc.", L=San Francisco, S=California, C=US'), opened);
-  assert.equal(result.ok, true, result.error);
-  assert.equal(result.changed, true);
-  assert.equal(result.nextAction.kind, "warp-installer");
-  assert.match(result.nextAction.message, /'예'/);
-  assert.deepEqual(opened, [{ target: file, platform: "win32" }]);
+  const failed = await windowsInstall(directory, { install: { code: 1603, error: "Command failed: powershell.exe ... start-failed ..." }, opened });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.cancelled, undefined);
+  assert.match(failed.error, /종료 코드 1603/);
+  assert.deepEqual(opened, [], "a failed install is not retried in a wizard");
+});
 
-  for (const [status, subject] of [["Valid", "CN=Example Corp, O=Example Corp, C=US"], ["HashMismatch", 'CN="Cloudflare, Inc.", O="Cloudflare, Inc."'], ["NotSigned", ""]]) {
-    const refused = [];
-    const bad = await install(signed(status, subject), refused);
+test("Windows: only when elevation cannot be started does msiexec's own wizard open", async (t) => {
+  const directory = await downloads(t);
+  const file = path.join(directory, "Cloudflare_WARP.msi");
+  for (const [label, install] of [
+    ["the runas start failed", { code: 1, stdout: "start-failed 1155 No application is associated with the specified file for this operation.\r\n" }],
+    ["PowerShell would not start", { code: -1, error: "ENOENT" }],
+  ]) {
+    const opened = [];
+    const result = await windowsInstall(directory, { install, opened });
+    assert.equal(result.ok, true, label);
+    assert.equal(result.installed, false, label);
+    assert.equal(result.method, "wizard", label);
+    assert.equal(result.nextAction.kind, "warp-installer", label);
+    assert.deepEqual(opened, [{ target: file, platform: "win32" }], label);
+  }
+});
+
+test("Windows: an msi without Cloudflare's valid signature is refused, deleted and never run", async (t) => {
+  const directory = await downloads(t);
+  const file = path.join(directory, "Cloudflare_WARP.msi");
+  for (const [status, subject] of [["Valid", "CN=Example Corp, O=Example Corp, C=US"], ["HashMismatch", CLOUDFLARE_SUBJECT], ["NotSigned", ""]]) {
+    const scripts = [];
+    const opened = [];
+    const bad = await windowsInstall(directory, { status, subject, scripts, opened });
     assert.equal(bad.ok, false, status);
     assert.match(bad.error, /지웠고/, status);
-    assert.deepEqual(refused, [], status);
+    assert.equal(scripts.length, 1, `${status}: only the signature check ran`);
+    assert.deepEqual(opened, [], status);
     assert.equal(await exists(file), false, status);
   }
 });
 
-test("a failed download or an installer that does not open is an error, not an install", async (t) => {
+test("a failed download or a wizard that does not open is an error, not an install", async (t) => {
   const directory = await downloads(t);
   const opened = [];
-  const failed = await macInstall(t, directory, { fetchImpl: installerFetch("https://elsewhere.example/warp.pkg"), opened });
+  const failed = await macInstall(directory, { fetchImpl: installerFetch("https://elsewhere.example/warp.pkg"), opened });
   assert.equal(failed.ok, false);
   assert.match(failed.error, /내려받지 못했습니다: .*HTTP 404/);
   assert.deepEqual(opened, []);
@@ -582,7 +756,7 @@ test("a failed download or an installer that does not open is an error, not an i
 
   const file = path.join(directory, "Cloudflare_WARP.pkg");
   for (const opener of [async () => ({ ok: false, error: "open exited with 1" }), async () => { throw new Error("spawn EACCES"); }]) {
-    const result = await macInstall(t, directory, { opener });
+    const result = await macInstall(directory, { osascript: MAC_NO_GUI, opener });
     assert.equal(result.ok, false);
     assert.equal(result.changed, false);
     assert.match(result.error, /설치 창을 열지 못했습니다/);
@@ -591,7 +765,7 @@ test("a failed download or an installer that does not open is an error, not an i
   }
 });
 
-test("the installer opens with open on macOS and msiexec /i on Windows, never elevated by us", async () => {
+test("the fallback wizard opens with open on macOS and msiexec /i on Windows", async () => {
   const spawned = [];
   const fakeSpawn = (event, value) => (command, args, options) => {
     const child = new EventEmitter();

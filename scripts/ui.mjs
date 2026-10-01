@@ -547,7 +547,8 @@ export function createUiServer() {
       if (invocation.error) return json(res, 400, { ok: false, error: invocation.error });
       return json(res, 200, await runCli(invocation.args, { timeout: 60_000 }));
     }
-    // Downloads an installer of about 150 MB before opening it.
+    // Downloads an installer of about 150 MB (up to 25 minutes), then waits up to
+    // 10 minutes for the user at the password or approval prompt.
     if (url.pathname === "/api/app/prereqs/install") {
       if (req.method !== "POST") return json(res, 405, { ok: false, error: "Method not allowed" });
       let body;
@@ -555,7 +556,7 @@ export function createUiServer() {
       catch (error) { return json(res, 400, { ok: false, error: String(error?.message || error) }); }
       const invocation = prereqsInstallInvocation(body);
       if (invocation.error) return json(res, 400, { ok: false, error: invocation.error });
-      return json(res, 200, await runCli(invocation.args, { timeout: 1_800_000 }));
+      return json(res, 200, await runCli(invocation.args, { timeout: 2_400_000 }));
     }
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];

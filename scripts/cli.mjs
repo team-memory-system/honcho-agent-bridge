@@ -1775,8 +1775,8 @@ async function prereqs(options = {}) {
 
 /**
  * `prereqs install warp`: download Cloudflare WARP's official installer, check its
- * signature and open it for the user to finish. WARP is the only program this
- * installs; Docker and Ollama come with `server prepare`.
+ * signature and install it behind the OS's password or approval prompt. WARP is
+ * the only program this installs; Docker and Ollama come with `server prepare`.
  */
 async function prereqsInstall(args) {
   if (args.length !== 1 || args[0] !== "warp") return { ok: false, error: "prereqs install takes one program: warp" };

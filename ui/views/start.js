@@ -1,7 +1,7 @@
 // 시작하기: the first run, as a checklist that reads the real state. First pick
 // how this computer takes part, then each step says whether it is done and opens
 // the screen that does it.
-import { cli, get, post } from "../lib/api.js";
+import { get, post } from "../lib/api.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { ago } from "../lib/format.js";
 import { app, go, loadContext, refreshStatus, savePrefs, workspace } from "../lib/state.js";
@@ -33,8 +33,8 @@ function chosenFeatures() {
 
 const NEEDED = { required: ["꼭 필요", ""], "app-installs": ["없으면 앱이 설치", "accent"], optional: ["있으면 좋음", ""] };
 
-// WARP is the one program this screen installs; the app opens its installer and the
-// user finishes it there.
+// WARP is the one program this screen installs. The app downloads it and the user
+// only answers the system's password or approval prompt.
 const INSTALLABLE = new Set(["warp"]);
 
 function prereqList(items, { onInstall } = {}) {
@@ -91,16 +91,40 @@ export default {
       sync();
     }
 
-    // What the opened installer asks of the user, kept on screen until WARP is in.
-    let installNotice = "";
+    // What the install left for the user to do, kept on screen until it is done:
+    // the wizard and a cancelled install until the program is found, the team
+    // join until the check passes.
+    let installNotice = null;
 
     async function installPrereq(item, target) {
       await busy(target, async () => {
-        const result = await cli("/api/app/prereqs/install", { item: item.key });
-        installNotice = result.nextAction?.message || "";
-        if (!installNotice && result.detail) toast(result.detail);
+        const result = await post("/api/app/prereqs/install", { item: item.key });
+        if (result?.cancelled) {
+          installNotice = { key: item.key, item, text: result.error, tone: "warn", until: "found", retry: true };
+        } else if (!result || result.ok === false) {
+          throw new Error(result?.error || "설치하지 못했습니다.");
+        } else if (result.nextAction?.message) {
+          const joined = result.nextAction.kind === "warp-team-join";
+          installNotice = { key: item.key, item, text: result.nextAction.message, tone: joined ? "ok" : "", until: joined ? "ok" : "found" };
+        } else {
+          installNotice = null;
+          if (result.detail) toast(result.detail);
+        }
+        // Installed or not, the list shows where things stand now.
         await drawSteps();
       });
+    }
+
+    function noticeFor(items, ok) {
+      if (!installNotice) return null;
+      const current = items.find((entry) => entry.key === installNotice.key);
+      const settled = ok || !current || current.ok || (installNotice.until === "found" && current.version);
+      if (settled) { installNotice = null; return null; }
+      const notice = installNotice;
+      return h("div", { class: `notice ${notice.tone}`, style: { margin: "8px 0", alignItems: "center" } },
+        h("div", { style: { flex: "1" } }, notice.text),
+        notice.retry ? button("다시 설치", { kind: "small primary", onClick: (event) => installPrereq(notice.item, event.currentTarget) }) : null,
+      );
     }
 
     async function drawSteps() {
@@ -124,8 +148,6 @@ export default {
       const remote = features.includes("sync") && !serverHere;
       const prereqs = await get(`/api/app/prereqs?${new URLSearchParams({ features: features.join(","), ...(remote ? { remote: "1" } : {}) })}`).catch((error) => ({ ok: false, error: error.message, items: [] }));
       const missing = (prereqs.items || []).filter((item) => item.needed === "required" && !item.ok);
-      // Gone once the program is found (a version) or the check passes.
-      if (prereqs.ok || (prereqs.items || []).some((item) => INSTALLABLE.has(item.key) && (item.ok || item.version))) installNotice = "";
       steps.push({
         title: "필요한 프로그램",
         done: Boolean(prereqs.ok),
@@ -133,7 +155,7 @@ export default {
           ? `확인하지 못했습니다: ${prereqs.error}`
           : prereqs.ok ? "고른 기능에 필요한 프로그램이 모두 있습니다." : `${missing.map((item) => item.label).join(", ")}부터 설치하세요. 설치한 뒤 다시 확인을 누릅니다.`,
         body: h("div", {},
-          installNotice ? h("div", { class: "notice", style: { margin: "8px 0" } }, installNotice) : null,
+          noticeFor(prereqs.items || [], Boolean(prereqs.ok)),
           prereqList(prereqs.items || [], { onInstall: installPrereq }),
         ),
         action: prereqs.ok ? null : ["다시 확인", "recheck"],

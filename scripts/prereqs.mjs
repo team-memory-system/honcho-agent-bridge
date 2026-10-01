@@ -25,21 +25,30 @@
 // status, account.type and account.organization are read; the identifiers never
 // leave this module.
 //
-// installWarp (`prereqs install warp`) gets WARP onto this computer, leaving the
-// OS's own installer to ask the user for approval. Nothing here runs with sudo or
-// elevates by itself. What it rests on (checked 2026-10-01):
+// installWarp (`prereqs install warp`) gets WARP onto this computer. The only
+// thing the user sees is the OS's own password or approval prompt; nothing here
+// runs sudo or holds a password. What it rests on (checked 2026-10-01):
 //   macOS    https://downloads.cloudflareclient.com/v1/download/macos/ga redirects
 //            to the current pkg (2026.7.1376.0, 153 MB). `pkgutil --check-signature`
 //            on it reports "signed by a developer certificate issued by Apple for
 //            distribution" with the leaf "1. Developer ID Installer: Cloudflare Inc.
-//            (68WVV388M8)". The pkg is saved in ~/Downloads, and only with that
-//            signature is it handed to macOS's Installer (`open`), which asks for
-//            the password.
-//   Windows  .../download/windows/ga redirects to the current msi. It is run with
-//            `msiexec /i` only when Get-AuthenticodeSignature says Valid and its
-//            signer is Cloudflare; Windows then asks for approval (UAC).
+//            (68WVV388M8)". Only with that signature is the pkg, saved in
+//            ~/Downloads, installed: osascript's `do shell script ... with
+//            administrator privileges` shows macOS's password dialog and runs
+//            `installer -pkg <pkg> -target /`. The path reaches the script as an
+//            argument and the shell through `quoted form of`, never spliced into
+//            either. Cancelling the dialog is error -128. Without a dialog to show
+//            (no GUI session, Apple events refused) the pkg is opened in macOS's
+//            Installer instead (`open`), which asks for the password itself.
+//   Windows  .../download/windows/ga redirects to the current msi. Only with a
+//            Valid Authenticode signature by Cloudflare is it run as
+//            `msiexec /i <msi> /qn /norestart` through a "runas" start, so UAC is
+//            the only prompt. Declining UAC is Win32 error 1223; msiexec's 3010
+//            is installed, restart needed. When elevation cannot be started at
+//            all, `msiexec /i` opens its own wizard instead.
 //   Linux    not installed here: Cloudflare publishes a package repository.
-// A download that fails its signature check is deleted and never opened.
+// A download that fails its signature check is deleted and never opened. A
+// finished install deletes the installer; a cancelled one keeps it.
 import { spawn as nodeSpawn } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -72,6 +81,18 @@ export const WARP_INSTALLERS = Object.freeze({
   win32: Object.freeze({ url: "https://downloads.cloudflareclient.com/v1/download/windows/ga", file: "Cloudflare_WARP.msi" }),
 });
 const CLOUDFLARE_TEAM_ID = "68WVV388M8";
+const SILENT_INSTALL_TIMEOUT_MS = 600_000;
+const MAC_PASSWORD_PROMPT = "팀 메모리가 Cloudflare WARP를 설치하려고 합니다.";
+const WARP_INSTALLED_MESSAGE = Object.freeze({
+  darwin: "Cloudflare WARP를 설치했습니다. 다음은 팀에 가입하는 단계입니다. macOS가 VPN 구성을 추가해도 되는지 물으면 '허용'을 누르세요.",
+  win32: "Cloudflare WARP를 설치했습니다. 다음은 팀에 가입하는 단계입니다.",
+});
+const WARP_RESTART_MESSAGE = "Cloudflare WARP를 설치했습니다. Windows를 다시 시작해야 설치가 끝납니다. 다시 시작한 뒤 팀에 가입하는 단계로 넘어갑니다.";
+const WARP_CANCELLED_MESSAGE = Object.freeze({
+  darwin: "설치를 취소했습니다. 다시 하려면 '설치'를 한 번 더 누르거나 에이전트에게 다시 설치해 달라고 한 뒤, 암호 창에 Mac 암호를 넣으세요.",
+  win32: "설치를 취소했습니다. 다시 하려면 '설치'를 한 번 더 누르거나 에이전트에게 다시 설치해 달라고 한 뒤, Windows가 변경을 허용할지 물으면 '예'를 누르세요.",
+});
+// The wizard, when the silent install could not ask for the password or approval.
 const WARP_INSTALLER_MESSAGE = Object.freeze({
   darwin: "Cloudflare WARP 설치 창을 열었습니다. 창에서 '계속'과 '설치'를 차례로 누르고, Mac 암호를 물으면 넣어서 설치를 끝내세요. 끝나면 에이전트에게 알려 주세요. 이 앱에서는 '다시 확인'을 누르면 됩니다.",
   win32: "Cloudflare WARP 설치 창을 열었습니다. 창의 안내대로 설치를 진행하고, Windows가 변경을 허용할지 물으면 '예'를 눌러 설치를 끝내세요. 끝나면 에이전트에게 알려 주세요. 이 앱에서는 '다시 확인'을 누르면 됩니다.",
@@ -420,15 +441,14 @@ async function verifyWarpMsi(run, env, file) {
 }
 
 /**
- * Hand a checked installer to the OS: macOS's Installer through `open` (which
- * returns once the window is up), or `msiexec /i` on Windows, left running on its
- * own since it lasts as long as the install does.
+ * Hand a checked installer to the OS's own wizard: macOS's Installer through
+ * `open` (which returns once the window is up), or `msiexec /i` on Windows, left
+ * running on its own since it lasts as long as the install does. The fallback for
+ * when the silent install cannot ask for the password or approval.
  */
 export function openInstaller(file, { platform = process.platform, env = process.env, spawnImpl = nodeSpawn } = {}) {
   const windows = platform === "win32";
-  const command = windows
-    ? path.win32.join(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows", "System32", "msiexec.exe")
-    : "/usr/bin/open";
+  const command = windows ? msiexecPath(env) : "/usr/bin/open";
   const args = windows ? ["/i", file] : [file];
   return new Promise((resolve) => {
     let child;
@@ -443,12 +463,89 @@ export function openInstaller(file, { platform = process.platform, env = process
   });
 }
 
+function msiexecPath(env) {
+  return path.win32.join(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows", "System32", "msiexec.exe");
+}
+
+/**
+ * osascript's arguments for the silent macOS install. The pkg path is argv's
+ * first item: AppleScript never parses it, and `quoted form of` hands it to the
+ * shell as one single-quoted word.
+ */
+export function macInstallArgs(file) {
+  return [
+    "-e", "on run argv",
+    "-e", `do shell script "/usr/sbin/installer -pkg " & quoted form of (item 1 of argv) & " -target /" with prompt "${MAC_PASSWORD_PROMPT}" with administrator privileges`,
+    "-e", "end run",
+    file,
+  ];
+}
+
+// A "runas" start failed before msiexec ran; the Win32 error code follows.
+const START_FAILED = "start-failed";
+
+/**
+ * PowerShell that starts `msiexec /i <msi> /qn /norestart` elevated, waits, and
+ * exits with msiexec's code. Process.Start is used rather than Start-Process so a
+ * refused start keeps its Win32 code (1223 when UAC is declined) whatever the
+ * Windows display language. Windows paths cannot hold a double quote, so quoting
+ * the path for msiexec's command line is safe; psQuote covers PowerShell.
+ */
+export function windowsInstallScript(file, env = process.env) {
+  return [
+    "$i = New-Object System.Diagnostics.ProcessStartInfo",
+    `$i.FileName = ${psQuote(msiexecPath(env))}`,
+    `$i.Arguments = ${psQuote(`/i "${file}" /qn /norestart`)}`,
+    "$i.Verb = 'runas'",
+    "$i.UseShellExecute = $true",
+    `try { $p = [System.Diagnostics.Process]::Start($i) } catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; Write-Output ('${START_FAILED} ' + [string]$e.NativeErrorCode + ' ' + $e.Message); exit 1 }`,
+    "$p.WaitForExit()",
+    "exit $p.ExitCode",
+  ].join("; ");
+}
+
+// Only what the program printed: `error` repeats the command line, script included.
+function outputOf(result) {
+  return `${result.stdout}\n${result.stderr}`.replace(/\0/g, "");
+}
+
+/**
+ * The silent install: macOS's password dialog or Windows's UAC prompt, and
+ * nothing else. `{ outcome: "installed" | "restart" | "cancelled" | "unavailable"
+ * | "failed", reason }`; "unavailable" means the prompt could not be shown, so
+ * the wizard is the way.
+ */
+async function silentInstall(run, env, platform, file) {
+  if (platform === "darwin") {
+    const result = await runCommand(run, "/usr/bin/osascript", macInstallArgs(file), { env, timeout: SILENT_INSTALL_TIMEOUT_MS });
+    if (result.ok) return { outcome: "installed" };
+    const text = outputOf(result);
+    if (/\(-128\)|User cancel+ed/i.test(text)) return { outcome: "cancelled" };
+    return { outcome: "unavailable", reason: firstLine(result.stderr) || firstLine(result.stdout) || result.error || `osascript exit ${result.code}` };
+  }
+  const result = await runCommand(run, powershellPath(env), ["-NoProfile", "-NonInteractive", "-Command", windowsInstallScript(file, env)], { env, timeout: SILENT_INSTALL_TIMEOUT_MS });
+  const started = new RegExp(`^${START_FAILED} (-?\\d*) ?(.*)$`, "m").exec(result.stdout.replace(/\0/g, ""));
+  if (started) {
+    if (started[1] === "1223") return { outcome: "cancelled" };
+    return { outcome: "unavailable", reason: `elevation ${started[1] || "?"}: ${started[2].trim().slice(0, 200)}` };
+  }
+  // PowerShell itself would not start (spawn's own error code, no output).
+  if (!result.ok && result.code === -1 && /^E[A-Z]+$/.test(result.error) && !result.stdout.trim()) {
+    return { outcome: "unavailable", reason: `powershell: ${result.error}` };
+  }
+  if (result.code === 0) return { outcome: "installed" };
+  if (result.code === 3010 || result.code === 1641) return { outcome: "restart" };
+  if (result.code === 1223 || result.code === 1602) return { outcome: "cancelled" };
+  return { outcome: "failed", reason: result.code === -1 ? "설치가 10분 안에 끝나지 않았거나 멈췄습니다" : `msiexec 종료 코드 ${result.code}` };
+}
+
 /**
  * Put Cloudflare WARP on this computer: download the official installer, check
- * that Cloudflare signed it, and open it for the user to finish. Already installed
- * is `{ ok, installed: true, changed: false }`; an opened installer is
- * `changed: true` with a `nextAction` the user follows. Joining the team comes
- * after, with the warp item's note.
+ * that Cloudflare signed it, and install it behind the OS's password or approval
+ * prompt. Already installed is `{ ok, installed: true, changed: false }`; a
+ * finished install is `installed: true, changed: true` with the team join as its
+ * `nextAction`; a declined prompt is `{ ok: false, cancelled: true }`. When no
+ * prompt can be shown, the wizard opens: `installed: false, changed: true`.
  */
 export async function installWarp({
   platform = process.platform,
@@ -495,6 +592,33 @@ export async function installWarp({
       error: `내려받은 파일이 Cloudflare가 서명한 설치 파일인지 확인되지 않아 지웠고, 설치하지 않았습니다 (${signature.reason}).`,
     };
   }
+  const checked = { bytes: download.bytes, sha256: download.sha256, verified: signature.verified };
+
+  const silent = await silentInstall(run, env, platform, file);
+  if (silent.outcome === "installed" || silent.outcome === "restart") {
+    await fsp.rm(file, { force: true }).catch(() => {});
+    const restart = silent.outcome === "restart";
+    const found = locateWarpCli({ platform, env, which, fileExists });
+    return {
+      ok: true,
+      ...base,
+      installed: true,
+      changed: true,
+      method: "silent",
+      cli: found,
+      ...(restart ? { restartRequired: true } : {}),
+      ...checked,
+      nextAction: { kind: "warp-team-join", message: restart ? WARP_RESTART_MESSAGE : WARP_INSTALLED_MESSAGE[platform] },
+    };
+  }
+  if (silent.outcome === "cancelled") {
+    return { ok: false, ...base, installed: false, changed: false, cancelled: true, file, error: WARP_CANCELLED_MESSAGE[platform] };
+  }
+  if (silent.outcome === "failed") {
+    return { ok: false, ...base, installed: false, changed: false, file, error: `Cloudflare WARP를 설치하지 못했습니다 (${silent.reason}). 다시 해 보고, 같으면 내려받은 파일을 직접 열어서 설치하세요: ${file}` };
+  }
+
+  // The prompt could not be shown here: the OS's own wizard asks instead.
   let opened;
   try { opened = await opener(file, { platform, env }); }
   catch (error) { opened = { ok: false, error: String(error?.message || error) }; }
@@ -505,6 +629,7 @@ export async function installWarp({
       installed: false,
       changed: false,
       file,
+      silentError: silent.reason,
       error: `설치 창을 열지 못했습니다 (${opened.error || "알 수 없는 이유"}). 내려받은 파일을 직접 열어서 설치하세요: ${file}`,
     };
   }
@@ -513,10 +638,10 @@ export async function installWarp({
     ...base,
     installed: false,
     changed: true,
+    method: "wizard",
     file,
-    bytes: download.bytes,
-    sha256: download.sha256,
-    verified: signature.verified,
+    silentError: silent.reason,
+    ...checked,
     nextAction: { kind: "warp-installer", message: WARP_INSTALLER_MESSAGE[platform] },
   };
 }
