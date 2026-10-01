@@ -811,20 +811,19 @@ dialog.sheet::backdrop { background: rgb(18 18 16 / 35%); }
 .mobile-bar { display: none; }
 
 @media (max-width: 860px) {
-  .shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  /* The rail leaves the grid here (hidden, or fixed when open), so the page is the
+     only row and gets the full height. */
+  .shell { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }
   .rail { display: none; }
   .rail.open { display: flex; position: fixed; inset: 0 30% 0 0; z-index: 40; background: var(--canvas); box-shadow: var(--shadow-pop); }
   .mobile-bar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--canvas); }
   .page-head { padding: 16px; flex-wrap: wrap; }
   .pad { padding: 16px 16px 40px; }
-  .memory { grid-template-columns: 1fr; }
+  .memory { grid-template-columns: minmax(0, 1fr); }
   .memory.reading .list-pane { display: none; }
   .memory:not(.reading) .reader { display: none; }
   .reader-inner { padding: 18px 16px 48px; }
   .grid-2, .form-grid { grid-template-columns: 1fr; }
-  /* The rail is out of the grid here, so the page gets the auto row and stops at
-     its content; the ask screen needs the full height to float its composer. */
-  .shell:has(.page-body.ask) { grid-template-rows: minmax(0, 1fr); }
   .composer { padding: 0 10px 10px; }
   .thread-inner { padding: 16px 16px calc(var(--composer-h) + 20px); }
   .composer-foot { padding: 6px 6px 6px 8px; }

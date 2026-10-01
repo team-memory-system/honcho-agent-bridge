@@ -50,9 +50,14 @@ function route() {
 
 // ── What this computer has, and what it can use yet ─────
 
+/** A memory server answers here: one set up for 대화 보내기, one installed here, or one that was already running. */
+function memoryAnswers() {
+  return app.status.honcho.state === "on";
+}
+
 function setupDone() {
   const context = app.context;
-  return Boolean(context?.configured || context?.sharedBridge?.connected);
+  return Boolean(context?.configured || context?.sharedBridge?.connected || context?.localServer || memoryAnswers());
 }
 
 /** A server here, one about to be installed here, or a gateway answering here. */
@@ -76,7 +81,8 @@ function visible(name) {
 function gate(name) {
   const context = app.context;
   if (!context) return null;
-  if (!setupDone() && ["memory", "ask", "tools", "audit"].includes(name)) {
+  // Until the first check answers, whether a memory server is here is unknown.
+  if (!setupDone() && !app.status.honcho.pending && ["memory", "ask", "tools", "audit"].includes(name)) {
     return {
       reason: "시작하기에서 설정을 마치면 열립니다",
       detail: "이 컴퓨터가 어느 기억 서버를 쓸지 아직 정하지 않았습니다.",
@@ -95,7 +101,7 @@ function gate(name) {
       fix: ["게이트웨이로", "models"],
     };
   }
-  if (!context.localServer && context.sharedBridge?.connected && !context.configured) {
+  if (!context.localServer && context.sharedBridge?.connected && !context.configured && !memoryAnswers()) {
     return {
       reason: "대화 보내기를 켜면 열립니다",
       detail: "이 컴퓨터는 팀원 기억에만 연결돼 있습니다. 기억과 묻기는 내 기억 서버를 봅니다.",
@@ -175,7 +181,7 @@ function defaultView() {
   if (!app.context) return "memory";
   if (!setupDone()) return "start";
   // Joined a teammate's memory only: there is no memory of one's own to open.
-  if (!app.context.localServer && !app.context.configured) return "connect";
+  if (!app.context.localServer && !app.context.configured && !memoryAnswers()) return "connect";
   return "memory";
 }
 
@@ -320,9 +326,10 @@ async function boot() {
   }
   window.addEventListener("hashchange", () => show());
   const firstStatus = refreshStatus();
-  // On a server computer whether 기억 and 묻기 open depends on the gateway, so give
-  // the first check a moment rather than open a screen and then lock it.
-  if (app.context.localServer) await Promise.race([firstStatus, new Promise((resolve) => setTimeout(resolve, 3000))]);
+  // Whether 기억 and 묻기 open depends on the first check (a memory server answering,
+  // the gateway on a server computer), so give it a moment rather than open a screen
+  // and then lock it.
+  await Promise.race([firstStatus, new Promise((resolve) => setTimeout(resolve, 3000))]);
   await show();
   probeAudit();
   setInterval(refreshStatus, 60_000);

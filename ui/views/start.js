@@ -206,7 +206,7 @@ export default {
         steps.push({
           title: "대화 보내기 설정",
           done: Boolean(context?.configured),
-          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "내 이름과 모을 에이전트를 고릅니다. 서버 주소는 비워 두면 이 컴퓨터 서버로 보냅니다." : "서버를 둔 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두세요.",
+          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "기억 서버로 이 컴퓨터 서버를 고르고, 보낼 에이전트와 내 이름을 정합니다." : "서버를 둔 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두세요.",
           action: ["연결 화면에서 설정", () => go("connect/collect")],
         });
         // Only a conversation from an agent this computer collects, after setup, proves it works.
