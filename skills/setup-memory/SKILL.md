@@ -1,6 +1,7 @@
 ---
 name: setup-memory
 description: Connect to someone else's shared memory, or install, update, or diagnose the bundled self-hosted personal-memory runtime for Codex and Claude Code. Use when the user asks to set up memory, connect to a teammate's or colleague's memory, connect coding agents to Honcho, choose which detected agents receive hooks, inspect an installation plan, repair hooks, or run a memory health check.
+disable-model-invocation: true
 ---
 
 # Setup Memory
@@ -23,10 +24,11 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | A required program missing | <프로그램>이 없습니다. 공식 설치 방법(<install.command 또는 install.url>)으로 설치할까요? |
 | WARP install | Cloudflare WARP를 설치합니다. 다른 컴퓨터의 기억 서버와 팀원 기억에 닿게 해 주는 프로그램입니다. |
 | WARP install, before running it | 곧 암호 창이 뜹니다. Mac 암호를 넣으면 WARP가 설치됩니다(Windows는 허용 창에서 예). |
-| WARP installer open (`warp-installer`, the fallback) | WARP 설치 창을 열었습니다. 계속 → 설치를 누르고 Mac 암호를 넣어 주세요. 끝나면 "했어"라고 말해 주세요. |
+| WARP installer open (`warp-installer`, the fallback) | WARP 설치 창을 열었습니다. 계속 → 설치를 누르고 Mac 암호를 넣어 주세요. 처음 화면에서 1.1.1.1과 Cloudflare One 중에 고르라고 하면 Cloudflare One을 고르고 팀 이름 <team>을 넣으세요. 끝나면 "했어"라고 말해 주세요. |
 | WARP install cancelled | 설치를 취소했습니다. 다시 하려면 "다시"라고 말해 주세요. |
 | WARP team join | WARP를 팀에 등록합니다. 팀 이름을 알려 주세요. 모르면 Cloudflare 계정을 관리하는 사람에게 받으세요. |
 | WARP login | 브라우저에 팀 로그인 창이 열렸습니다. 팀이 정한 방법(보통 이메일로 받은 코드)으로 로그인해 주세요. 끝나면 "했어"라고 말해 주세요. |
+| WARP login failed ("Enrollment request is invalid" or another error page) | 로그인이 끝나지 않았습니다. 제가 로그인 창을 새로 띄우겠습니다. 이번 창에서 바로 로그인해 주세요. (then run `warp-cli registration new <team>` again; if it fails twice, the email is probably not allowed in the team's device enrollment rules — tell the user to ask whoever runs the Cloudflare account to allow it) |
 | Server plan confirmation | Question "서버를 이렇게 설치합니다. 진행할까요?" whose text lists, one line each and only those in the plan: Docker Desktop 설치 (첫 실행 때 약관 동의와 Mac 암호 필요) / Ollama와 임베딩 모델(Qwen3-Embedding 4B, 약 2.5GB) 받기 / 구독 게이트웨이 설치 (로그인하면 자동으로 켜짐) / 기억 서버 설치 (주소 <apiUrl>), then the Docker license warning: 회사 직원이 250명 이상이거나 매출이 1천만 달러 이상이면 Docker 유료 구독이 필요합니다. Options "진행", "취소" |
 | Before prepare, when it installs Docker | 곧 Docker Desktop 창이 뜹니다. 약관에 동의(Accept)하고, 추천 설정(Use recommended settings)을 고른 뒤 Mac 암호를 넣어 주세요. 로그인이나 설문은 건너뛰어도 됩니다. 끝나면 제가 이어서 진행합니다. |
 | Before prepare otherwise | 서버를 준비합니다. 몇 분 걸릴 수 있습니다. |
@@ -65,8 +67,8 @@ Once the features are chosen, check the software they need and get it installed 
 1. Node.js 18 or later must exist before the plugin's CLI can run. Check it with the shell (`node --version`). If it is missing, install it from nodejs.org (the LTS installer), or with `brew install node` when Homebrew is already there (macOS), or with `winget install --id OpenJS.NodeJS.LTS -e` (Windows).
 2. Then run `node <plugin-root>/scripts/cli.mjs prereqs --features <chosen,features>`. It reports each item as `required` or `app-installs`, with its `install.command`/`install.url`. Cloudflare WARP is required for every feature: every computer joins the team's WARP, and that is what lets it reach the servers and teammates' memories behind Cloudflare Access.
    - git missing: offer the reported official command, as its own confirmation. Never pipe a downloaded script into a shell. Rerun `prereqs` after.
-   - WARP missing: do not explain it; install it. Say the "WARP install" and "WARP install, before running it" lines, then run `node <plugin-root>/scripts/cli.mjs prereqs install warp`. It downloads Cloudflare's signed installer, checks the signature and asks for the password in the system's own dialog, then installs silently. `installed: true` means go straight on to the team join; `cancelled: true` gets the "WARP install cancelled" line; `nextAction.kind: "warp-installer"` (no password dialog was possible, so the installer window was opened) gets the "WARP installer open" line and a rerun of `prereqs` once the user says it is done. If macOS asks to allow a VPN configuration when WARP first starts, the user allows it.
-   - WARP installed but not in a team: say the "WARP team join" line. With the team name, run `warp-cli registration new <team>` (it opens a browser login) and say the "WARP login" line; when the user says it is done, run `warp-cli connect`. Never guess the team name. Rerun `prereqs`; it reports the team it is connected to.
+   - WARP missing: do not explain it; install it. First say the "WARP team join" line and get the team name (never guess it). Then say the "WARP install" and "WARP install, before running it" lines and run `node <plugin-root>/scripts/cli.mjs prereqs install warp --team <team>`. The team goes into the same install, so WARP never shows its "1.1.1.1 or Cloudflare One" choice. It downloads Cloudflare's signed installer, checks the signature and asks for the password in the system's own dialog, then installs silently. `nextAction.kind: "warp-team-login"` means WARP is installed and opens the team login in the browser by itself: say the "WARP login" line (if no browser window appears, run `warp-cli registration new <team>`); `cancelled: true` gets the "WARP install cancelled" line; `nextAction.kind: "warp-installer"` (no password dialog was possible, so the installer window was opened) gets the "WARP installer open" line and a rerun of `prereqs` once the user says it is done. If macOS asks to allow a VPN configuration when WARP first starts, the user allows it.
+   - WARP installed but not in a team (or already installed before this setup): say the "WARP team join" line. With the team name, run `warp-cli registration new <team>` (it opens a browser login) and say the "WARP login" line; when the user says it is done, run `warp-cli connect`. Never guess the team name. Rerun `prereqs`; it reports the team it is connected to.
    - `app-installs` (Docker Desktop and Ollama for 서버 설치): nothing to do now; `server prepare` installs them.
    - Never bring up Cloudflare service tokens. They are an advanced fallback for a computer that cannot run WARP, and only when the user asks for that.
 3. The app's 시작하기 screen shows the same check as its first step.

@@ -32,23 +32,41 @@
 //            to the current pkg (2026.7.1376.0, 153 MB). `pkgutil --check-signature`
 //            on it reports "signed by a developer certificate issued by Apple for
 //            distribution" with the leaf "1. Developer ID Installer: Cloudflare Inc.
-//            (68WVV388M8)". Only with that signature is the pkg, saved in
-//            ~/Downloads, installed: osascript's `do shell script ... with
-//            administrator privileges` shows macOS's password dialog and runs
-//            `installer -pkg <pkg> -target /`. The path reaches the script as an
-//            argument and the shell through `quoted form of`, never spliced into
-//            either. Cancelling the dialog is error -128. Without a dialog to show
-//            (no GUI session, Apple events refused) the pkg is opened in macOS's
-//            Installer instead (`open`), which asks for the password itself.
+//            (68WVV388M8)". Only with that signature is the pkg installed. It is
+//            saved in a fresh folder under the user's temp directory, not
+//            ~/Downloads: macOS's privacy protection keeps the admin `installer`
+//            out of Downloads, Desktop and Documents ("the package path
+//            specified was invalid"). osascript's `do shell script ... with
+//            administrator privileges` shows macOS's password dialog and, in
+//            that one call, puts the team's managed config in place and runs
+//            `installer -pkg <pkg> -target /`. Every path reaches the script as
+//            an argument and the shell through `quoted form of`, never spliced
+//            into either. Cancelling the dialog is error -128. Without a dialog
+//            to show (no GUI session, Apple events refused) the pkg is opened in
+//            macOS's Installer instead (`open`), which asks for the password
+//            itself; the user then picks the team on the client's first screen.
 //   Windows  .../download/windows/ga redirects to the current msi. Only with a
 //            Valid Authenticode signature by Cloudflare is it run as
-//            `msiexec /i <msi> /qn /norestart` through a "runas" start, so UAC is
-//            the only prompt. Declining UAC is Win32 error 1223; msiexec's 3010
-//            is installed, restart needed. When elevation cannot be started at
-//            all, `msiexec /i` opens its own wizard instead.
+//            `msiexec /i <msi> ORGANIZATION=.. ONBOARDING="false" /qn /norestart`
+//            through a "runas" start, so UAC is the only prompt. Declining UAC
+//            is Win32 error 1223; msiexec's 3010 is installed, restart needed.
+//            When elevation cannot be started at all, `msiexec /i` opens its own
+//            wizard instead.
 //   Linux    not installed here: Cloudflare publishes a package repository.
 // A download that fails its signature check is deleted and never opened. A
-// finished install deletes the installer; a cancelled one keeps it.
+// finished install deletes the installer's folder; a cancelled install, the
+// wizard and a failure keep it.
+//
+// The team. On first launch the client (now "Cloudflare One Client") asks
+// whether it is for 1.1.1.1 or Cloudflare One, which a teammate cannot be
+// expected to answer. Cloudflare's managed config answers it: an mdm.xml with
+// `organization` (the team name) and `onboarding` false, read from
+// /Library/Application Support/Cloudflare/mdm.xml on macOS and
+// C:\ProgramData\Cloudflare\mdm.xml on Windows, where the msi writes it from its
+// ORGANIZATION and ONBOARDING properties. The client then starts the team login
+// in the browser by itself. An mdm.xml that is already there is read first (no
+// admin needed): naming the same team it is kept as it is, naming another team
+// (or none) it is never replaced and nothing is installed.
 import { spawn as nodeSpawn } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -83,20 +101,28 @@ export const WARP_INSTALLERS = Object.freeze({
 const CLOUDFLARE_TEAM_ID = "68WVV388M8";
 const SILENT_INSTALL_TIMEOUT_MS = 600_000;
 const MAC_PASSWORD_PROMPT = "팀 메모리가 Cloudflare WARP를 설치하려고 합니다.";
-const WARP_INSTALLED_MESSAGE = Object.freeze({
-  darwin: "Cloudflare WARP를 설치했습니다. 다음은 팀에 가입하는 단계입니다. macOS가 VPN 구성을 추가해도 되는지 물으면 '허용'을 누르세요.",
-  win32: "Cloudflare WARP를 설치했습니다. 다음은 팀에 가입하는 단계입니다.",
-});
-const WARP_RESTART_MESSAGE = "Cloudflare WARP를 설치했습니다. Windows를 다시 시작해야 설치가 끝납니다. 다시 시작한 뒤 팀에 가입하는 단계로 넘어갑니다.";
+// A Cloudflare Zero Trust team name, as `<team>.cloudflareaccess.com` uses it.
+export const WARP_TEAM_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const WARP_TEAM_INVALID = "팀 이름은 영어 소문자, 숫자, 하이픈(-)만 쓰고 소문자나 숫자로 시작하는 63자 이하여야 합니다. Cloudflare 계정 관리자에게 받은 팀 이름을 그대로 넣으세요.";
+const WARP_TEAM_MISSING = "WARP를 설치하려면 팀 이름이 필요합니다. Cloudflare 계정 관리자에게 받은 팀 이름을 넣으세요.";
+function warpLoginMessage(platform, team, restart) {
+  const vpn = platform === "darwin" ? " macOS가 VPN 구성을 추가해도 되는지 물으면 '허용'을 누르세요." : "";
+  const fallback = ` 창이 열리지 않으면 에이전트가 \`warp-cli registration new ${team}\`으로 다시 열 수 있습니다.`;
+  if (restart) return `Cloudflare WARP를 설치했습니다. Windows를 다시 시작해야 설치가 끝납니다. 다시 시작하면 브라우저에 팀 로그인 창이 열리니 팀 계정으로 로그인하세요.${fallback}`;
+  return `Cloudflare WARP를 설치했습니다. 브라우저에 팀 로그인 창이 열리니 팀 계정으로 로그인하세요.${vpn}${fallback}`;
+}
 const WARP_CANCELLED_MESSAGE = Object.freeze({
   darwin: "설치를 취소했습니다. 다시 하려면 '설치'를 한 번 더 누르거나 에이전트에게 다시 설치해 달라고 한 뒤, 암호 창에 Mac 암호를 넣으세요.",
   win32: "설치를 취소했습니다. 다시 하려면 '설치'를 한 번 더 누르거나 에이전트에게 다시 설치해 달라고 한 뒤, Windows가 변경을 허용할지 물으면 '예'를 누르세요.",
 });
 // The wizard, when the silent install could not ask for the password or approval.
-const WARP_INSTALLER_MESSAGE = Object.freeze({
-  darwin: "Cloudflare WARP 설치 창을 열었습니다. 창에서 '계속'과 '설치'를 차례로 누르고, Mac 암호를 물으면 넣어서 설치를 끝내세요. 끝나면 에이전트에게 알려 주세요. 이 앱에서는 '다시 확인'을 누르면 됩니다.",
-  win32: "Cloudflare WARP 설치 창을 열었습니다. 창의 안내대로 설치를 진행하고, Windows가 변경을 허용할지 물으면 '예'를 눌러 설치를 끝내세요. 끝나면 에이전트에게 알려 주세요. 이 앱에서는 '다시 확인'을 누르면 됩니다.",
-});
+// Nothing preseeds the team then, so the client's first screen asks for it.
+function warpInstallerMessage(platform, team) {
+  const steps = platform === "darwin"
+    ? "창에서 '계속'과 '설치'를 차례로 누르고, Mac 암호를 물으면 넣어서 설치를 끝내세요."
+    : "창의 안내대로 설치를 진행하고, Windows가 변경을 허용할지 물으면 '예'를 눌러 설치를 끝내세요.";
+  return `Cloudflare WARP 설치 창을 열었습니다. ${steps} 설치 뒤 WARP의 첫 화면에서 '1.1.1.1'이 아니라 'Cloudflare One'을 고르고, 팀 이름 칸에 다음을 넣으세요: ${team}. 끝나면 에이전트에게 알려 주세요. 이 앱에서는 '다시 확인'을 누르면 됩니다.`;
+}
 
 /**
  * `"server,sync"` (or an array) as a list of known features, each once.
@@ -467,16 +493,84 @@ function msiexecPath(env) {
   return path.win32.join(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows", "System32", "msiexec.exe");
 }
 
+// ------------------------------------------------------------------ the team's managed config
+
+/** The team name Cloudflare's managed config takes, or null. */
+export function validWarpTeam(value) {
+  return typeof value === "string" && WARP_TEAM_PATTERN.test(value) ? value : null;
+}
+
+function xmlEscape(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[char]);
+}
+
+function xmlUnescape(value) {
+  return String(value).replace(/&(amp|lt|gt|quot|apos);/g, (_, name) => ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[name]);
+}
+
+/** The mdm.xml that names the team and skips the client's 1.1.1.1-or-Cloudflare One screen. */
+export function warpMdmXml(team) {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    `<plist version="1.0"><dict><key>organization</key><string>${xmlEscape(team)}</string><key>onboarding</key><false/></dict></plist>`,
+    "",
+  ].join("\n");
+}
+
+/** Where the client reads its managed config. */
+export function warpMdmPath(platform = process.platform, env = process.env) {
+  if (platform === "win32") return path.win32.join(env.ProgramData || env.PROGRAMDATA || "C:\\ProgramData", "Cloudflare", "mdm.xml");
+  return "/Library/Application Support/Cloudflare/mdm.xml";
+}
+
+/** Every `organization` an mdm.xml names: one dict, or an array of them. */
+export function mdmOrganizations(text) {
+  return [...String(text || "").matchAll(/<key>\s*organization\s*<\/key>\s*<string>([^<]*)<\/string>/g)].map((match) => xmlUnescape(match[1]).trim());
+}
+
 /**
- * osascript's arguments for the silent macOS install. The pkg path is argv's
- * first item: AppleScript never parses it, and `quoted form of` hands it to the
- * shell as one single-quoted word.
+ * What to do about a managed config already on this computer: "write" when there
+ * is none, "keep" when it names this team, or a refusal. Reading it needs no admin.
  */
-export function macInstallArgs(file) {
+async function existingMdm(mdmPath, team, readText) {
+  let text;
+  try { text = await readText(mdmPath); }
+  catch (error) {
+    if (error?.code === "ENOENT") return { action: "write" };
+    return { action: "refuse", error: `이 컴퓨터에 이미 있는 WARP 관리 설정(${mdmPath})을 읽지 못해서 아무것도 바꾸지 않았습니다 (${error?.code || error?.message || error}).` };
+  }
+  const organizations = mdmOrganizations(text);
+  if (organizations.length && organizations.every((name) => name === team)) return { action: "keep" };
+  const other = organizations.find((name) => name !== team);
+  return {
+    action: "refuse",
+    error: other
+      ? `이 컴퓨터의 WARP는 이미 다른 팀(${plain(other, 63) || "이름 없음"})으로 설정되어 있어서 바꾸지 않았고, 설치하지 않았습니다. 팀 이름이 맞는지 Cloudflare 계정 관리자에게 확인하세요.`
+      : "이 컴퓨터에는 팀 이름이 없는 WARP 관리 설정이 이미 있어서 바꾸지 않았고, 설치하지 않았습니다. Cloudflare 계정 관리자에게 확인하세요.",
+  };
+}
+
+// ------------------------------------------------------------------ the silent install
+
+/**
+ * osascript's arguments for the silent macOS install. Every path is an item of
+ * argv: AppleScript never parses it, and `quoted form of` hands it to the shell
+ * as one single-quoted word. With `mdm`, the same admin call first puts the
+ * team's managed config in place: argv is then [config, its folder, its
+ * destination, pkg].
+ */
+export function macInstallArgs(file, { mdm } = {}) {
+  const q = (index) => `quoted form of (item ${index} of argv)`;
+  const install = (index) => `"/usr/sbin/installer -pkg " & ${q(index)} & " -target /"`;
+  const command = mdm
+    ? `"/bin/mkdir -p " & ${q(2)} & " && /bin/cp " & ${q(1)} & " " & ${q(3)} & " && /bin/chmod 644 " & ${q(3)} & " && " & ${install(4)}`
+    : install(1);
   return [
     "-e", "on run argv",
-    "-e", `do shell script "/usr/sbin/installer -pkg " & quoted form of (item 1 of argv) & " -target /" with prompt "${MAC_PASSWORD_PROMPT}" with administrator privileges`,
+    "-e", `do shell script ${command} with prompt "${MAC_PASSWORD_PROMPT}" with administrator privileges`,
     "-e", "end run",
+    ...(mdm ? [mdm.source, path.posix.dirname(mdm.destination), mdm.destination] : []),
     file,
   ];
 }
@@ -485,17 +579,19 @@ export function macInstallArgs(file) {
 const START_FAILED = "start-failed";
 
 /**
- * PowerShell that starts `msiexec /i <msi> /qn /norestart` elevated, waits, and
- * exits with msiexec's code. Process.Start is used rather than Start-Process so a
- * refused start keeps its Win32 code (1223 when UAC is declined) whatever the
- * Windows display language. Windows paths cannot hold a double quote, so quoting
- * the path for msiexec's command line is safe; psQuote covers PowerShell.
+ * PowerShell that starts `msiexec /i <msi> [ORGANIZATION=.. ONBOARDING="false"]
+ * /qn /norestart` elevated, waits, and exits with msiexec's code. Process.Start
+ * is used rather than Start-Process so a refused start keeps its Win32 code (1223
+ * when UAC is declined) whatever the Windows display language. Windows paths
+ * cannot hold a double quote and the team is checked against WARP_TEAM_PATTERN,
+ * so quoting both for msiexec's command line is safe; psQuote covers PowerShell.
  */
-export function windowsInstallScript(file, env = process.env) {
+export function windowsInstallScript(file, env = process.env, { team } = {}) {
+  const properties = team ? ` ORGANIZATION="${team}" ONBOARDING="false"` : "";
   return [
     "$i = New-Object System.Diagnostics.ProcessStartInfo",
     `$i.FileName = ${psQuote(msiexecPath(env))}`,
-    `$i.Arguments = ${psQuote(`/i "${file}" /qn /norestart`)}`,
+    `$i.Arguments = ${psQuote(`/i "${file}"${properties} /qn /norestart`)}`,
     "$i.Verb = 'runas'",
     "$i.UseShellExecute = $true",
     `try { $p = [System.Diagnostics.Process]::Start($i) } catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; Write-Output ('${START_FAILED} ' + [string]$e.NativeErrorCode + ' ' + $e.Message); exit 1 }`,
@@ -515,15 +611,15 @@ function outputOf(result) {
  * | "failed", reason }`; "unavailable" means the prompt could not be shown, so
  * the wizard is the way.
  */
-async function silentInstall(run, env, platform, file) {
+async function silentInstall(run, env, platform, file, { mdm, team } = {}) {
   if (platform === "darwin") {
-    const result = await runCommand(run, "/usr/bin/osascript", macInstallArgs(file), { env, timeout: SILENT_INSTALL_TIMEOUT_MS });
+    const result = await runCommand(run, "/usr/bin/osascript", macInstallArgs(file, { mdm }), { env, timeout: SILENT_INSTALL_TIMEOUT_MS });
     if (result.ok) return { outcome: "installed" };
     const text = outputOf(result);
     if (/\(-128\)|User cancel+ed/i.test(text)) return { outcome: "cancelled" };
     return { outcome: "unavailable", reason: firstLine(result.stderr) || firstLine(result.stdout) || result.error || `osascript exit ${result.code}` };
   }
-  const result = await runCommand(run, powershellPath(env), ["-NoProfile", "-NonInteractive", "-Command", windowsInstallScript(file, env)], { env, timeout: SILENT_INSTALL_TIMEOUT_MS });
+  const result = await runCommand(run, powershellPath(env), ["-NoProfile", "-NonInteractive", "-Command", windowsInstallScript(file, env, { team })], { env, timeout: SILENT_INSTALL_TIMEOUT_MS });
   const started = new RegExp(`^${START_FAILED} (-?\\d*) ?(.*)$`, "m").exec(result.stdout.replace(/\0/g, ""));
   if (started) {
     if (started[1] === "1223") return { outcome: "cancelled" };
@@ -540,14 +636,25 @@ async function silentInstall(run, env, platform, file) {
 }
 
 /**
- * Put Cloudflare WARP on this computer: download the official installer, check
- * that Cloudflare signed it, and install it behind the OS's password or approval
- * prompt. Already installed is `{ ok, installed: true, changed: false }`; a
- * finished install is `installed: true, changed: true` with the team join as its
- * `nextAction`; a declined prompt is `{ ok: false, cancelled: true }`. When no
- * prompt can be shown, the wizard opens: `installed: false, changed: true`.
+ * Put Cloudflare WARP on this computer for `team`: download the official
+ * installer, check that Cloudflare signed it, and install it with the team's
+ * managed config behind the OS's password or approval prompt.
+ *
+ *   already installed  `{ ok, installed: true, changed: false }`, team or not
+ *   installed          `installed: true, changed: true`, nextAction
+ *                      "warp-team-login": the client opens the team login itself
+ *   prompt declined    `{ ok: false, cancelled: true }`, the installer kept
+ *   no prompt possible the wizard opens: `installed: false, changed: true`,
+ *                      nextAction "warp-installer", and `team` for the agent's
+ *                      `warp-cli registration new <team>` afterwards
+ *
+ * The installer is downloaded into a fresh folder under the temp directory,
+ * which root can read (the admin `installer` is refused ~/Downloads by macOS's
+ * privacy protection). The folder goes after a finished install and stays when
+ * the installer is still wanted (cancelled, the wizard, a failure).
  */
 export async function installWarp({
+  team,
   platform = process.platform,
   arch = process.arch,
   env = process.env,
@@ -555,93 +662,102 @@ export async function installWarp({
   fetchImpl = globalThis.fetch,
   which = findOnPath,
   fileExists = defaultFileExists,
-  homeDir = env.HONCHO_AGENT_BRIDGE_USER_HOME || env.HOME || env.USERPROFILE || os.homedir(),
-  downloadDir = path.join(homeDir, "Downloads"),
+  tmpDir = os.tmpdir(),
+  mdmPath = warpMdmPath(platform, env),
+  readText = (target) => fsp.readFile(target, "utf8"),
   opener = openInstaller,
   timeoutMs = 1_500_000,
   idleTimeoutMs = 120_000,
 } = {}) {
   const base = { item: "warp", platform, arch };
+  const refuse = (error, extra = {}) => ({ ok: false, ...base, installed: false, changed: false, ...extra, error });
+  if (team !== undefined && team !== null && team !== "" && !validWarpTeam(team)) return refuse(WARP_TEAM_INVALID);
   const cli = locateWarpCli({ platform, env, which, fileExists });
   if (cli) return { ok: true, ...base, installed: true, changed: false, detail: "Cloudflare WARP가 이미 설치되어 있습니다." };
   const installer = WARP_INSTALLERS[platform];
   if (!installer) {
-    return {
-      ok: false,
-      ...base,
-      installed: false,
-      changed: false,
-      url: WARP_DOWNLOAD_URL,
-      error: `이 운영체제에서는 앱이 Cloudflare WARP를 설치하지 않습니다. Cloudflare 안내(${WARP_DOWNLOAD_URL})대로 Cloudflare 패키지 저장소를 추가해서 직접 설치하세요.`,
-    };
+    return refuse(
+      `이 운영체제에서는 앱이 Cloudflare WARP를 설치하지 않습니다. Cloudflare 안내(${WARP_DOWNLOAD_URL})대로 Cloudflare 패키지 저장소를 추가해서 직접 설치하세요.`,
+      { url: WARP_DOWNLOAD_URL },
+    );
   }
-  const file = path.join(downloadDir, installer.file);
+  if (!team) return refuse(WARP_TEAM_MISSING);
+  const withTeam = { ...base, team };
+
+  // Before anything is downloaded: a managed config for another team stops here.
+  const existing = await existingMdm(mdmPath, team, readText);
+  if (existing.action === "refuse") return refuse(existing.error, { team });
+
+  let folder;
+  try { folder = await fsp.mkdtemp(path.join(tmpDir, "honcho-warp-")); }
+  catch (error) { return refuse(`설치 파일을 둘 임시 폴더를 만들지 못했습니다: ${error?.message || error}`, { team }); }
+  const discard = () => fsp.rm(folder, { recursive: true, force: true }).catch(() => {});
+  const file = path.join(folder, installer.file);
   let download;
   try { download = await downloadFile({ url: installer.url, target: file, fetchImpl, timeoutMs, idleTimeoutMs }); }
   catch (error) {
-    return { ok: false, ...base, installed: false, changed: false, error: `Cloudflare WARP 설치 파일을 내려받지 못했습니다: ${error.message}` };
+    await discard();
+    return refuse(`Cloudflare WARP 설치 파일을 내려받지 못했습니다: ${error.message}`, { team });
   }
   const signature = platform === "darwin" ? await verifyWarpPkg(run, env, file) : await verifyWarpMsi(run, env, file);
   if (!signature.ok) {
-    await fsp.rm(file, { force: true }).catch(() => {});
-    return {
-      ok: false,
-      ...base,
-      installed: false,
-      changed: false,
-      error: `내려받은 파일이 Cloudflare가 서명한 설치 파일인지 확인되지 않아 지웠고, 설치하지 않았습니다 (${signature.reason}).`,
-    };
+    await discard();
+    return refuse(`내려받은 파일이 Cloudflare가 서명한 설치 파일인지 확인되지 않아 지웠고, 설치하지 않았습니다 (${signature.reason}).`, { team });
   }
   const checked = { bytes: download.bytes, sha256: download.sha256, verified: signature.verified };
 
-  const silent = await silentInstall(run, env, platform, file);
+  // macOS: the config is written here, as the user, and copied into place by the
+  // admin call. Windows: the msi writes it from its properties.
+  const preseed = existing.action === "write";
+  let mdm = null;
+  if (preseed && platform === "darwin") {
+    mdm = { source: path.join(folder, "mdm.xml"), destination: mdmPath };
+    await fsp.writeFile(mdm.source, warpMdmXml(team), { mode: 0o644 });
+  }
+  const managedConfig = preseed ? "written" : "kept";
+
+  const silent = await silentInstall(run, env, platform, file, { mdm, team: preseed ? team : undefined });
   if (silent.outcome === "installed" || silent.outcome === "restart") {
-    await fsp.rm(file, { force: true }).catch(() => {});
+    await discard();
     const restart = silent.outcome === "restart";
     const found = locateWarpCli({ platform, env, which, fileExists });
     return {
       ok: true,
-      ...base,
+      ...withTeam,
       installed: true,
       changed: true,
       method: "silent",
+      managedConfig,
       cli: found,
       ...(restart ? { restartRequired: true } : {}),
       ...checked,
-      nextAction: { kind: "warp-team-join", message: restart ? WARP_RESTART_MESSAGE : WARP_INSTALLED_MESSAGE[platform] },
+      nextAction: { kind: "warp-team-login", message: warpLoginMessage(platform, team, restart) },
     };
   }
   if (silent.outcome === "cancelled") {
-    return { ok: false, ...base, installed: false, changed: false, cancelled: true, file, error: WARP_CANCELLED_MESSAGE[platform] };
+    return { ok: false, ...withTeam, installed: false, changed: false, cancelled: true, file, error: WARP_CANCELLED_MESSAGE[platform] };
   }
   if (silent.outcome === "failed") {
-    return { ok: false, ...base, installed: false, changed: false, file, error: `Cloudflare WARP를 설치하지 못했습니다 (${silent.reason}). 다시 해 보고, 같으면 내려받은 파일을 직접 열어서 설치하세요: ${file}` };
+    return refuse(`Cloudflare WARP를 설치하지 못했습니다 (${silent.reason}). 다시 해 보고, 같으면 내려받은 파일을 직접 열어서 설치하세요: ${file}`, { team, file });
   }
 
-  // The prompt could not be shown here: the OS's own wizard asks instead.
+  // The prompt could not be shown here: the OS's own wizard asks instead, and
+  // the team is chosen on the client's first screen.
   let opened;
   try { opened = await opener(file, { platform, env }); }
   catch (error) { opened = { ok: false, error: String(error?.message || error) }; }
   if (opened?.ok === false) {
-    return {
-      ok: false,
-      ...base,
-      installed: false,
-      changed: false,
-      file,
-      silentError: silent.reason,
-      error: `설치 창을 열지 못했습니다 (${opened.error || "알 수 없는 이유"}). 내려받은 파일을 직접 열어서 설치하세요: ${file}`,
-    };
+    return refuse(`설치 창을 열지 못했습니다 (${opened.error || "알 수 없는 이유"}). 내려받은 파일을 직접 열어서 설치하세요: ${file}`, { team, file, silentError: silent.reason });
   }
   return {
     ok: true,
-    ...base,
+    ...withTeam,
     installed: false,
     changed: true,
     method: "wizard",
     file,
     silentError: silent.reason,
     ...checked,
-    nextAction: { kind: "warp-installer", message: WARP_INSTALLER_MESSAGE[platform] },
+    nextAction: { kind: "warp-installer", message: warpInstallerMessage(platform, team) },
   };
 }

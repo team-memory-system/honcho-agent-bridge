@@ -62,7 +62,7 @@ import {
   targetWorkspace,
 } from "./targets.mjs";
 import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
-import { checkPrereqs, FEATURES, installWarp, parseFeatures } from "./prereqs.mjs";
+import { checkPrereqs, FEATURES, installWarp, parseFeatures, validWarpTeam, WARP_TEAM_INVALID } from "./prereqs.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
@@ -1697,7 +1697,7 @@ function usage() {
     usage: [
       "detect",
       "prereqs [--features server,sync,chat] [--remote]",
-      "prereqs install warp",
+      "prereqs install warp --team <name>",
       "server plan [--profile portable|personal]",
       "server prepare [--profile portable|personal] [--model <id>]",
       "server start [--profile portable|personal] [--no-build] [--model <id>]",
@@ -1774,13 +1774,23 @@ async function prereqs(options = {}) {
 }
 
 /**
- * `prereqs install warp`: download Cloudflare WARP's official installer, check its
- * signature and install it behind the OS's password or approval prompt. WARP is
- * the only program this installs; Docker and Ollama come with `server prepare`.
+ * `prereqs install warp --team <name>`: download Cloudflare WARP's official
+ * installer, check its signature and install it, with the team preseeded, behind
+ * the OS's password or approval prompt. WARP is the only program this installs;
+ * Docker and Ollama come with `server prepare`.
  */
 async function prereqsInstall(args) {
-  if (args.length !== 1 || args[0] !== "warp") return { ok: false, error: "prereqs install takes one program: warp" };
-  return installWarp();
+  const [name, ...rest] = args;
+  if (name !== "warp") return { ok: false, error: "prereqs install takes one program: warp" };
+  let team;
+  for (let index = 0; index < rest.length; index += 1) {
+    const item = rest[index];
+    if (item.startsWith("--team=")) team = item.slice("--team=".length);
+    else if (item === "--team") { team = rest[index + 1] ?? ""; index += 1; }
+    else return { ok: false, error: "prereqs install takes one program: warp, and only --team <name>" };
+  }
+  if (team !== undefined && !validWarpTeam(team.trim())) return { ok: false, error: WARP_TEAM_INVALID };
+  return installWarp({ team: team?.trim() });
 }
 
 async function main() {

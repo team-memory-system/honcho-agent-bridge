@@ -437,11 +437,13 @@ test("the prerequisite route validates its features before running the CLI", asy
 
 test("the install route takes a same-origin POST naming warp, and refuses anything else before running the CLI", async () => {
   assert.equal((await send("/api/app/prereqs/install")).status, 405);
-  for (const body of [{}, { item: "docker" }, { item: "warp; rm -rf /" }, { item: ["warp"] }]) {
+  for (const body of [{}, { item: "docker" }, { item: "warp; rm -rf /" }, { item: ["warp"] }, { item: "warp", team: "Acme Team" }, { item: "warp", team: "--force" }, { item: "warp", team: ["acme"] }]) {
     const response = await send("/api/app/prereqs/install", { method: "POST", body });
     assert.equal(response.status, 400, JSON.stringify(body));
     assert.equal(response.body.ok, false, JSON.stringify(body));
   }
+  const badTeam = await send("/api/app/prereqs/install", { method: "POST", body: { item: "warp", team: "Acme Team" } });
+  assert.match(badTeam.body.error, /^팀 이름은/, "the screen shows why in plain words");
   // A valid request is never sent here: it would download and open the real installer.
   const crossSite = await send("/api/app/prereqs/install", { method: "POST", body: { item: "warp" }, headers: { origin: "http://evil.example" } });
   assert.equal(crossSite.status, 403);

@@ -1,4 +1,6 @@
 interface:
-  display_name: "Set up agent memory"
-  short_description: "Install, diagnose, and update the local memory runtime"
-  default_prompt: "Use $setup-memory to install or diagnose my local agent memory system."
+  display_name: "Team Memory setup"
+  short_description: "Set up Team Memory on this computer"
+  default_prompt: "Use $setup-memory to set up Team Memory on this computer."
+policy:
+  allow_implicit_invocation: false

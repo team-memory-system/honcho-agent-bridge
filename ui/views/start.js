@@ -34,10 +34,30 @@ function chosenFeatures() {
 const NEEDED = { required: ["꼭 필요", ""], "app-installs": ["없으면 앱이 설치", "accent"], optional: ["있으면 좋음", ""] };
 
 // WARP is the one program this screen installs. The app downloads it and the user
-// only answers the system's password or approval prompt.
+// only answers the system's password or approval prompt. It needs the team name,
+// which the client is set up with so it goes straight to the team login.
 const INSTALLABLE = new Set(["warp"]);
+const TEAM_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
-function prereqList(items, { onInstall } = {}) {
+/** The team name box and the 설치 button it unlocks. */
+function installControls(item, { onInstall, team = "", onTeam }) {
+  const valid = (value) => TEAM_NAME.test(value.trim());
+  const go = button("설치", { kind: "small primary", disabled: !valid(team), onClick: (event) => onInstall(item, event.currentTarget, box.value.trim()) });
+  const box = h("input", {
+    class: "input",
+    value: team,
+    placeholder: "Cloudflare 계정 관리자에게 받은 이름",
+    "aria-label": "팀 이름",
+    autocomplete: "off",
+    spellcheck: "false",
+    style: { width: "240px", maxWidth: "100%" },
+    oninput: () => { onTeam?.(box.value.trim()); go.disabled = !valid(box.value); },
+    onkeydown: (event) => { if (event.key === "Enter" && !go.disabled) go.click(); },
+  });
+  return h("label", { style: { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "13px", flexWrap: "wrap" } }, "팀 이름", box, go);
+}
+
+function prereqList(items, { onInstall, team, onTeam } = {}) {
   if (!items.length) return null;
   return h("div", { class: "rows prereqs" }, items.map((item) => {
     const installable = !item.ok && item.install?.auto === true && INSTALLABLE.has(item.key) && onInstall;
@@ -49,7 +69,7 @@ function prereqList(items, { onInstall } = {}) {
         !item.ok && item.install?.note ? h("div", { class: "sub" }, item.install.note) : null,
       ),
       h("div", { class: "end", style: { flexWrap: "wrap", justifyContent: "flex-end" } },
-        installable ? button("설치", { kind: "small primary", onClick: (event) => onInstall(item, event.currentTarget) }) : null,
+        installable ? installControls(item, { onInstall, team, onTeam }) : null,
         !item.ok && item.install?.command ? button("설치 명령 복사", { kind: "small", title: item.install.command, onClick: async () => { await copyText(item.install.command); toast(`복사했습니다: ${item.install.command}`); } }) : null,
         !item.ok && item.install?.url ? h("a", { class: "btn small quiet", href: item.install.url, target: "_blank", rel: "noreferrer" }, "내려받는 곳") : null,
       ),
@@ -93,19 +113,24 @@ export default {
 
     // What the install left for the user to do, kept on screen until it is done:
     // the wizard and a cancelled install until the program is found, the team
-    // join until the check passes.
+    // login until the check passes.
     let installNotice = null;
+    // The team name typed so far, kept across redraws and remembered once used.
+    let teamName = typeof app.prefs.warpTeam === "string" ? app.prefs.warpTeam : "";
 
-    async function installPrereq(item, target) {
+    async function installPrereq(item, target, team = teamName) {
       await busy(target, async () => {
-        const result = await post("/api/app/prereqs/install", { item: item.key });
+        teamName = team;
+        savePrefs({ warpTeam: team });
+        const result = await post("/api/app/prereqs/install", { item: item.key, team });
         if (result?.cancelled) {
-          installNotice = { key: item.key, item, text: result.error, tone: "warn", until: "found", retry: true };
+          installNotice = { key: item.key, item, team, text: result.error, tone: "warn", until: "found", retry: true };
         } else if (!result || result.ok === false) {
           throw new Error(result?.error || "설치하지 못했습니다.");
         } else if (result.nextAction?.message) {
-          const joined = result.nextAction.kind === "warp-team-join";
-          installNotice = { key: item.key, item, text: result.nextAction.message, tone: joined ? "ok" : "", until: joined ? "ok" : "found" };
+          // Installed: the browser's team login is next, until WARP is connected.
+          const login = result.nextAction.kind === "warp-team-login";
+          installNotice = { key: item.key, item, team, text: result.nextAction.message, tone: login ? "ok" : "", until: login ? "ok" : "found" };
         } else {
           installNotice = null;
           if (result.detail) toast(result.detail);
@@ -123,7 +148,7 @@ export default {
       const notice = installNotice;
       return h("div", { class: `notice ${notice.tone}`, style: { margin: "8px 0", alignItems: "center" } },
         h("div", { style: { flex: "1" } }, notice.text),
-        notice.retry ? button("다시 설치", { kind: "small primary", onClick: (event) => installPrereq(notice.item, event.currentTarget) }) : null,
+        notice.retry ? button("다시 설치", { kind: "small primary", onClick: (event) => installPrereq(notice.item, event.currentTarget, notice.team) }) : null,
       );
     }
 
@@ -156,7 +181,7 @@ export default {
           : prereqs.ok ? "고른 기능에 필요한 프로그램이 모두 있습니다." : `${missing.map((item) => item.label).join(", ")}부터 설치하세요. 설치한 뒤 다시 확인을 누릅니다.`,
         body: h("div", {},
           noticeFor(prereqs.items || [], Boolean(prereqs.ok)),
-          prereqList(prereqs.items || [], { onInstall: installPrereq }),
+          prereqList(prereqs.items || [], { onInstall: installPrereq, team: teamName, onTeam: (value) => { teamName = value; } }),
         ),
         action: prereqs.ok ? null : ["다시 확인", "recheck"],
       });

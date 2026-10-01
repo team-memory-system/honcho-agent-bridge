@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 import { appContext, localTools, relayDashboard, relayGateway, relayHoncho, sessionsPage, setLocalTool } from "./app-api.mjs";
 import { configEnvironment, loadConfig } from "./config.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
-import { FEATURES, parseFeatures } from "./prereqs.mjs";
+import { FEATURES, parseFeatures, validWarpTeam, WARP_TEAM_INVALID } from "./prereqs.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
 
@@ -467,11 +467,19 @@ export function prereqsInvocation(query) {
 // server prepare or by the user.
 const INSTALLABLE_PREREQS = Object.freeze(["warp"]);
 
-/** `{ item: "warp" }` as `cli.mjs prereqs install` arguments; nothing else passes. */
+/**
+ * `{ item: "warp", team }` as `cli.mjs prereqs install` arguments; nothing else
+ * passes. The team, checked here too, goes as `--team=<name>` so it can never be
+ * read as an option of its own.
+ */
 export function prereqsInstallInvocation(body) {
   const item = typeof body?.item === "string" ? body.item.trim() : "";
   if (!INSTALLABLE_PREREQS.includes(item)) return { error: `item must be one of: ${INSTALLABLE_PREREQS.join(", ")}` };
-  return { args: ["prereqs", "install", item] };
+  const args = ["prereqs", "install", item];
+  if (body.team === undefined || body.team === null || body.team === "") return { args };
+  const team = typeof body.team === "string" ? validWarpTeam(body.team.trim()) : null;
+  if (!team) return { error: WARP_TEAM_INVALID };
+  return { args: [...args, `--team=${team}`] };
 }
 
 async function staticFile(req, res) {
