@@ -21,7 +21,10 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | Feature question | Question "이 컴퓨터에서 쓸 기능을 고르세요." with the three options in "First: which features" |
 | Prerequisites all present | 필요한 프로그램이 모두 있습니다. |
 | A required program missing | <프로그램>이 없습니다. 공식 설치 방법(<install.command 또는 install.url>)으로 설치할까요? |
-| WARP team join | Cloudflare WARP를 팀에 등록해야 합니다. 팀 이름을 알려 주세요. 모르면 Cloudflare 계정을 관리하는 사람에게 받으세요. |
+| WARP install | Cloudflare WARP를 설치합니다. 다른 컴퓨터의 기억 서버와 팀원 기억에 닿게 해 주는 프로그램입니다. |
+| WARP installer open | WARP 설치 창을 열었습니다. 계속 → 설치를 누르고 Mac 암호를 넣어 주세요(Windows는 허용 창에서 예). 끝나면 "했어"라고 말해 주세요. |
+| WARP team join | WARP를 팀에 등록합니다. 팀 이름을 알려 주세요. 모르면 Cloudflare 계정을 관리하는 사람에게 받으세요. |
+| WARP login | 브라우저에 팀 로그인 창이 열렸습니다. 팀이 정한 방법(보통 이메일로 받은 코드)으로 로그인해 주세요. 끝나면 "했어"라고 말해 주세요. |
 | Server plan confirmation | Question "서버를 이렇게 설치합니다. 진행할까요?" whose text lists, one line each and only those in the plan: Docker Desktop 설치 (첫 실행 때 약관 동의와 Mac 암호 필요) / Ollama와 임베딩 모델(Qwen3-Embedding 4B, 약 2.5GB) 받기 / 구독 게이트웨이 설치 (로그인하면 자동으로 켜짐) / 기억 서버 설치 (주소 <apiUrl>), then the Docker license warning: 회사 직원이 250명 이상이거나 매출이 1천만 달러 이상이면 Docker 유료 구독이 필요합니다. Options "진행", "취소" |
 | Before prepare, when it installs Docker | 곧 Docker Desktop 창이 뜹니다. 약관에 동의(Accept)하고, 추천 설정(Use recommended settings)을 고른 뒤 Mac 암호를 넣어 주세요. 로그인이나 설문은 건너뛰어도 됩니다. 끝나면 제가 이어서 진행합니다. |
 | Before prepare otherwise | 서버를 준비합니다. 몇 분 걸릴 수 있습니다. |
@@ -34,7 +37,7 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | Setup plan confirmation | Question "대화 동기화를 이렇게 설정합니다. 진행할까요?" whose text lists the files from `operations`. Options "진행", "취소" |
 | `approve-hook` | Codex를 새로 열면 훅 승인 창이 뜹니다. "Syncing codex conversation to personal memory"만 승인하세요. 승인하기 전에는 Codex 대화가 모이지 않습니다. |
 | `reload-plugins` | 이미 열려 있는 Claude Code 창에서는 `/reload-plugins`를 입력하세요. |
-| Chat connection | 팀원에게 받은 연결 정보를 방금 연 앱 화면(<url>)에 넣고 "연결"을 누르세요. 채팅에는 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
+| Chat connection | 팀원에게 받은 주소와 토큰을 방금 연 앱 화면(<url>)에 넣고 "연결"을 누르세요. 채팅에는 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
 | Chat connected | 팀원 기억에 연결했습니다. 에이전트를 다시 시작하면 <chat 또는 shared_chat> 도구로 물을 수 있습니다. |
 | Stopped on an error | <단계>에서 멈췄습니다. <오류를 사용자의 말로 옮긴 것> |
 | Done | 설치가 끝났습니다. 켠 기능: <기능들>. 문제가 생기면 `/memory-doctor`를 입력하세요. |
@@ -58,24 +61,25 @@ Sending some folders to a company server as well is not a fourth feature; offer 
 Once the features are chosen, check the software they need and get it installed first. Do not start the plugin's setup, `server plan` or `bridge connect` while something required is missing.
 
 1. Node.js 18 or later must exist before the plugin's CLI can run. Check it with the shell (`node --version`). If it is missing, install it from nodejs.org (the LTS installer), or with `brew install node` when Homebrew is already there (macOS), or with `winget install --id OpenJS.NodeJS.LTS -e` (Windows).
-2. Then run `node <plugin-root>/scripts/cli.mjs prereqs --features <chosen,features>` (add `--remote` when 대화 동기화 goes to a server on another computer). It reports each item as `required`, `app-installs` or `optional`, with its `install.command`/`install.url`/`install.note`.
-   - `required` and missing (git; Cloudflare WARP for 대화 동기화 to another computer): offer to install it with the reported official command or installer, as its own explicit confirmation, because it installs system software. Never pipe a downloaded script into a shell. Rerun `prereqs` after.
-   - WARP also has to join the user's team: `warp-cli registration new <team>` opens a browser login the user completes; then `warp-cli connect`. Ask the user for the team name if they do not know it from whoever runs their Cloudflare account; never guess it. `prereqs` reports the team it is connected to.
-   - `app-installs` (Docker Desktop and Ollama for 서버 설치): nothing to do now. Tell the user `server prepare` installs them and what Docker will ask of them.
-   - `optional` (WARP for chat): mention it; chat works with the teammate's Access service token too.
+2. Then run `node <plugin-root>/scripts/cli.mjs prereqs --features <chosen,features>`. It reports each item as `required` or `app-installs`, with its `install.command`/`install.url`. Cloudflare WARP is required for every feature: every computer joins the team's WARP, and that is what lets it reach the servers and teammates' memories behind Cloudflare Access.
+   - git missing: offer the reported official command, as its own confirmation. Never pipe a downloaded script into a shell. Rerun `prereqs` after.
+   - WARP missing: do not explain it; install it. Say the "WARP install" line, run `node <plugin-root>/scripts/cli.mjs prereqs install warp` (it downloads Cloudflare's signed installer, checks the signature and opens the installer window), then say the "WARP installer open" line. When the user says it is done, rerun `prereqs`.
+   - WARP installed but not in a team: say the "WARP team join" line. With the team name, run `warp-cli registration new <team>` (it opens a browser login) and say the "WARP login" line; when the user says it is done, run `warp-cli connect`. Never guess the team name. Rerun `prereqs`; it reports the team it is connected to.
+   - `app-installs` (Docker Desktop and Ollama for 서버 설치): nothing to do now; `server prepare` installs them.
+   - Never bring up Cloudflare service tokens. They are an advanced fallback for a computer that cannot run WARP, and only when the user asks for that.
 3. The app's 시작하기 screen shows the same check as its first step.
 
 ## Asking someone else's memory
 
-The teammate who shares their memory gives the user four values: the shared bridge address, a bridge token, and a Cloudflare service token ID and secret. The user enters them in the Team Memory app, not in chat.
+The teammate who shares their memory gives the user two values: an address and a token. WARP (connected to the team, from the step above) gets this computer past Cloudflare Access. The user enters them in the Team Memory app, not in chat.
 
 1. Run `node <plugin-root>/scripts/cli.mjs ui open --screen connect/share`. It starts the local Team Memory app if it is not already running, opens it on that screen, and returns its `url`. Give the user that address as text as well, in case no browser window appeared.
-2. Tell the user to open 연결 → "다른 사람의 기억에 묻기", fill in the four fields, and press 연결. The screen saves the values only after it has reached the bridge with them, and shows the tools the bridge offers (normally just `chat`).
-3. Never ask the user to paste any of the four values into chat, and never pass them on a command line. The terminal equivalent is `bridge connect --url <address>` with the secrets in `HONCHO_MCP_BEARER_TOKEN`, `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`, set by the user in their own shell.
+2. Say the "Chat connection" line. The screen has the address and token fields; the service-token fields sit under "고급: WARP 없이 연결" and stay closed. The screen saves the values only after it has reached the bridge with them, and shows the tools the bridge offers (normally just `chat`).
+3. Never ask the user to paste these values into chat, and never pass them on a command line. The terminal equivalent is `bridge connect --url <address>` with the token in `HONCHO_MCP_BEARER_TOKEN` (and, without WARP only, `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`), set by the user in their own shell.
 4. When the user says it is done, run `node <plugin-root>/scripts/cli.mjs bridge test` and report `connected`, `url` and `tools`. On failure, report the `error` without guessing at values.
 5. Tell the user to restart the agent host so its tool list reloads: Claude Code may use `/reload-plugins`; Codex should start a new session.
 
-This path installs no hooks and needs no local Honcho server. `bridge disconnect` removes the four values.
+This path installs no hooks and needs no local Honcho server. `bridge disconnect` removes the saved values.
 
 On a computer that also syncs its own conversations, `bridge connect` adds to what the agent has rather than replacing it. After the restart the agent keeps its own recall tools (`search`, `chat`, `get_peer_context` and the rest) for the user's own memory, and asks the teammate's memory with `shared_chat` (each shared tool is the bridge's tool with `shared_` in front). `bridge test` still reports the bridge's own names (`chat`). If the bridge is unreachable, the user's own tools keep working and only `shared_*` calls fail.
 

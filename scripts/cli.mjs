@@ -62,7 +62,7 @@ import {
   targetWorkspace,
 } from "./targets.mjs";
 import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
-import { checkPrereqs, FEATURES, parseFeatures } from "./prereqs.mjs";
+import { checkPrereqs, FEATURES, installWarp, parseFeatures } from "./prereqs.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
@@ -1697,6 +1697,7 @@ function usage() {
     usage: [
       "detect",
       "prereqs [--features server,sync,chat] [--remote]",
+      "prereqs install warp",
       "server plan [--profile portable|personal]",
       "server prepare [--profile portable|personal] [--model <id>]",
       "server start [--profile portable|personal] [--no-build] [--model <id>]",
@@ -1757,8 +1758,8 @@ async function serverShare(args) {
 
 /**
  * `prereqs [--features server,sync,chat] [--remote]`: what this computer needs
- * before setup, for the features chosen on it. `--remote` means sync goes to a
- * server on another computer.
+ * before setup, for the features chosen on it. `--remote` (sync to a server on
+ * another computer) is still accepted but no longer changes the result.
  */
 async function prereqs(options = {}) {
   const value = options.features;
@@ -1772,13 +1773,23 @@ async function prereqs(options = {}) {
   return checkPrereqs({ features, remote: options.remote === true, serverDir: installedServerDir(config) });
 }
 
+/**
+ * `prereqs install warp`: download Cloudflare WARP's official installer, check its
+ * signature and open it for the user to finish. WARP is the only program this
+ * installs; Docker and Ollama come with `server prepare`.
+ */
+async function prereqsInstall(args) {
+  if (args.length !== 1 || args[0] !== "warp") return { ok: false, error: "prereqs install takes one program: warp" };
+  return installWarp();
+}
+
 async function main() {
   const args = process.argv.slice(2);
   // `setup apply --help` ran apply in the 2026-09-30 install test. Help never acts.
   if (args.some((item) => item === "--help" || item === "-h")) return usage();
   const command = args.shift() || "help";
   if (command === "detect") return detect();
-  if (command === "prereqs") return prereqs(parseOptions(args));
+  if (command === "prereqs") return args[0] === "install" ? prereqsInstall(args.slice(1)) : prereqs(parseOptions(args));
   if (command === "doctor" || command === "status") return doctor();
   if (command === "hook") return runHook((args.shift() || "").trim().toLowerCase());
   if (command === "server") {

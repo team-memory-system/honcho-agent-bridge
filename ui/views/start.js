@@ -1,7 +1,7 @@
 // 시작하기: the first run, as a checklist that reads the real state. First pick
 // how this computer takes part, then each step says whether it is done and opens
 // the screen that does it.
-import { get, post } from "../lib/api.js";
+import { cli, get, post } from "../lib/api.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { ago } from "../lib/format.js";
 import { app, go, loadContext, refreshStatus, savePrefs, workspace } from "../lib/state.js";
@@ -33,9 +33,14 @@ function chosenFeatures() {
 
 const NEEDED = { required: ["꼭 필요", ""], "app-installs": ["없으면 앱이 설치", "accent"], optional: ["있으면 좋음", ""] };
 
-function prereqList(items) {
+// WARP is the one program this screen installs; the app opens its installer and the
+// user finishes it there.
+const INSTALLABLE = new Set(["warp"]);
+
+function prereqList(items, { onInstall } = {}) {
   if (!items.length) return null;
   return h("div", { class: "rows prereqs" }, items.map((item) => {
+    const installable = !item.ok && item.install?.auto === true && INSTALLABLE.has(item.key) && onInstall;
     const [label, kind] = NEEDED[item.needed] || NEEDED.optional;
     return h("div", { class: "row" },
       h("div", { style: { minWidth: "0" } },
@@ -44,6 +49,7 @@ function prereqList(items) {
         !item.ok && item.install?.note ? h("div", { class: "sub" }, item.install.note) : null,
       ),
       h("div", { class: "end", style: { flexWrap: "wrap", justifyContent: "flex-end" } },
+        installable ? button("설치", { kind: "small primary", onClick: (event) => onInstall(item, event.currentTarget) }) : null,
         !item.ok && item.install?.command ? button("설치 명령 복사", { kind: "small", title: item.install.command, onClick: async () => { await copyText(item.install.command); toast(`복사했습니다: ${item.install.command}`); } }) : null,
         !item.ok && item.install?.url ? h("a", { class: "btn small quiet", href: item.install.url, target: "_blank", rel: "noreferrer" }, "내려받는 곳") : null,
       ),
@@ -85,6 +91,18 @@ export default {
       sync();
     }
 
+    // What the opened installer asks of the user, kept on screen until WARP is in.
+    let installNotice = "";
+
+    async function installPrereq(item, target) {
+      await busy(target, async () => {
+        const result = await cli("/api/app/prereqs/install", { item: item.key });
+        installNotice = result.nextAction?.message || "";
+        if (!installNotice && result.detail) toast(result.detail);
+        await drawSteps();
+      });
+    }
+
     async function drawSteps() {
       const features = chosenFeatures();
       if (!features.length) { drawChoice(); return; }
@@ -106,13 +124,18 @@ export default {
       const remote = features.includes("sync") && !serverHere;
       const prereqs = await get(`/api/app/prereqs?${new URLSearchParams({ features: features.join(","), ...(remote ? { remote: "1" } : {}) })}`).catch((error) => ({ ok: false, error: error.message, items: [] }));
       const missing = (prereqs.items || []).filter((item) => item.needed === "required" && !item.ok);
+      // Gone once the program is found (a version) or the check passes.
+      if (prereqs.ok || (prereqs.items || []).some((item) => INSTALLABLE.has(item.key) && (item.ok || item.version))) installNotice = "";
       steps.push({
         title: "필요한 프로그램",
         done: Boolean(prereqs.ok),
         text: prereqs.error
           ? `확인하지 못했습니다: ${prereqs.error}`
           : prereqs.ok ? "고른 기능에 필요한 프로그램이 모두 있습니다." : `${missing.map((item) => item.label).join(", ")}부터 설치하세요. 설치한 뒤 다시 확인을 누릅니다.`,
-        body: prereqList(prereqs.items || []),
+        body: h("div", {},
+          installNotice ? h("div", { class: "notice", style: { margin: "8px 0" } }, installNotice) : null,
+          prereqList(prereqs.items || [], { onInstall: installPrereq }),
+        ),
         action: prereqs.ok ? null : ["다시 확인", "recheck"],
       });
 
@@ -153,8 +176,8 @@ export default {
       if (features.includes("chat")) {
         const connected = Boolean(context?.sharedBridge?.connected);
         steps.push(
-          { title: "공유 창구에 연결", done: connected, text: connected ? context.sharedBridge.url : "창구 주소, 창구 토큰, Cloudflare 서비스 토큰 ID와 비밀을 넣습니다.", action: ["연결 화면에서 넣기", () => go("connect/share")] },
-          { title: "에이전트 다시 시작", done: false, optional: true, text: features.includes("sync") ? "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 에이전트는 내 기억 도구를 그대로 쓰고, 팀원 기억에는 shared_chat 도구로 묻습니다." : "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 그러면 에이전트가 창구의 chat 도구로 물어볼 수 있습니다.", action: null },
+          { title: "팀원 기억에 연결", done: connected, text: connected ? context.sharedBridge.url : "팀원에게 받은 주소와 토큰을 넣습니다.", action: ["연결 화면에서 넣기", () => go("connect/share")] },
+          { title: "에이전트 다시 시작", done: false, optional: true, text: features.includes("sync") ? "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 에이전트는 내 기억 도구를 그대로 쓰고, 팀원 기억에는 shared_chat 도구로 묻습니다." : "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 그러면 에이전트가 chat 도구로 팀원 기억에 물어볼 수 있습니다.", action: null },
         );
       }
 

@@ -1,15 +1,20 @@
-// What a computer needs before setup, for the features chosen on it.
+// What a computer needs before setup, for the features chosen on it, and the one
+// program installed from here for the user: Cloudflare WARP.
 //
 // A computer takes any combination of three features:
 //   server  the memory server runs here (Docker and Ollama).
-//   sync    this computer's agent conversations go to the user's server, which is
-//           here or, with `remote`, on another computer reached through WARP.
-//   chat    ask a teammate's shared bridge, which may sit behind WARP.
+//   sync    this computer's agent conversations go to the user's server.
+//   chat    ask a teammate's shared bridge.
 //
 // Everyone needs Node (this runs in it) and Git (the plugin marketplace install and
-// `server prepare` both clone with it). Nothing here installs or starts anything:
-// each check runs one short read-only command through an injectable `run`, and a
-// missing program is `ok: false`, never a throw.
+// `server prepare` both clone with it). Every feature also needs Cloudflare WARP,
+// joined to the team and connected: the team's servers and shared bridges are
+// reached through it. `remote` is still accepted, for older callers, but no longer
+// changes what is needed.
+//
+// checkPrereqs installs and starts nothing: each check runs one short read-only
+// command through an injectable `run`, and a missing program is `ok: false`, never
+// a throw.
 //
 // macOS: /usr/bin/git is a stub until the Command Line Tools are installed, and
 // running it then opens Apple's install dialog. So when the git found is that stub,
@@ -19,13 +24,32 @@
 // gives {id, device_id, public_key, account: {type, id, organization}, ...}. Only
 // status, account.type and account.organization are read; the identifiers never
 // leave this module.
+//
+// installWarp (`prereqs install warp`) gets WARP onto this computer, leaving the
+// OS's own installer to ask the user for approval. Nothing here runs with sudo or
+// elevates by itself. What it rests on (checked 2026-10-01):
+//   macOS    https://downloads.cloudflareclient.com/v1/download/macos/ga redirects
+//            to the current pkg (2026.7.1376.0, 153 MB). `pkgutil --check-signature`
+//            on it reports "signed by a developer certificate issued by Apple for
+//            distribution" with the leaf "1. Developer ID Installer: Cloudflare Inc.
+//            (68WVV388M8)". The pkg is saved in ~/Downloads, and only with that
+//            signature is it handed to macOS's Installer (`open`), which asks for
+//            the password.
+//   Windows  .../download/windows/ga redirects to the current msi. It is run with
+//            `msiexec /i` only when Get-AuthenticodeSignature says Valid and its
+//            signer is Cloudflare; Windows then asks for approval (UAC).
+//   Linux    not installed here: Cloudflare publishes a package repository.
+// A download that fails its signature check is deleted and never opened.
+import { spawn as nodeSpawn } from "node:child_process";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { dockerProbe, installedServerDir } from "./server-manager.mjs";
 import {
   defaultRun,
+  downloadFile,
   findOnPath,
   locateOllama,
   ollamaRuntimeDir,
@@ -41,6 +65,17 @@ const MAC_STUB_GIT = "/usr/bin/git";
 
 const WARP_DOWNLOAD_URL = "https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/warp/download-warp/";
 const WARP_JOIN_NOTE = "설치한 뒤 `warp-cli registration new <팀 이름>`으로 팀에 가입하고(브라우저에서 로그인), `warp-cli connect`로 연결하세요.";
+
+// The official installers, as installWarp downloads and checks them.
+export const WARP_INSTALLERS = Object.freeze({
+  darwin: Object.freeze({ url: "https://downloads.cloudflareclient.com/v1/download/macos/ga", file: "Cloudflare_WARP.pkg" }),
+  win32: Object.freeze({ url: "https://downloads.cloudflareclient.com/v1/download/windows/ga", file: "Cloudflare_WARP.msi" }),
+});
+const CLOUDFLARE_TEAM_ID = "68WVV388M8";
+const WARP_INSTALLER_MESSAGE = Object.freeze({
+  darwin: "Cloudflare WARP 설치 창을 열었습니다. 창에서 '계속'과 '설치'를 차례로 누르고, Mac 암호를 물으면 넣어서 설치를 끝내세요. 끝나면 에이전트에게 알려 주세요. 이 앱에서는 '다시 확인'을 누르면 됩니다.",
+  win32: "Cloudflare WARP 설치 창을 열었습니다. 창의 안내대로 설치를 진행하고, Windows가 변경을 허용할지 물으면 '예'를 눌러 설치를 끝내세요. 끝나면 에이전트에게 알려 주세요. 이 앱에서는 '다시 확인'을 누르면 됩니다.",
+});
 
 /**
  * `"server,sync"` (or an array) as a list of known features, each once.
@@ -246,6 +281,8 @@ async function ollamaItem({ platform, env, run, which, fileExists, homeDir, serv
 
 function warpInstall({ platform, brew }) {
   const install = { url: WARP_DOWNLOAD_URL };
+  // `prereqs install warp` (installWarp) can put it on this computer.
+  if (Object.hasOwn(WARP_INSTALLERS, platform)) install.auto = true;
   if (platform === "darwin" && brew) install.command = "brew install --cask cloudflare-warp";
   if (platform === "win32") install.command = "winget install --id Cloudflare.Warp -e";
   install.note = WARP_JOIN_NOTE;
@@ -306,9 +343,10 @@ async function warpItem({ needed, platform, env, run, which, fileExists, brew })
 // ------------------------------------------------------------------ all
 
 /**
- * What this computer has and lacks for `features`. `remote` means sync goes to a
- * server on another computer. The top-level `ok` is true when every `required`
- * item is ok; "app-installs" items are installed by server prepare when missing.
+ * What this computer has and lacks for `features`. WARP is required for any
+ * feature; `remote` (sync to a server on another computer) is accepted and echoed
+ * back but changes nothing. The top-level `ok` is true when every `required` item
+ * is ok; "app-installs" items are installed by server prepare when missing.
  */
 export async function checkPrereqs({
   features = [],
@@ -327,14 +365,12 @@ export async function checkPrereqs({
   const parsed = parseFeatures(features);
   if (parsed.invalid.length) throw new TypeError(`unknown feature: ${parsed.invalid.join(", ")} (expected ${FEATURES.join(", ")})`);
   const chosen = new Set(parsed.features);
-  const remoteSync = chosen.has("sync") && remote === true;
   const brew = hasBrew({ platform, env, which, fileExists });
   const context = { platform, env, run, which, fileExists, brew, homeDir, serverDir, dockerInspector };
 
   const checks = [nodeItem({ platform, nodeVersion, brew }), gitItem(context)];
   if (chosen.has("server")) checks.push(dockerItem(context), ollamaItem(context));
-  if (remoteSync) checks.push(warpItem({ ...context, needed: "required" }));
-  else if (chosen.has("chat")) checks.push(warpItem({ ...context, needed: "optional" }));
+  if (chosen.size) checks.push(warpItem({ ...context, needed: "required" }));
   const items = await Promise.all(checks);
   return {
     ok: items.every((item) => item.needed !== "required" || item.ok),
@@ -343,5 +379,144 @@ export async function checkPrereqs({
     features: parsed.features,
     remote: remote === true,
     items,
+  };
+}
+
+// ------------------------------------------------------------------ warp install
+
+function firstLine(text) {
+  return String(text || "").replace(/\0/g, "").trim().split(/\r?\n/)[0].slice(0, 200);
+}
+
+function powershellPath(env) {
+  return path.win32.join(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+/** The pkg's signer, as pkgutil reports it: Apple-issued, Cloudflare's Team ID. */
+async function verifyWarpPkg(run, env, file) {
+  const checked = await runCommand(run, "/usr/sbin/pkgutil", ["--check-signature", file], { env, timeout: 120_000 });
+  const text = `${checked.stdout}\n${checked.stderr}`;
+  const signer = text.split(/\r?\n/).map((line) => line.trim()).find((line) => /^1\.\s/.test(line)) || "";
+  if (!checked.ok) return { ok: false, reason: `pkgutil: ${firstLine(checked.stdout) || firstLine(checked.stderr) || checked.error || `exit ${checked.code}`}` };
+  if (!/Status: signed by a developer certificate issued by Apple/.test(text)) return { ok: false, reason: "Apple이 발급한 인증서로 서명되지 않았습니다" };
+  if (!signer.includes("Developer ID Installer: Cloudflare") || !signer.includes(`(${CLOUDFLARE_TEAM_ID})`)) {
+    return { ok: false, reason: `서명한 곳: ${signer.replace(/^1\.\s*/, "").slice(0, 120) || "알 수 없음"}` };
+  }
+  return { ok: true, verified: `pkgutil --check-signature: ${signer.replace(/^1\.\s*/, "")}` };
+}
+
+/** The msi's Authenticode signature: Valid, and signed by Cloudflare. */
+async function verifyWarpMsi(run, env, file) {
+  const script = `$s = Get-AuthenticodeSignature -LiteralPath ${psQuote(file)}; Write-Output ([string]$s.Status); Write-Output ([string]$s.SignerCertificate.Subject)`;
+  const checked = await runCommand(run, powershellPath(env), ["-NoProfile", "-NonInteractive", "-Command", script], { env, timeout: 120_000 });
+  const [status = "", subject = ""] = checked.stdout.replace(/\0/g, "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!checked.ok || status !== "Valid") return { ok: false, reason: `서명 상태: ${status || firstLine(checked.stderr) || checked.error || "알 수 없음"}` };
+  if (!/(?:^|,\s*)(?:CN|O)="?Cloudflare\b/i.test(subject)) return { ok: false, reason: `서명한 곳: ${subject.slice(0, 120) || "알 수 없음"}` };
+  return { ok: true, verified: `Authenticode Valid: ${subject}` };
+}
+
+/**
+ * Hand a checked installer to the OS: macOS's Installer through `open` (which
+ * returns once the window is up), or `msiexec /i` on Windows, left running on its
+ * own since it lasts as long as the install does.
+ */
+export function openInstaller(file, { platform = process.platform, env = process.env, spawnImpl = nodeSpawn } = {}) {
+  const windows = platform === "win32";
+  const command = windows
+    ? path.win32.join(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows", "System32", "msiexec.exe")
+    : "/usr/bin/open";
+  const args = windows ? ["/i", file] : [file];
+  return new Promise((resolve) => {
+    let child;
+    try { child = spawnImpl(command, args, { detached: windows, stdio: "ignore", env }); }
+    catch (error) { resolve({ ok: false, error: String(error?.message || error) }); return; }
+    child.once("error", (error) => resolve({ ok: false, error: String(error?.message || error) }));
+    if (windows) {
+      child.once("spawn", () => { child.unref?.(); resolve({ ok: true }); });
+    } else {
+      child.once("exit", (code) => resolve(code === 0 ? { ok: true } : { ok: false, error: `open exited with ${code}` }));
+    }
+  });
+}
+
+/**
+ * Put Cloudflare WARP on this computer: download the official installer, check
+ * that Cloudflare signed it, and open it for the user to finish. Already installed
+ * is `{ ok, installed: true, changed: false }`; an opened installer is
+ * `changed: true` with a `nextAction` the user follows. Joining the team comes
+ * after, with the warp item's note.
+ */
+export async function installWarp({
+  platform = process.platform,
+  arch = process.arch,
+  env = process.env,
+  run = defaultRun,
+  fetchImpl = globalThis.fetch,
+  which = findOnPath,
+  fileExists = defaultFileExists,
+  homeDir = env.HONCHO_AGENT_BRIDGE_USER_HOME || env.HOME || env.USERPROFILE || os.homedir(),
+  downloadDir = path.join(homeDir, "Downloads"),
+  opener = openInstaller,
+  timeoutMs = 1_500_000,
+  idleTimeoutMs = 120_000,
+} = {}) {
+  const base = { item: "warp", platform, arch };
+  const cli = locateWarpCli({ platform, env, which, fileExists });
+  if (cli) return { ok: true, ...base, installed: true, changed: false, detail: "Cloudflare WARP가 이미 설치되어 있습니다." };
+  const installer = WARP_INSTALLERS[platform];
+  if (!installer) {
+    return {
+      ok: false,
+      ...base,
+      installed: false,
+      changed: false,
+      url: WARP_DOWNLOAD_URL,
+      error: `이 운영체제에서는 앱이 Cloudflare WARP를 설치하지 않습니다. Cloudflare 안내(${WARP_DOWNLOAD_URL})대로 Cloudflare 패키지 저장소를 추가해서 직접 설치하세요.`,
+    };
+  }
+  const file = path.join(downloadDir, installer.file);
+  let download;
+  try { download = await downloadFile({ url: installer.url, target: file, fetchImpl, timeoutMs, idleTimeoutMs }); }
+  catch (error) {
+    return { ok: false, ...base, installed: false, changed: false, error: `Cloudflare WARP 설치 파일을 내려받지 못했습니다: ${error.message}` };
+  }
+  const signature = platform === "darwin" ? await verifyWarpPkg(run, env, file) : await verifyWarpMsi(run, env, file);
+  if (!signature.ok) {
+    await fsp.rm(file, { force: true }).catch(() => {});
+    return {
+      ok: false,
+      ...base,
+      installed: false,
+      changed: false,
+      error: `내려받은 파일이 Cloudflare가 서명한 설치 파일인지 확인되지 않아 지웠고, 설치하지 않았습니다 (${signature.reason}).`,
+    };
+  }
+  let opened;
+  try { opened = await opener(file, { platform, env }); }
+  catch (error) { opened = { ok: false, error: String(error?.message || error) }; }
+  if (opened?.ok === false) {
+    return {
+      ok: false,
+      ...base,
+      installed: false,
+      changed: false,
+      file,
+      error: `설치 창을 열지 못했습니다 (${opened.error || "알 수 없는 이유"}). 내려받은 파일을 직접 열어서 설치하세요: ${file}`,
+    };
+  }
+  return {
+    ok: true,
+    ...base,
+    installed: false,
+    changed: true,
+    file,
+    bytes: download.bytes,
+    sha256: download.sha256,
+    verified: signature.verified,
+    nextAction: { kind: "warp-installer", message: WARP_INSTALLER_MESSAGE[platform] },
   };
 }

@@ -434,3 +434,19 @@ test("the prerequisite route validates its features before running the CLI", asy
   assert.deepEqual(response.body.items.map((item) => item.key), ["node", "git"]);
   assert.equal(response.body.platform, process.platform);
 });
+
+test("the install route takes a same-origin POST naming warp, and refuses anything else before running the CLI", async () => {
+  assert.equal((await send("/api/app/prereqs/install")).status, 405);
+  for (const body of [{}, { item: "docker" }, { item: "warp; rm -rf /" }, { item: ["warp"] }]) {
+    const response = await send("/api/app/prereqs/install", { method: "POST", body });
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.equal(response.body.ok, false, JSON.stringify(body));
+  }
+  // A valid request is never sent here: it would download and open the real installer.
+  const crossSite = await send("/api/app/prereqs/install", { method: "POST", body: { item: "warp" }, headers: { origin: "http://evil.example" } });
+  assert.equal(crossSite.status, 403);
+  const form = await send("/api/app/prereqs/install", { method: "POST", raw: "item=warp", headers: { "content-type": "application/x-www-form-urlencoded" } });
+  assert.equal(form.status, 415);
+  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  assert.match(server, /const INSTALLABLE_PREREQS = Object\.freeze\(\["warp"\]\)/);
+});

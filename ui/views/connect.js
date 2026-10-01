@@ -68,7 +68,7 @@ export default {
     clear(body,
       section({ id: "collect", title: "대화 동기화", note: "이 컴퓨터의 Claude Code·Codex 대화가 끝날 때마다 내 기억 서버로 보냅니다. 내 컴퓨터가 여러 대여도 모두 같은 서버로 모읍니다." }, collect),
       section({ id: "targets", title: "회사 서버에도 보내기", note: "정한 폴더에서 한 대화만 회사 서버 같은 다른 기억 서버에도 보냅니다. 내 서버에는 지금처럼 모든 대화가 가고, 다른 서버가 꺼져 있어도 내 서버는 멈추지 않습니다." }, targets),
-      section({ id: "share", title: "다른 사람 기억에 묻기 (chat)", note: "팀원이 열어 준 공유 창구에 연결하면, 에이전트가 그 사람의 기억에 질문할 수 있습니다. 원문은 볼 수 없고 답만 받습니다. 이 컴퓨터가 대화 동기화도 하면 내 기억 도구는 그대로 두고 shared_chat 도구가 더해집니다." }, share),
+      section({ id: "share", title: "다른 사람 기억에 묻기 (chat)", note: "팀원이 공유한 기억에 연결하면, 에이전트가 그 사람의 기억에 질문할 수 있습니다. 원문은 볼 수 없고 답만 받습니다. 이 컴퓨터가 대화 동기화도 하면 내 기억 도구는 그대로 두고 shared_chat 도구가 더해집니다." }, share),
       section({ id: "import", title: "ChatGPT 기록 가져오기", note: "ChatGPT 설정 → 데이터 제어 → 내보내기로 받은 파일 안의 conversations.json을 올립니다. 같은 파일을 다시 올려도 겹쳐 쌓이지 않습니다." }, importer),
     );
     if (params[0]) setTimeout(() => document.getElementById(params[0])?.scrollIntoView({ block: "start" }), 50);
@@ -192,7 +192,7 @@ export default {
       if (check.name === "honcho-health") return "기억 서버가 답하지 않습니다.";
       if (check.name === "honcho-workspaces") return "기억 서버에 닿았지만 작업공간을 읽지 못했습니다. 토큰이 맞는지 확인하세요.";
       if (check.name === "mcp") return "에이전트용 기억 도구(MCP)가 시작되지 않습니다.";
-      if (check.name === "shared-bridge") return "공유 창구가 답하지 않습니다.";
+      if (check.name === "shared-bridge") return "팀원 기억이 답하지 않습니다.";
       return `${check.name}: ${check.error || check.state || "문제 있음"}`;
     }
 
@@ -216,16 +216,16 @@ export default {
         clear(share,
           h("div", { class: "rows" }, h("div", { class: "row" },
             h("div", {}, h("div", { class: "title" }, tag("연결됨", "ok"), h("code", { class: "mono" }, status.url || "")),
-              h("div", { class: "sub" }, "이 컴퓨터의 에이전트는 기억 도구 대신 이 창구의 chat 도구를 씁니다.")),
+              h("div", { class: "sub" }, "이 컴퓨터의 에이전트는 이 연결의 chat 도구로 묻습니다.")),
             h("div", { class: "end" },
               button("시험", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
                 const tested = await post("/api/bridge/test", {});
                 clear(result, tested.ok
-                  ? notice("ok", h("b", {}, "창구가 답했습니다."), tested.tools ? ` 쓸 수 있는 도구: ${tested.tools.join(", ")}` : "")
-                  : notice("bad", h("b", {}, "창구가 답하지 않았습니다."), tested.error ? ` ${tested.error}` : ""));
+                  ? notice("ok", h("b", {}, "연결이 답했습니다."), tested.tools ? ` 쓸 수 있는 도구: ${tested.tools.join(", ")}` : "")
+                  : notice("bad", h("b", {}, "연결이 답하지 않았습니다."), tested.error ? ` ${tested.error}` : ""));
               }) }),
               button("끊기", { kind: "small danger", onClick: async (event) => {
-                const ok = await confirmSheet({ title: "공유 창구 연결을 끊을까요?", text: "저장한 창구 토큰을 이 컴퓨터에서 지웁니다. 다시 붙으려면 토큰을 다시 받아야 합니다.", confirm: "끊기", danger: true });
+                const ok = await confirmSheet({ title: "팀원 기억 연결을 끊을까요?", text: "저장한 토큰을 이 컴퓨터에서 지웁니다. 다시 붙으려면 토큰을 다시 받아야 합니다.", confirm: "끊기", danger: true });
                 if (!ok) return;
                 await busy(event.currentTarget, async () => { await cli("/api/bridge/disconnect", {}); await loadContext(); drawShare(); refreshStatus(); }, { done: "연결을 끊었습니다" });
               } }),
@@ -239,17 +239,17 @@ export default {
       const form = template.querySelector("form");
       clear(share,
         h("div", { class: "panel" },
-          h("p", { class: "muted", style: { margin: "0 0 12px", fontSize: "13px" } }, "기억을 공유한 팀원에게 받은 네 값을 넣습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요."),
+          h("p", { class: "muted", style: { margin: "0 0 12px", fontSize: "13px" } }, "팀원에게 받은 주소와 토큰을 넣습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요. 이 컴퓨터에 Cloudflare WARP가 팀으로 연결돼 있어야 합니다."),
           template,
           h("div", { class: "form-actions" }, button("연결", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
             if (!form.reportValidity()) return;
             const data = Object.fromEntries(new FormData(form).entries());
             const connected = await post("/api/bridge/connect", data);
             if (!connected.ok) {
-              clear(result, notice("bad", h("b", {}, "연결하지 못했습니다."), h("ul", {}, (connected.issues || [connected.error || "창구가 답하지 않았습니다."]).map((issue) => h("li", {}, issue)))));
+              clear(result, notice("bad", h("b", {}, "연결하지 못했습니다."), h("ul", {}, (connected.issues || [connected.error || "연결이 답하지 않았습니다."]).map((issue) => h("li", {}, issue)))));
               return;
             }
-            toast("공유 창구에 연결했습니다");
+            toast("팀원 기억에 연결했습니다");
             await loadContext();
             drawShare();
             refreshStatus();

@@ -52,7 +52,7 @@
       <label class="field wide">
         <span>기억 서버 주소</span>
         <input class="input" name="honchoUrl" type="url" placeholder="이 컴퓨터의 서버를 쓰면 비워 둡니다">
-        <small>내 다른 컴퓨터에 서버가 있으면 그 주소를 넣습니다.</small>
+        <small>서버가 다른 컴퓨터에 있으면 그 주소를 넣습니다.</small>
       </label>
       <label class="field wide">
         <span>서버 토큰</span>
@@ -60,8 +60,8 @@
         <small>서버를 둔 컴퓨터의 앱에서 서버 → 다른 컴퓨터에서 쓰기 → 서버 토큰 복사로 받습니다.</small>
       </label>
       <details class="field wide access-fields">
-        <summary>Cloudflare WARP를 켤 수 없는 컴퓨터라면</summary>
-        <p class="muted">보통은 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두면 됩니다. WARP를 켤 수 없으면 서버 관리자에게 Access 서비스 토큰을 받아 넣습니다.</p>
+        <summary>고급: WARP 없이 연결</summary>
+        <p class="muted">WARP를 쓸 수 없는 컴퓨터에서만 씁니다. 서버 관리자에게 받은 Cloudflare 서비스 토큰을 넣습니다.</p>
         <div class="form-grid">
           <label class="field">
             <span>Access 서비스 토큰 ID</span>
@@ -86,21 +86,27 @@
   <template id="tpl-bridge-form">
     <form id="bridge-form" class="form-grid" autocomplete="off">
       <label class="field wide">
-        <span>공유 창구 주소</span>
+        <span>주소</span>
         <input class="input" name="url" type="url" required placeholder="https://…">
       </label>
       <label class="field wide">
-        <span>창구 토큰</span>
+        <span>토큰</span>
         <input class="input" name="token" type="password" required>
       </label>
-      <label class="field">
-        <span>Cloudflare 서비스 토큰 ID</span>
-        <input class="input" name="accessClientId" type="password">
-      </label>
-      <label class="field">
-        <span>Cloudflare 서비스 토큰 비밀</span>
-        <input class="input" name="accessClientSecret" type="password">
-      </label>
+      <details class="field wide access-fields">
+        <summary>고급: WARP 없이 연결</summary>
+        <p class="muted">WARP를 쓸 수 없는 컴퓨터에서만 씁니다. 팀원에게 받은 Cloudflare 서비스 토큰을 넣습니다.</p>
+        <div class="form-grid">
+          <label class="field">
+            <span>서비스 토큰 ID</span>
+            <input class="input" name="accessClientId" type="password">
+          </label>
+          <label class="field">
+            <span>서비스 토큰 비밀</span>
+            <input class="input" name="accessClientSecret" type="password">
+          </label>
+        </div>
+      </details>
     </form>
   </template>
 

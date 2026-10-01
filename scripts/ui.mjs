@@ -463,6 +463,17 @@ export function prereqsInvocation(query) {
   return { args };
 }
 
+// What the start screen may install for the user. Everything else is installed by
+// server prepare or by the user.
+const INSTALLABLE_PREREQS = Object.freeze(["warp"]);
+
+/** `{ item: "warp" }` as `cli.mjs prereqs install` arguments; nothing else passes. */
+export function prereqsInstallInvocation(body) {
+  const item = typeof body?.item === "string" ? body.item.trim() : "";
+  if (!INSTALLABLE_PREREQS.includes(item)) return { error: `item must be one of: ${INSTALLABLE_PREREQS.join(", ")}` };
+  return { args: ["prereqs", "install", item] };
+}
+
 async function staticFile(req, res) {
   const requested = new URL(req.url, "http://ui").pathname;
   const relative = requested === "/" ? "index.html" : requested.replace(/^\/+/, "");
@@ -535,6 +546,16 @@ export function createUiServer() {
       const invocation = prereqsInvocation(url.searchParams);
       if (invocation.error) return json(res, 400, { ok: false, error: invocation.error });
       return json(res, 200, await runCli(invocation.args, { timeout: 60_000 }));
+    }
+    // Downloads an installer of about 150 MB before opening it.
+    if (url.pathname === "/api/app/prereqs/install") {
+      if (req.method !== "POST") return json(res, 405, { ok: false, error: "Method not allowed" });
+      let body;
+      try { body = await readJsonBody(req); }
+      catch (error) { return json(res, 400, { ok: false, error: String(error?.message || error) }); }
+      const invocation = prereqsInstallInvocation(body);
+      if (invocation.error) return json(res, 400, { ok: false, error: invocation.error });
+      return json(res, 200, await runCli(invocation.args, { timeout: 1_800_000 }));
     }
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];

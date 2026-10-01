@@ -51,7 +51,7 @@ export default {
     const audit = h("div", {});
     clear(body,
       section({ id: "local", title: "이 컴퓨터의 에이전트", note: "이 컴퓨터의 Claude Code·Codex가 보는 도구입니다. 기억을 바꾸거나 지우는 도구는 처음에 꺼져 있습니다. 바꾸면 에이전트가 다음에 도구 목록을 물을 때 반영됩니다." }, local),
-      section({ id: "shared", title: "기억 서버의 브리지", note: "기억 서버에 붙은 MCP 브리지가 내주는 도구입니다. 팀원에게 공유 창구를 열었다면 보통 chat 하나만 켜 둡니다." }, shared),
+      section({ id: "shared", title: "기억 서버의 브리지", note: "기억 서버에 붙은 MCP 브리지가 내주는 도구입니다. 팀원에게 기억을 공유했다면 chat 하나만 켜 둡니다." }, shared),
       section({ id: "audit", title: "조회 기록", note: "브리지로 들어온 모든 호출을 질의 원문과 함께 남깁니다. 거부된 호출도 여기서 보입니다." }, audit),
     );
     if (params[0]) setTimeout(() => document.getElementById(params[0])?.scrollIntoView({ block: "start" }), 50);
@@ -60,7 +60,7 @@ export default {
       try {
         const result = await get("/api/app/mcp-tools");
         if (!result.configured) {
-          clear(local, notice("", "이 컴퓨터는 아직 대화 수집을 설정하지 않아 플러그인 도구를 쓰지 않습니다.", app.context?.sharedBridge?.connected ? " 공유 창구에 연결돼 있어 그 창구의 도구를 씁니다." : ""));
+          clear(local, notice("", "이 컴퓨터는 아직 대화 수집을 설정하지 않아 플러그인 도구를 쓰지 않습니다.", app.context?.sharedBridge?.connected ? " 팀원 기억에 연결돼 있어 그 연결의 도구를 씁니다." : ""));
           return;
         }
         let tools = result.tools;
