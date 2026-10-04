@@ -1,30 +1,14 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { extractTextBlocks, normalizeCreatedAt, normalizeRawText, sanitizeId } from "./shared.mjs";
+import { extractTextBlocks, isInjectedContextText, normalizeCreatedAt, normalizeRawText, sanitizeId } from "./shared.mjs";
 
-const NOISE_PREFIXES = [
-  "# AGENTS.md instructions for ",
-  "# CLAUDE.md instructions for ",
-  "<permissions instructions>",
-  "<app-context>",
-  "<environment_context>",
-  "<local-command-caveat>",
-  "<command-message>",
-  "<command-name>",
-  "<local-command-stdout>",
-  "<local-command-stderr>",
-  "<bash-input>",
-  "<bash-stdout>",
-  "<bash-stderr>",
-  "<task-notification>",
+const NOISE_TAGS = [
+  "permissions instructions", "app-context", "environment_context",
+  "local-command-caveat", "command-message", "command-name",
+  "local-command-stdout", "local-command-stderr", "bash-input",
+  "bash-stdout", "bash-stderr", "task-notification", "recommended_plugins",
+  "turn_aborted", "hook_prompt", "skill", "codex_delegation",
 ];
-const NOISE_SUBSTRINGS = [
-  "This file defines global defaults for coding agents on this machine.",
-  "## Node.js Package Manager",
-  "## Python Package Manager",
-  "Global Agent Policy",
-];
-const REQUEST_MARKERS = ["## My request for Codex:", "My request for Codex:"];
 const AUTOMATION_USER_PREFIXES = [
   "Automation:",
   "Watchdog intervention",
@@ -34,17 +18,19 @@ const AUTOMATION_USER_PREFIXES = [
 ];
 const LINEAR_TASK_PREFIXES = ["You are working on a Linear issue", "You are working on a Linear ticket"];
 
-function normalizeCodexText(text) {
-  let out = normalizeRawText(text);
+function normalizeCodexText(text, role) {
+  const out = normalizeRawText(text);
   if (!out) return "";
-  for (const marker of REQUEST_MARKERS) {
-    if (out.includes(marker)) {
-      out = out.split(marker, 2)[1].trim();
-      break;
-    }
+  if (role !== "user") return out;
+  // Only unwrap the file-mention envelope actually emitted by the Codex app.
+  // An arbitrary occurrence of this heading (including one in an answer or
+  // quoted transcript) is ordinary text. Slice once so later markers survive.
+  const wrapper = out.match(/^# Files mentioned by the user:\n+((?:## [^\n]+: (?:\/|[A-Za-z]:[\\/]|~[\\/])[^\n]+\n+)+)## My request for Codex:\n/);
+  if (wrapper) {
+    return out.slice(wrapper[0].length).trim();
   }
-  if (NOISE_PREFIXES.some((prefix) => out.startsWith(prefix))) return "";
-  if (NOISE_SUBSTRINGS.some((token) => out.includes(token))) return "";
+  const externalTag = out.match(/^<(external_codex_apps_[A-Za-z0-9_]+)>/)?.[1];
+  if (isInjectedContextText(out, externalTag ? [...NOISE_TAGS, externalTag] : NOISE_TAGS)) return "";
   return out;
 }
 
@@ -79,7 +65,7 @@ export async function parseTranscript(transcriptPath) {
     const payload = obj.payload || {};
     if (obj.type !== "response_item" || payload.type !== "message") continue;
     if (!["user", "assistant"].includes(payload.role)) continue;
-    const text = extractTextBlocks(payload.content, normalizeCodexText);
+    const text = extractTextBlocks(payload.content, (text) => normalizeCodexText(text, payload.role));
     if (!text) continue;
     turns.push({
       role: payload.role,

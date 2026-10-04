@@ -1,28 +1,10 @@
 import path from "node:path";
 
-const REQUEST_MARKERS = ["## My request for Codex:", "My request for Codex:"];
-const NOISE_PREFIXES = [
-  "# AGENTS.md instructions for ",
-  "# CLAUDE.md instructions for ",
-  "<permissions instructions>",
-  "<app-context>",
-  "<environment_context>",
-  "<local-command-caveat>",
-  "<command-message>",
-  "<command-name>",
-  "<local-command-stdout>",
-  "<local-command-stderr>",
-  "<bash-input>",
-  "<bash-stdout>",
-  "<bash-stderr>",
-  "<task-notification>",
-  "Base directory for this skill:",
-];
-const NOISE_SUBSTRINGS = [
-  "This file defines global defaults for coding agents on this machine.",
-  "## Node.js Package Manager",
-  "## Python Package Manager",
-  "Global Agent Policy",
+const NOISE_TAGS = [
+  "permissions instructions", "app-context", "environment_context",
+  "local-command-caveat", "command-message", "command-name",
+  "local-command-stdout", "local-command-stderr", "bash-input",
+  "bash-stdout", "bash-stderr", "task-notification",
 ];
 
 export function normalizeCreatedAt(value) {
@@ -44,17 +26,50 @@ export function normalizeRawText(text) {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 }
 
-export function normalizeText(text) {
-  let normalized = normalizeRawText(text);
-  if (!normalized) return "";
-  for (const marker of REQUEST_MARKERS) {
-    if (normalized.includes(marker)) {
-      normalized = normalized.split(marker, 2)[1].trim();
-      break;
+// Match the complete app-injected policy envelope, not a heading in a real request.
+// In particular, old Codex versions omitted the "for <path>" suffix.
+export function isInjectedPolicyText(text) {
+  const opening = text.match(/^# (?:AGENTS|CLAUDE)\.md instructions(?: for [^\n]+)?\n+<INSTRUCTIONS>/);
+  if (!opening) return false;
+  const closing = text.indexOf("</INSTRUCTIONS>", opening[0].length);
+  if (closing < 0) return false;
+  const suffix = text.slice(closing + "</INSTRUCTIONS>".length).trim();
+  if (!suffix) return true;
+  if (!suffix.startsWith("<environment_context>")) return false;
+  const environmentEnd = suffix.indexOf("</environment_context>");
+  return environmentEnd >= 0 && !suffix.slice(environmentEnd + "</environment_context>".length).trim();
+}
+
+// Recognize complete envelopes only. If another sentence follows, retain the
+// whole message rather than silently dropping a possibly genuine user request.
+export function isInjectedContextText(text, tags) {
+  let rest = text;
+  while (rest) {
+    if (isInjectedPolicyText(rest)) return true;
+    // Empty slash-command arguments are UI metadata. Nonempty arguments can be
+    // the only copy of a user's /goal (or other request), so never discard them.
+    const emptyArgs = rest.match(/^<command-args>\s*<\/command-args>\s*/);
+    if (emptyArgs) {
+      rest = rest.slice(emptyArgs[0].length);
+      continue;
     }
+    const tag = tags.find((name) => rest.startsWith(`<${name}>`) || rest.startsWith(`<${name} `));
+    if (!tag) return false;
+    const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const block = rest.match(new RegExp(`^<${escaped}(?:\\s[^<>]*)?>[\\s\\S]*?<\\/${escaped}>\\s*`));
+    if (!block) return false;
+    rest = rest.slice(block[0].length);
   }
-  if (NOISE_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return "";
-  if (NOISE_SUBSTRINGS.some((token) => normalized.includes(token))) return "";
+  return true;
+}
+
+export function normalizeText(text, role = "user", isMeta = false) {
+  const normalized = normalizeRawText(text);
+  if (!normalized) return "";
+  if (role !== "user") return normalized;
+  if (isInjectedContextText(normalized, NOISE_TAGS)) return "";
+  if (/^\[Request interrupted by user(?: for tool use)?\]$/.test(normalized)) return "";
+  if (isMeta && /^Base directory for this skill: [^\n]+\n/.test(normalized)) return "";
   return normalized;
 }
 
