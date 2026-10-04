@@ -500,6 +500,44 @@ On disk, each target keeps its own directory, `<data>/targets/<id>/`:
 been sent), `logs/<agent>.log`, and `backfill.json`. `target remove` deletes that
 directory; what is already on that server stays there.
 
+## Backing up the conversation originals / 대화 원본 백업
+
+This copies each agent's original conversation files, byte for byte, to a folder (a local folder, a NAS or an external drive) or to an rclone cloud remote. It is separate from collection. Nothing is converted, and Honcho never reads the backup.
+
+```sh
+node scripts/cli.mjs backup set --cloud gdrive_dev: --device studio   # or --folder /Volumes/Backup
+node scripts/cli.mjs backup run --dry-run --verbose                    # what it would do; writes nothing
+node scripts/cli.mjs backup run                                        # copy now (`backup start` runs it in the background)
+node scripts/cli.mjs backup schedule on                                # daily; `schedule off` stops it
+node scripts/cli.mjs backup status
+node scripts/cli.mjs backup remotes                                    # rclone remotes it can use
+```
+
+- **What is copied.**
+  - Main transcripts: Claude Code `~/.claude/projects/*/<session>.jsonl` and Codex `~/.codex/sessions/**/rollout-*.jsonl`.
+  - Each agent's `history.jsonl`.
+  - Claude Code memory notes.
+
+  Subagent transcripts, tool results and runtime state are not copied. Codex archived sessions (`~/.codex/archived_sessions`) are copied under `codex/_아카이브/`. Collection never reads them.
+- **Where.**
+  - Transcripts go to `<folder>/대화/<agent>/YYYY/MM/DD/<original file name>`. The date is the day the conversation started, in Korea time. A file stays in that folder while the conversation goes on.
+  - `history.jsonl` goes to `<agent>/_부속자료/<device>/history.jsonl`.
+  - Memory notes go to `claude/_부속자료/projects/<project>/memory/`.
+  - The device id comes from the host name and is fixed when a destination is first saved. Set a short one with `--device`, because it becomes part of file names.
+- **Several computers, one destination.** There are no device folders. Backup only copies: it never deletes anything at the destination and never syncs. When the destination file differs:
+  - it is replaced if it is the start of this computer's file, i.e. a transcript that grew;
+  - it is replaced if this computer uploaded it last and the ledger shows it unchanged since;
+  - otherwise both are kept, and this computer's copy is saved as `<stem>.<device><ext>`.
+
+  Modification time never decides. Each computer's daily run starts at a minute derived from its device id, so two computers don't create the same Drive folder at once.
+- **Archived sessions and earlier versions.**
+  - When a session is archived, its copy in the normal date folder moves into `_아카이브/`. If it differs from the archived file, it is kept as `<stem>.pre-archive.jsonl`, because Codex rewrites a file when it archives it.
+  - If a copy under a date folder's `_원본버전/` is the same bytes as this computer's file, or its beginning, it is moved onto the normal path. Nothing is uploaded again.
+- **연결 대기.** If the folder's drive is not mounted, or the remote does not answer, the run waits. It never writes to the internal disk instead.
+- **State and schedule.**
+  - State lives in `<data>/backup/`: `settings.json`, `status.json`, `ledger-<destination hash>.json` and `run.lock`. The log is `<data>/logs/backup.log`.
+  - The scheduled job is launchd `team-memory-system.backup`, systemd `team-memory-backup.timer` or the Windows task `TeamMemoryBackup`. It runs `backup run --scheduled`, which re-checks the whole destination (`--full`) when the last full check is more than 7 days old.
+
 ## Building a distributable bundle
 
 The release builder copies this plugin and a complete Honcho source checkout, removes runtime state and secret-bearing files, preserves the Honcho AGPL license, records the exact source commit, and creates a tarball:
