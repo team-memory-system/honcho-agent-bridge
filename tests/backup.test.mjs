@@ -512,7 +512,7 @@ test("a cloud backup copies with rclone copyto, never by mtime, and makes new fo
   const fake = fakeRclone(remoteRoot);
   const destination = { kind: "cloud", remote: "fake", path: "" };
   const dry = await runBackup({ destination, rcloneRun: fake.run, homeDir: home, device: "studio", dryRun: true });
-  assert.deepEqual({ ...dry.counts }, { new: 8, unchanged: 0, "prefix-replace": 1, "keep-both": 0, "archive-moves": 1, errors: 0 });
+  assert.deepEqual({ ...dry.counts }, { new: 8, unchanged: 0, "prefix-replace": 1, "own-replace": 0, "keep-both": 0, "archive-moves": 1, "version-moves": 0, errors: 0 });
   assert.deepEqual(fake.calls.map((args) => args[0]).filter((command) => ["copyto", "moveto", "mkdir"].includes(command)), [], "a dry run wrote");
 
   fake.calls.length = 0;
@@ -535,19 +535,95 @@ test("a cloud backup copies with rclone copyto, never by mtime, and makes new fo
   assert.equal(again.counts.unchanged, 9);
 });
 
-test("a new file whose bytes already sit under _원본버전 is reported as such, and _원본버전 is left alone", async (t) => {
+test("a session whose only copy is under _원본버전 gets that copy moved onto its name; other versions stay", async (t) => {
+  const home = await makeHome(t);
+  const dest = await temporaryDirectory(t, "dest");
+  const local = await fsp.readFile(path.join(home, ".codex", "sessions", "2026", "09", "01", CODEX_MAIN));
+  const dayDir = path.join(dest, "대화", "codex", "2026", "09", "02");
+  const versions = path.join(dayDir, "_원본버전", "01a0aaaa");
+  const other = Buffer.from("a version from somewhere else\n");
+  await put(path.join(versions, "0123456789abcdef", CODEX_MAIN), local);
+  await put(path.join(versions, "fedcba9876543210", CODEX_MAIN), other);
+  const result = await backupTo(home, dest);
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(result.counts["version-moves"], 1);
+  assert.equal(result.counts.new, 8);
+  assert.equal(result.byKind["codex/main"].unchanged, 1);
+  assert.equal(result.examples["version-moves"]["codex/main"][0].from, `codex/2026/09/02/_원본버전/01a0aaaa/0123456789abcdef/${CODEX_MAIN}`);
+  assert.deepEqual(await fsp.readFile(path.join(dayDir, CODEX_MAIN)), local);
+  await assert.rejects(fsp.access(path.join(versions, "0123456789abcdef", CODEX_MAIN)));
+  assert.deepEqual(await fsp.readFile(path.join(versions, "fedcba9876543210", CODEX_MAIN)), other);
+});
+
+test("a _원본버전 copy that is the start of a session that grew moves onto its name and is extended", async (t) => {
   const home = await makeHome(t);
   const remoteRoot = await temporaryDirectory(t, "remote");
   const local = await fsp.readFile(path.join(home, ".codex", "sessions", "2026", "09", "01", CODEX_MAIN));
-  const version = path.join(remoteRoot, "대화", "codex", "2026", "09", "02", "_원본버전", "01a0aaaa", "0123456789abcdef", CODEX_MAIN);
-  await put(version, local);
+  const versions = path.join(remoteRoot, "대화", "codex", "2026", "09", "02", "_원본버전", "01a0aaaa");
+  await put(path.join(versions, "1111111111111111", CODEX_MAIN), local.subarray(0, 50));
+  await put(path.join(versions, "2222222222222222", CODEX_MAIN), local.subarray(0, 20));
   const fake = fakeRclone(remoteRoot);
-  const result = await runBackup({ destination: { kind: "cloud", remote: "fake", path: "" }, rcloneRun: fake.run, homeDir: home, device: "studio", dryRun: true, wholeTrees: true });
-  assert.equal(result.counts.new, 9);
-  assert.deepEqual(result.newSameAsOriginalVersion, { files: 1, bytes: local.length });
-  const example = result.examples.new["codex/main"].find((item) => item.to.endsWith(CODEX_MAIN));
-  assert.equal(example.sameBytesAt, `codex/2026/09/02/_원본버전/01a0aaaa/0123456789abcdef/${CODEX_MAIN}`);
-  assert.ok(fake.calls.some((args) => args[0] === "lsjson" && args.includes("-R")));
+  const destination = { kind: "cloud", remote: "fake", path: "" };
+  // Few folders: listed one by one, a main transcript's date folder with what is below it.
+  const result = await runBackup({ destination, rcloneRun: fake.run, homeDir: home, device: "studio" });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  const listings = fake.calls.filter((args) => args[0] === "lsjson");
+  assert.ok(listings.some((args) => args.includes("-R") && args.includes("fake:대화/codex/2026/09/02")));
+  assert.ok(!listings.some((args) => args.includes("fake:대화/codex")), "the whole codex tree was listed");
+  assert.equal(result.counts["version-moves"], 1);
+  assert.equal(result.byKind["codex/main"]["prefix-replace"], 1);
+  assert.equal(result.examples["version-moves"]["codex/main"][0].from, `codex/2026/09/02/_원본버전/01a0aaaa/1111111111111111/${CODEX_MAIN}`);
+  assert.deepEqual(await fsp.readFile(path.join(remoteRoot, "대화", "codex", "2026", "09", "02", CODEX_MAIN)), local);
+  assert.deepEqual(await fsp.readFile(path.join(versions, "2222222222222222", CODEX_MAIN)), local.subarray(0, 20));
+});
+
+test("what this computer last uploaded is updated in place; an edit by someone else there is kept", async (t) => {
+  const home = await makeHome(t);
+  const dest = await temporaryDirectory(t, "dest");
+  const dataDir = await temporaryDirectory(t, "data");
+  const note = path.join(home, ".claude", "projects", PROJECT, "memory", "note.md");
+  const memoryDir = path.join(dest, "대화", "claude", "_부속자료", "projects", PROJECT, "memory");
+  await backupTo(home, dest, { dataDir });
+  await fsp.writeFile(note, "---\nname: note\n---\nedited\n");
+  const second = await backupTo(home, dest, { dataDir });
+  assert.equal(second.counts["own-replace"], 1);
+  assert.equal(second.counts["keep-both"], 0);
+  await fsp.writeFile(note, "---\nname: note\n---\nedited again\n");
+  const third = await backupTo(home, dest, { dataDir });
+  assert.equal(third.counts["own-replace"], 1);
+  assert.deepEqual(await listTree(memoryDir), ["MEMORY.md", "note.md"]);
+  assert.deepEqual(await fsp.readFile(path.join(memoryDir, "note.md")), await fsp.readFile(note));
+
+  // Another computer wrote the note there since: the ledger no longer vouches for it.
+  await fsp.writeFile(path.join(memoryDir, "note.md"), "their version\n");
+  await fsp.writeFile(note, "---\nname: note\n---\nmine, once more\n");
+  const fourth = await backupTo(home, dest, { dataDir });
+  assert.equal(fourth.counts["own-replace"], 0);
+  assert.equal(fourth.counts["keep-both"], 1);
+  assert.equal(await fsp.readFile(path.join(memoryDir, "note.md"), "utf8"), "their version\n");
+  assert.deepEqual(await fsp.readFile(path.join(memoryDir, "note.studio.md")), await fsp.readFile(note));
+});
+
+test("the scheduled run checks past the ledger once a week", async (t) => {
+  const home = await makeHome(t);
+  const dest = await temporaryDirectory(t, "dest");
+  const dataDir = await temporaryDirectory(t, "data");
+  await backupCommand("set", [], { dataDir, folder: dest, device: "studio" });
+  const first = await backupCommand("run", [], { dataDir, homeDir: home, scheduled: true });
+  assert.equal(first.full, true);
+  const second = await backupCommand("run", [], { dataDir, homeDir: home, scheduled: true });
+  assert.equal(second.full, false);
+  assert.equal(second.skippedByLedger, 9);
+  const manual = await backupCommand("run", [], { dataDir, homeDir: home });
+  assert.equal(manual.full, false);
+  const statusPath = path.join(dataDir, "backup", "status.json");
+  const status = JSON.parse(await fsp.readFile(statusPath, "utf8"));
+  status.lastFullAt = new Date(Date.now() - 8 * 86_400_000).toISOString();
+  await fsp.writeFile(statusPath, JSON.stringify(status));
+  const weekly = await backupCommand("run", [], { dataDir, homeDir: home, scheduled: true });
+  assert.equal(weekly.full, true);
+  assert.equal(weekly.skippedByLedger, 0);
+  assert.equal(weekly.counts.unchanged, 9);
 });
 
 test("rclone's messages lose anything that looks like a credential", () => {
@@ -577,7 +653,7 @@ test("the schedule is a clock job on each OS, at the device's own minute, and in
   assert.equal(mac.data.RunAtLoad, false);
   assert.equal(Object.hasOwn(mac.data, "KeepAlive"), false);
   assert.deepEqual(mac.data.StartCalendarInterval, { Hour: 3, Minute: 17 });
-  assert.deepEqual(mac.data.ProgramArguments, ["/usr/local/bin/node", "/app/cli.mjs", "backup", "run"]);
+  assert.deepEqual(mac.data.ProgramArguments, ["/usr/local/bin/node", "/app/cli.mjs", "backup", "run", "--scheduled"]);
   assert.match(mac.text, /<key>StartCalendarInterval<\/key>/);
 
   const linux = backupScheduleSpec({ ...base, platform: "linux" }, paths);
@@ -588,7 +664,8 @@ test("the schedule is a clock job on each OS, at the device's own minute, and in
   const windows = backupScheduleSpec({ ...base, platform: "win32", env: { SystemRoot: "C:\\Windows" } }, { ...paths, stateDir: "C:\\app\\state" });
   assert.match(windows.xml, /<StartBoundary>2026-01-01T03:17:00<\/StartBoundary>/);
   assert.match(windows.xml, /<StartWhenAvailable>true<\/StartWhenAvailable>/);
-  assert.match(windows.vbs, /backup run/);
+  assert.match(windows.vbs, /backup run --scheduled/);
+  assert.match(linux.serviceText, /"backup" "run" "--scheduled"/);
 
   const calls = [];
   const ctx = { ...base, platform: "darwin", sleep: async () => {}, run: async (command, args) => { calls.push([command, ...args]); return { code: args[0] === "print" ? 113 : 0, stdout: "", stderr: "" }; } };

@@ -14,12 +14,17 @@
 //   - the same bytes are left alone (unchanged);
 //   - a shorter file there that is a byte prefix of this one (an append-only
 //     transcript that grew) is replaced (prefix-replace);
+//   - what this computer itself last uploaded there from the same file (the
+//     ledger's md5 is what is there now) is replaced in place (own-replace);
 //   - anything else there is kept, and this computer's version is written beside
 //     it under a name tagged with this computer's device id, then, if that name
 //     is taken by other bytes too, also with the first 8 hex of its md5 (keep-both);
 //   - modification times never decide anything.
 // A Codex session lives in one place: an archived one goes under codex/_아카이브/,
 // and a copy of it still in the normal date folder is moved there (archive-moves).
+// A session whose only copy sits under its date folder's _원본버전/<id>/<hash>/
+// (from the 2026-10-04 reorganisation) gets that copy moved onto its own name when
+// it is the same bytes or the start of this file (version-moves); other versions stay.
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -58,11 +63,12 @@ import {
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS_VERSION = 1;
 const LEDGER_VERSION = 1;
-export const BUCKETS = Object.freeze(["new", "unchanged", "prefix-replace", "keep-both", "archive-moves"]);
+export const BUCKETS = Object.freeze(["new", "unchanged", "prefix-replace", "own-replace", "keep-both", "archive-moves", "version-moves"]);
 // Above this many folders to look at, a cloud is listed per agent in one recursive pass.
 const PER_FOLDER_LISTING_LIMIT = 40;
 const DEFAULT_HOUR = 3;
 const ORIGINAL_VERSIONS = "_원본버전";
+const FULL_CHECK_EVERY_MS = 7 * 24 * 3_600_000;
 
 // ------------------------------------------------------------------ settings
 
@@ -204,8 +210,8 @@ class Plan {
     this.copies = [];
     this.unchanged = [];
     this.errors = [];
-    // name → files kept under a date folder's _원본버전/<session>/<hash>/ by the
-    // 2026-10-04 reorganisation; only reported, never written to.
+    // name → paths kept under a date folder's _원본버전/<session>/<hash>/ by the
+    // 2026-10-04 reorganisation.
     this.versions = new Map();
   }
 
@@ -233,11 +239,11 @@ class Plan {
     return md5 === local.prefixes.get(entry.size);
   }
 
-  move(item, from, to) {
+  move(item, from, to, bucket = "archive-moves") {
     const entry = this.files.get(from);
     this.files.delete(from);
     this.files.set(to, entry);
-    this.moves.push({ item, from, to });
+    this.moves.push({ item, from, to, bucket });
   }
 }
 
@@ -301,13 +307,21 @@ async function plan({ store, items, ledger, device, full, log, wholeTrees = fals
     }
     const { rel, shared } = destinationFor(item, { date: kind.date, device });
     const counterpart = counterpartFor(item, { date: kind.date });
-    pending.push({ item, stat, date: kind.date, rel, shared, counterpart, previous: cached?.dest || null });
+    pending.push({
+      item, stat, date: kind.date, rel, shared, counterpart,
+      previous: cached?.dest || null,
+      // What this computer itself last put at `previous`, when it was an upload.
+      own: cached?.uploaded ? { size: cached.size, md5: cached.md5 } : null,
+    });
   }
 
   // What is at the destination, for every folder these files can land in.
   const dirs = new Set();
+  // A main transcript's date folder is listed with what is below it, for _원본버전/.
+  const recursive = new Set();
   for (const entry of pending) {
     dirs.add(dirOf(entry.rel));
+    if (entry.item.kind === "main") recursive.add(dirOf(entry.rel));
     if (entry.counterpart) dirs.add(dirOf(entry.counterpart));
     if (entry.previous) dirs.add(dirOf(entry.previous));
   }
@@ -315,13 +329,13 @@ async function plan({ store, items, ledger, device, full, log, wholeTrees = fals
     ? [...new Set([...dirs].map((dir) => dir.split("/")[0]))].sort()
     : [];
   log(`listing ${trees.length ? trees.join(", ") : `${dirs.size} folders`} at ${store.label}`);
-  const listing = await store.list([...dirs].sort(), { trees });
+  const listing = await store.list([...dirs].sort(), { trees, recursive });
   for (const [rel, entry] of listing.files) {
     result.files.set(rel, { ...entry, origin: rel });
     if (rel.includes(`/${ORIGINAL_VERSIONS}/`)) {
       const name = rel.split("/").at(-1);
       if (!result.versions.has(name)) result.versions.set(name, []);
-      result.versions.get(name).push({ rel, ...entry });
+      result.versions.get(name).push(rel);
     }
   }
   for (const dir of listing.dirs) result.dirs.add(dir);
@@ -330,12 +344,13 @@ async function plan({ store, items, ledger, device, full, log, wholeTrees = fals
   for (const entry of pending) {
     const { item, stat } = entry;
     try {
-      const names = [entry.rel, entry.counterpart, entry.previous, entry.shared ? inDir(entry.rel, taggedName(item.name, device)) : null];
+      const names = [entry.rel, entry.counterpart, entry.previous, entry.shared ? inDir(entry.rel, taggedName(item.name, device)) : null, ...versionsOf(result, entry)];
       const candidates = names.filter(Boolean).map((rel) => result.files.get(rel)).filter(Boolean);
       const local = await hashLocal(item.localPath, stat.size, candidates.map((candidate) => candidate.size));
       local.path = item.localPath;
       local.mtimeMs = stat.mtimeMs;
       await relocate(result, entry, local);
+      await adoptVersion(result, entry, local);
       await decide(result, entry, local, device);
     } catch (error) {
       result.errors.push({ item, error: error.message });
@@ -382,6 +397,29 @@ async function relocate(result, entry, local) {
   throw new Error(`every name for the moved copy of ${entry.item.name} is taken by other bytes`);
 }
 
+/** This session's copies under its own date folder's _원본버전/, still where they were listed. */
+function versionsOf(result, entry) {
+  if (entry.item.kind !== "main") return [];
+  const prefix = `${dirOf(entry.rel)}/${ORIGINAL_VERSIONS}/`;
+  return (result.versions.get(entry.item.name) || []).filter((rel) => rel.startsWith(prefix) && result.files.has(rel));
+}
+
+/**
+ * Nothing at the session's own name, and a copy under _원本버전/ that is the same
+ * bytes or the start of this file: that copy moves onto the name (and is then left
+ * alone or extended), so nothing is uploaded twice. Other versions stay where they are.
+ */
+async function adoptVersion(result, entry, local) {
+  if (result.files.has(entry.rel)) return;
+  let best = null;
+  for (const rel of versionsOf(result, entry)) {
+    const version = result.files.get(rel);
+    if (!(await result.containedIn(version, local))) continue;
+    if (!best || version.size > best.version.size) best = { rel, version };
+  }
+  if (best) result.move(entry.item, best.rel, entry.rel, "version-moves");
+}
+
 async function decide(result, entry, local, device) {
   const { item, rel, shared } = entry;
   const chain = [rel];
@@ -394,10 +432,7 @@ async function decide(result, entry, local, device) {
     const there = result.files.get(candidate);
     const record = { item, entry, local, to: candidate, primary: rel };
     if (!there) {
-      const sameAs = candidate === rel
-        ? (result.versions.get(item.name) || []).find((version) => version.size === local.size && version.md5 === local.md5 && version.rel.startsWith(`${dirOf(rel)}/`))
-        : null;
-      result.copies.push({ ...record, bucket: candidate === rel ? "new" : "keep-both", replaced: null, ...(sameAs ? { sameAsVersion: sameAs.rel } : {}) });
+      result.copies.push({ ...record, bucket: candidate === rel ? "new" : "keep-both", replaced: null });
       result.files.set(candidate, { size: local.size, md5: local.md5, planned: true });
       return;
     }
@@ -407,6 +442,13 @@ async function decide(result, entry, local, device) {
     }
     if (there.size < local.size && await result.containedIn(there, local)) {
       result.copies.push({ ...record, bucket: "prefix-replace", replaced: there.size });
+      result.files.set(candidate, { size: local.size, md5: local.md5, planned: true });
+      return;
+    }
+    // This computer's own last upload from this file, untouched since: not another
+    // computer's version, so it is brought up to date where it is.
+    if (candidate === entry.previous && entry.own && there.size === entry.own.size && await result.md5(there) === entry.own.md5) {
+      result.copies.push({ ...record, bucket: "own-replace", replaced: there.size });
       result.files.set(candidate, { size: local.size, md5: local.md5, planned: true });
       return;
     }
@@ -440,11 +482,10 @@ function summarize({ plan: result, excluded, discoveredExcluded, ledgerHits, exa
       if (examples[bucket][key].length < examplesPerKind) examples[bucket][key].push(example);
     }
   };
-  for (const move of result.moves) add("archive-moves", move.item, 0, { from: move.from, to: move.to, local: move.item.localPath });
+  for (const move of result.moves) add(move.bucket, move.item, 0, { from: move.from, to: move.to, local: move.item.localPath });
   for (const copy of result.copies) {
     const example = { from: copy.item.localPath, to: copy.to, size: copy.local.size };
-    if (copy.bucket === "prefix-replace") example.replacedSize = copy.replaced;
-    if (copy.sameAsVersion) example.sameBytesAt = copy.sameAsVersion;
+    if (copy.bucket === "prefix-replace" || copy.bucket === "own-replace") example.replacedSize = copy.replaced;
     if (copy.bucket === "keep-both") {
       const there = result.files.get(copy.primary);
       example.differsFrom = copy.primary;
@@ -461,19 +502,14 @@ function summarize({ plan: result, excluded, discoveredExcluded, ledgerHits, exa
     bytes,
     byKind,
     skippedByLedger: ledgerHits.length,
-    // New at their own name, while the same bytes already sit under _원본버전/.
-    newSameAsOriginalVersion: {
-      files: result.copies.filter((copy) => copy.sameAsVersion).length,
-      bytes: result.copies.filter((copy) => copy.sameAsVersion).reduce((sum, copy) => sum + copy.local.size, 0),
-    },
     excluded: allExcluded,
     examples: Object.fromEntries(Object.entries(examples).filter(([bucket]) => bucket !== "unchanged" || !executed)),
     errors: result.errors.slice(0, 50).map(({ item, error }) => ({ path: item.localPath, error })),
   };
 }
 
-function ledgerEntry(local, to, date) {
-  return { size: local.size, mtimeMs: local.mtimeMs, md5: local.md5, dest: to, ...(date ? { date } : {}) };
+function ledgerEntry(local, to, date, uploaded) {
+  return { size: local.size, mtimeMs: local.mtimeMs, md5: local.md5, dest: to, ...(date ? { date } : {}), ...(uploaded ? { uploaded: true } : {}) };
 }
 
 /**
@@ -497,7 +533,7 @@ export async function runBackup({
   if (!destination) return { ok: false, error: "no backup destination is set" };
   const store = givenStore || storeFor(destination, { rcloneRun });
   const startedAt = new Date().toISOString();
-  const base = { destination: destinationLabel(destination), kind: destination.kind, device, dryRun, startedAt };
+  const base = { destination: destinationLabel(destination), kind: destination.kind, device, dryRun, full, startedAt };
 
   const probe = await store.probe();
   if (!probe.ok) return { ok: false, waiting: true, reason: probe.reason, ...(probe.detail ? { detail: probe.detail } : {}), ...base };
@@ -514,7 +550,12 @@ export async function runBackup({
     const saveLedger = async () => {
       if (ledgerPath) await writeJsonFile(ledgerPath, { version: LEDGER_VERSION, destination: base.destination, files: fresh });
     };
-    for (const record of result.unchanged) fresh[record.item.localPath] = ledgerEntry(record.local, record.to, record.entry.date);
+    for (const record of result.unchanged) {
+      // Still this computer's upload when nothing changed but the file's mtime.
+      const before = ledger.files[record.item.localPath];
+      const own = before?.uploaded && before.dest === record.to && before.md5 === record.local.md5;
+      fresh[record.item.localPath] = ledgerEntry(record.local, record.to, record.entry.date, own);
+    }
     const failed = new Set();
     for (const move of result.moves) {
       try {
@@ -538,7 +579,7 @@ export async function runBackup({
     await pool(copies, concurrency || (store.kind === "cloud" ? 4 : 8), async (copy) => {
       try {
         await store.copy(copy.item.localPath, copy.to);
-        fresh[copy.item.localPath] = ledgerEntry(copy.local, copy.to, copy.entry.date);
+        fresh[copy.item.localPath] = ledgerEntry(copy.local, copy.to, copy.entry.date, true);
       } catch (error) {
         result.errors.push({ item: copy.item, error: error.message });
         delete fresh[copy.item.localPath];
@@ -733,14 +774,19 @@ async function backupRun(options, dataDir) {
   const device = deviceOf(settings);
   const examplesPerKind = Number.isInteger(Number(options.examples)) && Number(options.examples) > 0 ? Number(options.examples) : 3;
   const log = options.verbose === true ? (line) => process.stderr.write(`${new Date().toISOString()} ${line}\n`) : () => {};
-  const run = () => runBackup({ destination, dataDir, device, dryRun, full: options.full === true, examplesPerKind, log, ...(options.homeDir ? { homeDir: options.homeDir } : {}) });
+  // Only the configured destination's runs are what the screen shows.
+  const recorded = !parsed.destination;
+  // The scheduled run checks everything against the destination once a week, past
+  // the ledger, so a file removed or changed there by hand is copied again.
+  const lastFullAt = Date.parse((await readStatus(dataDir)).lastFullAt || "");
+  const full = options.full === true
+    || (options.scheduled === true && recorded && !(Date.now() - lastFullAt < FULL_CHECK_EVERY_MS));
+  const run = () => runBackup({ destination, dataDir, device, dryRun, full, examplesPerKind, log, ...(options.homeDir ? { homeDir: options.homeDir } : {}) });
   if (dryRun) return run();
 
   const paths = backupPaths(dataDir);
   const lock = await acquireFileLock(paths.lock, { staleMs: 24 * 3_600_000, reclaimDeadImmediately: true });
   if (!lock) return { ok: false, busy: true, error: "another backup run is still going" };
-  // Only the configured destination's runs are what the screen shows.
-  const recorded = !parsed.destination;
   try {
     if (recorded) await writeStatus(dataDir, { running: { pid: process.pid, startedAt: new Date().toISOString() } });
     let result;
@@ -750,6 +796,7 @@ async function backupRun(options, dataDir) {
         running: null,
         lastRun: lastRunRecord(result),
         ...(result.ok ? { lastSuccessAt: result.finishedAt } : {}),
+        ...(full && result.counts ? { lastFullAt: result.finishedAt } : {}),
       });
     }
     return result;

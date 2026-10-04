@@ -21,8 +21,10 @@ const REASONS = {
 const BUCKET_LABELS = [
   ["new", "새로 복사"],
   ["prefix-replace", "늘어난 파일 갱신"],
+  ["own-replace", "이 컴퓨터가 올린 파일 갱신"],
   ["keep-both", "둘 다 남김"],
   ["archive-moves", "_아카이브로 옮김"],
+  ["version-moves", "_원본버전에서 옮김"],
   ["unchanged", "그대로"],
 ];
 

@@ -90,20 +90,22 @@ export function folderStore({ folder, volumeRoot = null }) {
       try { await fsp.access(base, fs.constants.W_OK); } catch { return { ok: false, reason: "not-writable" }; }
       return { ok: true };
     },
-    /** Files directly in each folder (relative to 대화/), with their sizes. */
-    async list(dirs) {
+    /** Files in each folder (relative to 대화/) with their sizes; below it too for one in `recursive`. */
+    async list(dirs, { recursive = new Set() } = {}) {
       const files = new Map();
       const existingDirs = new Set();
-      for (const dir of dirs) {
+      const walk = async (dir, deep) => {
         let entries;
-        try { entries = await fsp.readdir(full(dir), { withFileTypes: true }); } catch { continue; }
+        try { entries = await fsp.readdir(full(dir), { withFileTypes: true }); } catch { return; }
         existingDirs.add(dir);
         for (const entry of entries) {
+          if (entry.isDirectory() && deep) await walk(`${dir}/${entry.name}`, deep);
           if (!entry.isFile() || entry.name.includes(".backup-tmp-")) continue;
           const stat = await fsp.stat(path.join(full(dir), entry.name)).catch(() => null);
           if (stat) files.set(`${dir}/${entry.name}`, { size: stat.size });
         }
-      }
+      };
+      for (const dir of dirs) await walk(dir, recursive.has(dir));
       return { files, dirs: existingDirs };
     },
     md5(rel) {
@@ -256,7 +258,7 @@ export function rcloneStore({ remote, path: folder = "", run, env = process.env,
      * Files in the given folders. A folder under `trees` is listed with everything
      * below it in one recursive listing, which is cheaper than many folders one by one.
      */
-    async list(dirs, { trees = [] } = {}) {
+    async list(dirs, { trees = [], recursive = new Set() } = {}) {
       const files = new Map();
       const existingDirs = new Set();
       for (const tree of trees) {
@@ -268,7 +270,8 @@ export function rcloneStore({ remote, path: folder = "", run, env = process.env,
       }
       for (const dir of dirs) {
         if (trees.some((tree) => dir === tree || dir.startsWith(`${tree}/`))) continue;
-        const result = await invoke(["lsjson", "--files-only", "--hash", "--hash-type", "md5", "--no-mimetype", at(dir), ...common], { timeoutMs: 600_000 });
+        const deep = recursive.has(dir) ? ["-R", "--fast-list"] : [];
+        const result = await invoke(["lsjson", ...deep, "--files-only", "--hash", "--hash-type", "md5", "--no-mimetype", at(dir), ...common], { timeoutMs: 600_000 });
         if (result.code === 3) continue;
         if (result.code !== 0) throw new Error(`listing ${dir}: ${rcloneMessage(result, "rclone lsjson")}`);
         existingDirs.add(dir);
@@ -277,7 +280,8 @@ export function rcloneStore({ remote, path: folder = "", run, env = process.env,
       return { files, dirs: existingDirs };
     },
     async md5() {
-      // Drive reports md5 in the listing; a remote that does not is compared by size only.
+      // Drive reports md5 in the listing; with a remote that does not, a file that
+      // would need comparing is reported as an error and left alone.
       return undefined;
     },
     async mkdir(rel) {

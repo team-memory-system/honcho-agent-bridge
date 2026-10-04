@@ -10,7 +10,7 @@
 //   windows   the Task Scheduler task "TeamMemoryBackup" (daily, StartWhenAvailable),
 //             which runs <state>/backup.vbs through a hidden wscript
 //
-// Each runs `node <cli.mjs> backup run`. None needs admin rights. Every OS call
+// Each runs `node <cli.mjs> backup run --scheduled`. None needs admin rights. Every OS call
 // goes through ctx.run, which tests replace (autostart.mjs refuses the real
 // launchctl, systemctl and schtasks under node --test).
 import crypto from "node:crypto";
@@ -45,7 +45,8 @@ function xmlEscape(text) {
 
 /** The schedule for this platform, or null where there is none. */
 export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDirectory, stateDir, hour, minute }) {
-  const programArguments = [nodePath, cliPath, "backup", "run"];
+  // --scheduled: once a week this run also checks past the ledger (backup.mjs).
+  const programArguments = [nodePath, cliPath, "backup", "run", "--scheduled"];
   if (ctx.platform === "darwin") {
     return launchAgent({
       label: BACKUP_LAUNCHD_LABEL,
@@ -103,7 +104,7 @@ export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDir
     const wscript = path.win32.join(system32, "wscript.exe");
     const vbsPath = path.win32.join(stateDir, "backup.vbs");
     // cmd keeps what the run prints in the log; the outer quotes are cmd's own.
-    const commandLine = `cmd /c ""${nodePath}" "${cliPath}" backup run >> "${logPath}" 2>&1"`;
+    const commandLine = `cmd /c ""${nodePath}" "${cliPath}" backup run --scheduled >> "${logPath}" 2>&1"`;
     const vbs = [
       "' Team Memory: the daily conversation backup, with no window.",
       "' Written by `cli.mjs backup schedule on`; `cli.mjs backup schedule off` removes it.",
