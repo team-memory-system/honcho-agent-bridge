@@ -281,3 +281,64 @@ test("Codex subagent prompts are stored as automation rather than direct user me
   assert.equal(messageWrite.body.messages[0].metadata.direct_user, false);
   assert.equal(messageWrite.body.messages[0].metadata.automation_kind, "codex_subagent");
 });
+
+test("Claude Agent SDK sessions are stored as automation; interactive and unmarked sessions stay the person's", async (t) => {
+  const api = await startApi();
+  t.after(() => api.server.close());
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-claude-sdk-"));
+  t.after(() => fsp.rm(directory, { recursive: true, force: true }));
+  const env = {
+    ...process.env,
+    HONCHO_BASE_URL: `http://127.0.0.1:${api.port}`,
+    HONCHO_WORKSPACE_ID: "memory",
+    HONCHO_USER_NAME: "user_test",
+    HONCHO_AGENT_HOOK_STATE: path.join(directory, "state.json"),
+    HONCHO_AGENT_HOOK_LOG: path.join(directory, "collector.log"),
+  };
+  delete env.HONCHO_CLAUDE_AUTOMATION_PEER;
+  const cases = [
+    { name: "sdk-cli", entrypoint: "sdk-cli", userPeer: "automation_claude" },
+    { name: "sdk-ts", entrypoint: "sdk-ts", userPeer: "automation_claude" },
+    { name: "cli", entrypoint: "cli", userPeer: "user_test" },
+    { name: "none", entrypoint: undefined, userPeer: "user_test" },
+  ];
+  for (const { name, entrypoint, userPeer } of cases) {
+    const transcript = path.join(directory, `${name}.jsonl`);
+    const sessionId = `session-${name}`;
+    await fsp.writeFile(
+      transcript,
+      [
+        { type: "queue-operation", operation: "enqueue", sessionId },
+        { uuid: `${name}-user`, sessionId, entrypoint, timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp/project", type: "user", message: { role: "user", content: "Current position (X black, O white, . empty):" } },
+        { uuid: `${name}-assistant`, sessionId, entrypoint, timestamp: "2026-01-01T00:00:01Z", type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "e5" }] } },
+      ].map((row) => JSON.stringify(row)).join("\n") + "\n",
+    );
+    api.requests.length = 0;
+    const result = JSON.parse(
+      (await execFileAsync(process.execPath, [COLLECTOR, "--provider", "claude", "--transcript", transcript], { env })).stdout,
+    );
+    assert.equal(result.new_messages, 2, name);
+    const messageWrite = api.requests.find((entry) => entry.url?.endsWith("/messages"));
+    assert.deepEqual(messageWrite.body.messages.map((message) => message.peer_id), [userPeer, "assistant_claude"], name);
+    const [user, assistant] = messageWrite.body.messages.map((message) => message.metadata);
+    assert.equal(assistant.direct_user, false, name);
+    assert.equal(assistant.automation_kind, undefined, name);
+    const sessionWrites = api.requests.filter((entry) => entry.url === "/v3/workspaces/memory/sessions");
+    const lastSessionWrite = sessionWrites.at(-1);
+    // The session's peers are written before its messages.
+    assert.ok(api.requests.indexOf(lastSessionWrite) < api.requests.indexOf(messageWrite), name);
+    if (userPeer === "automation_claude") {
+      assert.equal(user.direct_user, false, name);
+      assert.equal(user.memory_origin, "claude_automation", name);
+      assert.equal(user.automation_kind, "claude_sdk", name);
+      assert.equal(lastSessionWrite.body.metadata.entrypoint, entrypoint, name);
+      assert.deepEqual(lastSessionWrite.body.peers.automation_claude, { observe_me: false, observe_others: false }, name);
+    } else {
+      assert.equal(user.direct_user, true, name);
+      assert.equal(user.memory_origin, "claude_direct_user", name);
+      assert.equal(user.automation_kind, undefined, name);
+      assert.equal(sessionWrites.length, 1, name);
+      assert.equal(lastSessionWrite.body.peers.automation_claude, undefined, name);
+    }
+  }
+});

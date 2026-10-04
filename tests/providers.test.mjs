@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { parseTranscript as parseAgy } from "../scripts/providers/agy.mjs";
-import { parseTranscript as parseClaude } from "../scripts/providers/claude.mjs";
+import { classifyAutomation as classifyClaudeAutomation, parseTranscript as parseClaude } from "../scripts/providers/claude.mjs";
 import { classifyAutomation as classifyCodexAutomation, parseTranscript as parseCodex } from "../scripts/providers/codex.mjs";
 
 async function fixture(t, name, rows) {
@@ -139,4 +139,26 @@ test("Agy transcript parser preserves user text that resembles instructions", as
   const result = await parseAgy(file, { conversationId: "conversation-1" });
   assert.equal(result.session_id, "agy-conversation-1");
   assert.deepEqual(result.turns.map(({ role, content }) => [role, content]), [["user", "# AGENTS.md instructions for my app"], ["assistant", "understood"]]);
+});
+
+test("Claude transcript parser takes the entrypoint from the first record that has one", async (t) => {
+  const file = await fixture(t, "claude-sdk.jsonl", [
+    { type: "queue-operation", operation: "enqueue", sessionId: "session-1" },
+    { type: "attachment", entrypoint: "sdk-cli", sessionId: "session-1", attachment: { type: "skill_listing" } },
+    { uuid: "u1", sessionId: "session-1", entrypoint: "sdk-cli", type: "user", message: { role: "user", content: "Current position (X black, O white, . empty):" } },
+    { uuid: "u2", sessionId: "session-1", entrypoint: "cli", type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "e5" }] } },
+  ]);
+  const result = await parseClaude(file);
+  assert.equal(result.metadata.entrypoint, "sdk-cli");
+  assert.deepEqual(classifyClaudeAutomation("Current position", result.metadata), [true, "claude_sdk"]);
+});
+
+test("Claude automation classifier treats only sdk-* entrypoints as automation", () => {
+  assert.deepEqual(classifyClaudeAutomation("x", { entrypoint: "sdk-cli" }), [true, "claude_sdk"]);
+  assert.deepEqual(classifyClaudeAutomation("x", { entrypoint: "sdk-ts" }), [true, "claude_sdk"]);
+  assert.deepEqual(classifyClaudeAutomation("x", { entrypoint: "sdk-py" }), [true, "claude_sdk"]);
+  for (const entrypoint of ["cli", "claude-vscode", "claude-desktop", "", undefined]) {
+    assert.deepEqual(classifyClaudeAutomation("x", { entrypoint }), [false, null], String(entrypoint));
+  }
+  assert.deepEqual(classifyClaudeAutomation("x", {}), [false, null]);
 });

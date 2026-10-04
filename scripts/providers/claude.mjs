@@ -35,6 +35,12 @@ export async function parseTranscript(transcriptPath) {
     } catch {
       continue;
     }
+    // How the session was started: "cli" when a person runs Claude Code, "sdk-cli" or
+    // "sdk-ts" when a program drives it through the Agent SDK. Taken from the first
+    // record that has one.
+    if (metadata.entrypoint == null && typeof obj.entrypoint === "string" && obj.entrypoint) {
+      metadata.entrypoint = obj.entrypoint;
+    }
     // isCompactSummary rows hold the summary Claude Code writes when it compacts a session.
     if (obj.isSidechain || obj.isCompactSummary) continue;
     const queuedText = queuedHumanPrompt(obj);
@@ -93,4 +99,15 @@ export async function parseTranscript(transcriptPath) {
     metadata,
     turns,
   };
+}
+
+/**
+ * A session a program started through the Claude Agent SDK (entrypoint "sdk-cli",
+ * "sdk-ts", any "sdk-*") carries that program's prompts in the user role, not the
+ * person's words. Same shape as the Codex classifier: [isAutomation, kind].
+ */
+export function classifyAutomation(_text, sessionMetadata) {
+  const entrypoint = sessionMetadata?.entrypoint;
+  if (typeof entrypoint === "string" && entrypoint.startsWith("sdk-")) return [true, "claude_sdk"];
+  return [false, null];
 }

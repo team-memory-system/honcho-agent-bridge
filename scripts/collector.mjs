@@ -5,6 +5,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { getProvider } from "./providers/index.mjs";
 import { classifyAutomation as classifyCodexAutomation } from "./providers/codex.mjs";
+import { classifyAutomation as classifyClaudeAutomation } from "./providers/claude.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import {
   accessRefusedMessage,
@@ -39,6 +40,10 @@ const CODEX_SESSION_ROOT = expandHome(process.env.CODEX_SESSION_ROOT || "~/.code
 const CODEX_MAX_AGE_SECONDS = Number(process.env.HONCHO_CODEX_IMPORT_MAX_AGE_SECONDS || "180");
 const CODEX_DREAM_EVERY_MESSAGES = Number(process.env.HONCHO_CODEX_DREAM_EVERY_MESSAGES || "20");
 const CODEX_AUTOMATION_PEER = process.env.HONCHO_CODEX_AUTOMATION_PEER || "automation_codex";
+const CLAUDE_AUTOMATION_PEER = process.env.HONCHO_CLAUDE_AUTOMATION_PEER || "automation_claude";
+// Providers whose user-role turns can be a program's prompts rather than the person's
+// words: [classifier, peer those turns go to]. Codex has its own path (buildCodexMessages).
+const AUTOMATION_CLASSIFIERS = { claude: [classifyClaudeAutomation, CLAUDE_AUTOMATION_PEER] };
 // Set only when this run sends to another server (a target, see targets.mjs): the
 // folders whose conversations that server takes. Nothing outside them, and nothing
 // without a working directory, is sent - checked here, before any request, so no
@@ -301,7 +306,18 @@ function buildMessages(provider, sessionId, parsed, sessionState) {
     const candidates = turnHashCandidates(sessionId, turn);
     if (candidates.some((candidate) => seenHashes.has(candidate))) continue;
     const sourceTurnHash = candidates[0];
-    const peerId = turn.role === "user" ? DEFAULT_USER_PEER : assistantPeer(provider);
+    let peerId = assistantPeer(provider);
+    let directUser = false;
+    let memoryOrigin = `${provider}_assistant`;
+    let automationKind = null;
+    if (turn.role === "user") {
+      const [classify, automationPeer] = AUTOMATION_CLASSIFIERS[provider] || [];
+      const automation = classify ? classify(turn.content, parsed.metadata) : [false, null];
+      automationKind = automation[1];
+      peerId = automation[0] ? automationPeer : DEFAULT_USER_PEER;
+      directUser = !automation[0];
+      memoryOrigin = automation[0] ? `${provider}_automation` : `${provider}_direct_user`;
+    }
     peers.add(peerId);
     const chunks = splitContent(turn.content);
     chunks.forEach((chunk, index) => {
@@ -310,13 +326,14 @@ function buildMessages(provider, sessionId, parsed, sessionState) {
         agent_provider: provider,
         memory_importer: "agent_turn_ended",
         memory_trigger: IMPORT_TRIGGER,
-        memory_origin: turn.role === "user" ? `${provider}_direct_user` : `${provider}_assistant`,
-        direct_user: turn.role === "user",
+        memory_origin: memoryOrigin,
+        direct_user: directUser,
         transcript_path: parsed.metadata.file_path,
         [`${provider}_session_id`]: sessionId,
         [`${provider}_role`]: turn.role,
         source_turn_hash: sourceTurnHash,
       };
+      if (automationKind) metadata.automation_kind = automationKind;
       if (turn.line_index) metadata[`${provider}_line_index`] = turn.line_index;
       if (turn.source_message_id) metadata.source_message_id = turn.source_message_id;
       if (turn.step_index != null) metadata[`${provider}_step_index`] = turn.step_index;
@@ -640,6 +657,9 @@ async function importParsedSession(args, parsed, transcriptPath) {
         await saveState(args.provider, state);
       }
       return result;
+    }
+    if ([...peers].some((peer) => !basePeers.has(peer))) {
+      await ensureSession(args.workspace, args.provider, sessionId, parsed, peers);
     }
     sessionState.write_in_progress = { started_at: utcNow(), message_count: messages.length };
     state.version = 2;
