@@ -65,6 +65,7 @@ import {
 } from "./targets.mjs";
 import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
 import { checkPrereqs, FEATURES, installWarp, parseFeatures, validWarpTeam, WARP_TEAM_INVALID } from "./prereqs.mjs";
+import { backupCommand } from "./backup.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
@@ -1749,6 +1750,12 @@ function usage() {
       "target backfill <id> [--since YYYY-MM-DD] [--limit <n>]",
       "target remove <id>",
       "ui open [--screen <name>] [--no-browser]",
+      "backup status [--check]",
+      "backup set --folder <absolute path> | --cloud <rclone remote>:[folder] | --off [--device <id>] [--hour <0-23>]",
+      "backup run [--dry-run] [--full] [--folder <path> | --cloud <remote>:[folder]] [--examples <n>] [--verbose]",
+      "backup start (a run in the background)",
+      "backup schedule on|off [--hour <0-23>]",
+      "backup remotes",
       "doctor",
       "status",
     ],
@@ -1892,6 +1899,12 @@ async function main() {
     if (subcommand === "disconnect") return bridgeDisconnect();
   }
   if (command === "target") return targetCommand(args);
+  if (command === "backup") {
+    const subcommand = args.shift() || "status";
+    const positional = [];
+    while (args.length && !args[0].startsWith("--")) positional.push(args.shift());
+    return backupCommand(subcommand, positional, parseOptions(args));
+  }
   if (command === "ui") {
     const subcommand = args.shift() || "open";
     const options = parseOptions(args);

@@ -8,6 +8,7 @@
 // None needs admin rights. The callers are share-manager.mjs (the Cloudflare tunnel)
 // and host-manager.mjs (the host supervisor); each builds its own spec with the
 // functions here and keeps what only it knows (how to find its processes).
+// backup-schedule.mjs uses the launchd half for a job that runs on a clock.
 //
 // Every OS call goes through `ctx.run(command, args)`, which resolves to
 // {code, stdout, stderr}, and `ctx.sleep(ms)`, so tests hand in fakes. The default
@@ -98,14 +99,17 @@ function plistValue(value, depth) {
 
 /**
  * A LaunchAgent that starts at login (RunAtLoad). `keepAlive` is `true` (always
- * restart) or a KeepAlive dictionary such as {SuccessfulExit: false}.
+ * restart) or a KeepAlive dictionary such as {SuccessfulExit: false}. A job that
+ * runs on a clock instead passes `runAtLoad: false`, `keepAlive: null` and a
+ * `startCalendarInterval` such as {Hour: 3, Minute: 17}.
  */
-export function launchAgent({ label, homeDir, uid, programArguments, workingDirectory, stdoutPath, stderrPath, keepAlive = true, environment }) {
+export function launchAgent({ label, homeDir, uid, programArguments, workingDirectory, stdoutPath, stderrPath, keepAlive = true, runAtLoad = true, startCalendarInterval, environment }) {
   const data = {
     Label: label,
     ProgramArguments: programArguments,
-    RunAtLoad: true,
-    KeepAlive: keepAlive,
+    RunAtLoad: runAtLoad,
+    ...(keepAlive === null ? {} : { KeepAlive: keepAlive }),
+    ...(startCalendarInterval ? { StartCalendarInterval: startCalendarInterval } : {}),
     ...(workingDirectory ? { WorkingDirectory: workingDirectory } : {}),
     ...(stdoutPath ? { StandardOutPath: stdoutPath } : {}),
     ...(stderrPath ? { StandardErrorPath: stderrPath } : {}),

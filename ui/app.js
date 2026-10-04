@@ -14,8 +14,9 @@ import server from "./views/server.js";
 import tools from "./views/tools.js";
 import audit from "./views/audit.js";
 import start from "./views/start.js";
+import backup from "./views/backup.js";
 
-const VIEWS = { memory, ask, models, connect, server, tools, audit, start };
+const VIEWS = { memory, ask, models, connect, server, tools, audit, start, backup };
 const NAV = [
   ["memory", "기억", "memory"],
   ["ask", "묻기", "ask"],
@@ -24,6 +25,7 @@ const NAV = [
   ["server", "서버", "server"],
   ["tools", "도구", "tools"],
   ["audit", "기록", "audit"],
+  ["backup", "백업", "backup"],
 ];
 const START = ["start", "시작하기", "start"];
 
@@ -31,6 +33,7 @@ const START = ["start", "시작하기", "start"];
 const SHELL_ICONS = {
   audit: '<path d="M3 3.5h10M3 6.5h10M3 9.5h6M3 12.5h4"/><circle cx="12" cy="11.5" r="2"/>',
   lock: '<rect x="3.5" y="7" width="9" height="6.5" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/>',
+  backup: '<rect x="2.5" y="9.5" width="11" height="4" rx="1"/><path d="M8 2.5v5.5M5.5 5.5L8 8l2.5-2.5"/><path d="M5 11.5h.01"/>',
 };
 function glyph(name) {
   const body = SHELL_ICONS[name];
@@ -276,6 +279,7 @@ function palette() {
     { label: "서버 점검", hint: "서버", screen: "server", run: () => go("server") },
     { label: "MCP 도구 켜고 끄기", hint: "도구", screen: "tools", run: () => go("tools") },
     { label: "조회 기록", hint: "기록", screen: "audit", run: () => go("audit") },
+    { label: "대화 원본 백업", hint: "백업", screen: "backup", run: () => go("backup") },
     { label: "처음 설정 다시 보기", hint: "시작하기", screen: "", run: () => go("start") },
   ].filter((entry) => !entry.screen || visible(entry.screen))
     .map((entry) => (entry.screen && gate(entry.screen) ? { ...entry, hint: `${entry.hint} · 잠김` } : entry));

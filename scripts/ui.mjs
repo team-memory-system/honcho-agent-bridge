@@ -336,6 +336,40 @@ const TARGET_ROUTES = Object.fromEntries(Object.entries(TARGET_TIMEOUTS).map(([a
   },
 ]));
 
+/**
+ * The conversation backup (backup.mjs). Choosing where it goes, starting a run and
+ * turning the daily schedule on or off change this computer, so they are POST
+ * only, and every value goes as `--name=value`, never as an option of its own.
+ */
+const RCLONE_REMOTE = /^[A-Za-z0-9_][A-Za-z0-9_ .+@-]{0,63}$/;
+
+/** What `/api/backup/set` runs, or null for a request that names no destination. */
+export function backupSetInvocation(body) {
+  const kind = body?.kind;
+  if (kind === "off") return ["backup", "set", "--off"];
+  if (kind === "folder") {
+    const folder = typeof body.path === "string" ? body.path.trim() : "";
+    return folder && !/[\r\n]/.test(folder) ? ["backup", "set", `--folder=${folder}`] : null;
+  }
+  if (kind === "cloud") {
+    const remote = typeof body.remote === "string" ? body.remote.trim() : "";
+    const folder = typeof body.path === "string" ? body.path.trim().replace(/^\/+|\/+$/g, "") : "";
+    if (!RCLONE_REMOTE.test(remote) || /[\r\n]/.test(folder)) return null;
+    return ["backup", "set", `--cloud=${remote}:${folder}`];
+  }
+  return null;
+}
+
+const BACKUP_ROUTES = {
+  "/api/backup/set": async (body) => {
+    const args = backupSetInvocation(body);
+    if (!args) return { ok: false, error: "Choose a folder, an rclone remote, or off." };
+    return runCli(args, { timeout: 120_000 });
+  },
+  "/api/backup/start": async () => runCli(["backup", "start"], { timeout: 30_000 }),
+  "/api/backup/schedule": async (body) => runCli(["backup", "schedule", body?.on === true ? "on" : "off"], { timeout: 120_000 }),
+};
+
 const ROUTES = {
   "/api/targets": async () => runCli(["target", "list"], { timeout: 30_000, env: secretEnvironment({}, TARGET_SECRET_FIELDS) }),
   ...TARGET_ROUTES,
@@ -356,6 +390,9 @@ const ROUTES = {
   "/api/server/status": async (body) => runCli(["server", "status", ...profileOption(body)]),
   "/api/server/verify": async (body) => runCli(["server", "verify", ...profileOption(body, "personal")]),
   ...SHARE_ROUTES,
+  "/api/backup/status": async (body) => runCli(["backup", "status", ...(body?.check === true ? ["--check"] : [])], { timeout: 120_000 }),
+  "/api/backup/remotes": async () => runCli(["backup", "remotes"], { timeout: 60_000 }),
+  ...BACKUP_ROUTES,
 };
 
 /**
@@ -594,7 +631,7 @@ export function createUiServer() {
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];
     if (!route && !hostRoute) return json(res, 404, { error: "Not found" });
-    if ((Object.hasOwn(SHARE_ROUTES, url.pathname) || Object.hasOwn(TARGET_ROUTES, url.pathname)) && req.method !== "POST") {
+    if ((Object.hasOwn(SHARE_ROUTES, url.pathname) || Object.hasOwn(TARGET_ROUTES, url.pathname) || Object.hasOwn(BACKUP_ROUTES, url.pathname)) && req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Method not allowed" });
     }
     let body = {};

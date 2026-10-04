@@ -1,0 +1,307 @@
+// Where the conversation backup writes: a folder (an external drive, a NAS share or
+// any folder) or a cloud reached through rclone. Both write under <destination>/대화.
+//
+// A destination that cannot be reached right now (the drive is not mounted, the
+// cloud is not authorised, rclone is missing) answers probe() with ok:false, and
+// the backup then writes nothing anywhere: it never falls back to the internal disk.
+// Neither store ever deletes: a move relocates a file, a copy adds or replaces one.
+//
+// rclone runs as a child process with its own configuration; nothing here reads,
+// prints or passes that configuration or its tokens.
+import { spawn } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
+
+export const ROOT_FOLDER = "대화";
+const RCLONE_REMOTE = /^[A-Za-z0-9_][A-Za-z0-9_ .+@-]{0,63}$/;
+const DEFAULT_TPS_LIMIT = 4;
+
+export class DestinationUnreachable extends Error {
+  constructor(reason, detail = "") {
+    super(detail || reason);
+    this.reason = reason;
+  }
+}
+
+/** md5 of a whole file, as Google Drive and rclone report it. */
+export async function md5OfFile(filePath) {
+  const hash = crypto.createHash("md5");
+  for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+function cleanRelative(rel) {
+  const parts = String(rel).split("/");
+  if (!rel || parts.some((part) => !part || part === "." || part === "..")) throw new Error(`not a destination path: ${rel}`);
+  return parts.join("/");
+}
+
+// ------------------------------------------------------------------ folder
+
+/** The nearest folder at or above `target` that is the root of a mounted volume. */
+export async function volumeRootOf(target) {
+  let current = path.resolve(target);
+  let stat = await fsp.stat(current);
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    const parentStat = await fsp.stat(parent);
+    if (parentStat.dev !== stat.dev) return current;
+    current = parent;
+    stat = parentStat;
+  }
+}
+
+async function isMountPoint(target) {
+  const resolved = path.resolve(target);
+  const parent = path.dirname(resolved);
+  if (parent === resolved) return true;
+  try {
+    const [own, above] = await Promise.all([fsp.stat(resolved), fsp.stat(parent)]);
+    return own.isDirectory() && own.dev !== above.dev;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A folder destination. `volumeRoot`, recorded when the folder was chosen, is the
+ * mount point it lives on (/Volumes/NAS, say): when that is no longer a mount
+ * point, the drive is gone even if an empty folder of the same name is left on
+ * the internal disk.
+ */
+export function folderStore({ folder, volumeRoot = null }) {
+  const base = path.resolve(String(folder || ""));
+  const root = path.join(base, ROOT_FOLDER);
+  const full = (rel) => path.join(root, ...cleanRelative(rel).split("/"));
+  return {
+    kind: "folder",
+    label: root,
+    async probe() {
+      if (!folder || !path.isAbsolute(String(folder))) return { ok: false, reason: "not-absolute" };
+      if (volumeRoot && path.resolve(volumeRoot) !== path.parse(base).root && !(await isMountPoint(volumeRoot))) {
+        return { ok: false, reason: "not-mounted" };
+      }
+      let stat;
+      try { stat = await fsp.stat(base); } catch { return { ok: false, reason: "missing" }; }
+      if (!stat.isDirectory()) return { ok: false, reason: "not-directory" };
+      try { await fsp.access(base, fs.constants.W_OK); } catch { return { ok: false, reason: "not-writable" }; }
+      return { ok: true };
+    },
+    /** Files directly in each folder (relative to 대화/), with their sizes. */
+    async list(dirs) {
+      const files = new Map();
+      const existingDirs = new Set();
+      for (const dir of dirs) {
+        let entries;
+        try { entries = await fsp.readdir(full(dir), { withFileTypes: true }); } catch { continue; }
+        existingDirs.add(dir);
+        for (const entry of entries) {
+          if (!entry.isFile() || entry.name.includes(".backup-tmp-")) continue;
+          const stat = await fsp.stat(path.join(full(dir), entry.name)).catch(() => null);
+          if (stat) files.set(`${dir}/${entry.name}`, { size: stat.size });
+        }
+      }
+      return { files, dirs: existingDirs };
+    },
+    md5(rel) {
+      return md5OfFile(full(rel));
+    },
+    async mkdir(rel) {
+      await fsp.mkdir(full(rel), { recursive: true });
+    },
+    /** Byte-exact copy through a temporary name beside the target, then a rename over it. */
+    async copy(localPath, rel) {
+      const target = full(rel);
+      await fsp.mkdir(path.dirname(target), { recursive: true });
+      const temporary = path.join(path.dirname(target), `.${path.basename(target)}.backup-tmp-${process.pid}`);
+      try {
+        await fsp.copyFile(localPath, temporary, fs.constants.COPYFILE_FICLONE);
+        await fsp.rename(temporary, target);
+      } catch (error) {
+        await fsp.rm(temporary, { force: true }).catch(() => {});
+        throw error;
+      }
+    },
+    async move(fromRel, toRel) {
+      const target = full(toRel);
+      await fsp.mkdir(path.dirname(target), { recursive: true });
+      await fsp.rename(full(fromRel), target);
+    },
+  };
+}
+
+// ------------------------------------------------------------------ rclone
+
+/** rclone on PATH or in the usual install places; launchd and the Task Scheduler start with a short PATH. */
+export function locateRclone(env = process.env, platform = process.platform) {
+  if (env.RCLONE_BIN && fs.existsSync(env.RCLONE_BIN)) return env.RCLONE_BIN;
+  const name = platform === "win32" ? "rclone.exe" : "rclone";
+  const directories = String(env.PATH || env.Path || "").split(path.delimiter).filter(Boolean);
+  if (platform === "win32") {
+    directories.push(path.join(env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links"), "C:\\Program Files\\rclone", path.join(env.USERPROFILE || "", "scoop", "shims"));
+  } else {
+    directories.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/snap/bin", path.join(env.HOME || "", ".local", "bin"));
+  }
+  for (const directory of directories) {
+    const candidate = path.join(directory, name);
+    try { if (fs.statSync(candidate).isFile()) return candidate; } catch {}
+  }
+  return null;
+}
+
+/** Runs rclone; always resolves {code, stdout, stderr}. */
+export function runRclone(binary, args, { timeoutMs = 600_000, env = process.env } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(binary, args, { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      resolve({ code: -1, stdout: "", stderr: String(error?.message || error) });
+      return;
+    }
+    const out = [];
+    const err = [];
+    let errBytes = 0;
+    child.stdout.on("data", (chunk) => out.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      if (errBytes < 1024 * 1024) { err.push(chunk); errBytes += chunk.length; }
+    });
+    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ code: -1, stdout: "", stderr: String(error?.message || error) });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? (signal ? -1 : 0), stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") });
+    });
+  });
+}
+
+const SECRET_IN_TEXT = [
+  /ya29\.[\w.-]+/g,
+  /("?(?:access_token|refresh_token|client_secret|token|password|pass)"?\s*[:=]\s*)("[^"]*"|\S+)/gi,
+];
+
+/** One short line from rclone's stderr, with anything that looks like a credential taken out. */
+export function rcloneMessage(result, fallback = "rclone failed") {
+  const lines = String(result?.stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const line = lines.find((item) => /\b(ERROR|CRITICAL|Failed|NOTICE: Failed)\b/.test(item)) || lines.at(-1) || `${fallback} (exit ${result?.code})`;
+  let text = line.replace(/^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}\s+/, "").slice(0, 300);
+  for (const pattern of SECRET_IN_TEXT) text = text.replace(pattern, (match, key) => (key ? `${key}[redacted]` : "[redacted]"));
+  return text;
+}
+
+export function parseCloudDestination(value) {
+  const text = String(value || "").trim();
+  const colon = text.indexOf(":");
+  if (colon <= 0) return null;
+  const remote = text.slice(0, colon);
+  const folder = text.slice(colon + 1).replace(/^\/+|\/+$/g, "");
+  if (!RCLONE_REMOTE.test(remote)) return null;
+  if (folder && folder.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  return { remote, path: folder };
+}
+
+/**
+ * A cloud destination through an rclone remote. `run(args, options)` is injectable
+ * for tests and defaults to the rclone found on this computer.
+ */
+export function rcloneStore({ remote, path: folder = "", run, env = process.env, tpsLimit = DEFAULT_TPS_LIMIT }) {
+  const baseSpec = `${remote}:${folder ? `${folder}/` : ""}`;
+  const root = `${baseSpec}${ROOT_FOLDER}`;
+  const at = (rel) => `${root}/${cleanRelative(rel)}`;
+  const binary = run ? "rclone" : locateRclone(env);
+  const invoke = run || ((args, options) => runRclone(binary, args, { ...options, env }));
+  const common = ["--tpslimit", String(tpsLimit), "--drive-stop-on-upload-limit"];
+
+  async function must(args, what, options) {
+    const result = await invoke([...args, ...common], options);
+    if (result.code !== 0) throw new Error(`${what}: ${rcloneMessage(result, what)}`);
+    return result;
+  }
+
+  function parseListing(stdout, prefix, files, dirs) {
+    let rows;
+    try { rows = JSON.parse(stdout || "[]"); } catch { throw new Error("rclone lsjson returned something that is not JSON"); }
+    for (const row of rows) {
+      const rel = prefix ? `${prefix}/${row.Path}` : row.Path;
+      if (row.IsDir) dirs.add(rel);
+      else {
+        files.set(rel, { size: Number(row.Size), md5: row.Hashes?.md5 || row.Hashes?.MD5 || undefined });
+        const parent = rel.split("/").slice(0, -1).join("/");
+        if (parent) dirs.add(parent);
+      }
+    }
+  }
+
+  return {
+    kind: "cloud",
+    label: root,
+    async probe() {
+      if (!binary) return { ok: false, reason: "rclone-missing" };
+      const remotes = await invoke(["listremotes"], { timeoutMs: 30_000 });
+      if (remotes.code !== 0) return { ok: false, reason: "rclone-failed", detail: rcloneMessage(remotes, "rclone listremotes") };
+      const names = remotes.stdout.split(/\r?\n/).map((line) => line.trim().replace(/:$/, "")).filter(Boolean);
+      if (!names.includes(remote)) return { ok: false, reason: "remote-missing" };
+      const probe = await invoke(["lsf", "--max-depth", "1", "--dirs-only", baseSpec, ...common], { timeoutMs: 120_000 });
+      // 3 is "directory not found": the remote answers, and the folder is made on the first copy.
+      if (probe.code !== 0 && probe.code !== 3) return { ok: false, reason: "unauthorized-or-offline", detail: rcloneMessage(probe, "rclone lsf") };
+      return { ok: true };
+    },
+    /**
+     * Files in the given folders. A folder under `trees` is listed with everything
+     * below it in one recursive listing, which is cheaper than many folders one by one.
+     */
+    async list(dirs, { trees = [] } = {}) {
+      const files = new Map();
+      const existingDirs = new Set();
+      for (const tree of trees) {
+        const result = await invoke(["lsjson", "-R", "--hash", "--hash-type", "md5", "--fast-list", "--no-mimetype", at(tree), ...common], { timeoutMs: 3_600_000 });
+        if (result.code === 3) continue;
+        if (result.code !== 0) throw new Error(`listing ${tree}: ${rcloneMessage(result, "rclone lsjson")}`);
+        existingDirs.add(tree);
+        parseListing(result.stdout, tree, files, existingDirs);
+      }
+      for (const dir of dirs) {
+        if (trees.some((tree) => dir === tree || dir.startsWith(`${tree}/`))) continue;
+        const result = await invoke(["lsjson", "--files-only", "--hash", "--hash-type", "md5", "--no-mimetype", at(dir), ...common], { timeoutMs: 600_000 });
+        if (result.code === 3) continue;
+        if (result.code !== 0) throw new Error(`listing ${dir}: ${rcloneMessage(result, "rclone lsjson")}`);
+        existingDirs.add(dir);
+        parseListing(result.stdout, dir, files, existingDirs);
+      }
+      return { files, dirs: existingDirs };
+    },
+    async md5() {
+      // Drive reports md5 in the listing; a remote that does not is compared by size only.
+      return undefined;
+    },
+    async mkdir(rel) {
+      await must(["mkdir", at(rel)], `making ${rel}`, { timeoutMs: 300_000 });
+    },
+    // --local-no-check-updated: a transcript that grows during the upload is sent at the
+    // size rclone first saw, which is a byte-exact prefix the next run extends.
+    // --ignore-times: always upload when asked; never decide by modification time.
+    async copy(localPath, rel) {
+      await must(["copyto", localPath, at(rel), "--local-no-check-updated", "--ignore-times", "--retries", "3"], `copying to ${rel}`, { timeoutMs: 6 * 3_600_000 });
+    },
+    // A server-side move. --checksum: an identical file already at the target is
+    // recognised by content, not by its modification time.
+    async move(fromRel, toRel) {
+      await must(["moveto", at(fromRel), at(toRel), "--checksum"], `moving ${fromRel}`, { timeoutMs: 600_000 });
+    },
+  };
+}
+
+/** The names of the rclone remotes configured on this computer, and nothing else about them. */
+export async function rcloneRemotes({ env = process.env, run } = {}) {
+  const binary = run ? "rclone" : locateRclone(env);
+  if (!binary) return { ok: true, installed: false, remotes: [] };
+  const result = await (run || ((args, options) => runRclone(binary, args, { ...options, env })))(["listremotes"], { timeoutMs: 30_000 });
+  if (result.code !== 0) return { ok: false, installed: true, remotes: [], error: rcloneMessage(result, "rclone listremotes") };
+  return { ok: true, installed: true, remotes: result.stdout.split(/\r?\n/).map((line) => line.trim().replace(/:$/, "")).filter(Boolean) };
+}
