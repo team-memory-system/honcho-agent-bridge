@@ -560,6 +560,12 @@ node scripts/cli.mjs backup remotes                                    # rclone 
 - **State and schedule.**
   - State lives in `<data>/backup/`: `settings.json`, `status.json`, `ledger-<destination hash>.json` and `run.lock`. The log is `<data>/logs/backup.log`.
   - The scheduled job is launchd `team-memory-system.backup`, systemd `team-memory-backup.timer` or the Windows task `TeamMemoryBackup`. It runs `backup run --scheduled`, which re-checks the whole destination (`--full`) when the last full check is more than 7 days old.
+- **Alerts.** A notification appears on the computer whose backup has a problem: a scheduled run ended with errors, threw or stopped midway, or there has been no successful run for more than 48 hours with at least two unsuccessful runs since. A single waiting run after a recent success does not alert.
+  - Notifiers: `osascript` on macOS (credited to Script Editor, so its notifications must be allowed), a PowerShell toast on Windows, `notify-send` on Linux. A failed notification is logged as an `alert (...)` line in `backup.log` and never fails the backup.
+  - The nightly run checks when it ends. A daytime check at 10:MM repeats it while the problem lasts, at most once per problem in 4 hours: launchd `team-memory-system.backup-check`, systemd `team-memory-backup-check.timer` or the Windows task `TeamMemoryBackupCheck`. The 백업 screen shows the same problem as a banner.
+  - `backup alert test` shows a sample and `backup alert check` runs the check. The state is `<data>/backup/alert.json` plus `failing` in `status.json`.
+  - `backup schedule on` registers both jobs, so run it again after a `git pull` on another computer.
+- **Finding rclone.** `RCLONE_BIN`, then `PATH`, then the usual install folders, including `~/.local/bin` (macOS, Linux) and `%USERPROFILE%\.local\bin` (Windows). A scheduled job often has a shorter `PATH` than a terminal.
 
 ## Building a distributable bundle
 
