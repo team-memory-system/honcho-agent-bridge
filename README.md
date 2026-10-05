@@ -24,8 +24,9 @@ the installed Honcho source records the official commit and patch checksums.
 
 **Topology.** One Honcho and one database per person; that person's several machines
 all feed the same one. Teammates do not share a database. What is shared is a single
-MCP tool, `chat`, on a second bridge process — so a teammate can ask a question and
-gets an answer, without reading the underlying messages.
+MCP tool, `chat`, on a second bridge process beside the server, which a teammate
+reaches after a Google login through Cloudflare Access — so a teammate can ask a
+question and gets an answer, without reading the underlying messages.
 
 ### What this repository does
 
@@ -49,32 +50,14 @@ gets an answer, without reading the underlying messages.
    `host ...` installs the subscription gateway through its own CLI and supervises
    Ollama. Every chat model Honcho uses goes through the gateway's router; the router
    key comes from the gateway, not from the person installing.
-5. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server. It serves this
-   computer's own recall tools, and relays a teammate's shared bridge
-   (`honcho.mcpBridgeUrl`), so the shared tool definitions live in one place and
-   every shared call is recorded in the bridge's audit log. `bridge connect` writes
-   that address and its three credentials, and keeps them only if the plugin's own
-   MCP server then reaches the bridge with them. What the agent sees depends on what
-   this computer has (`scripts/mcp-shared-tools.mjs`):
-
-   | This computer has | Tool list |
-   | --- | --- |
-   | Its own memory (a server address, a user, an agent with sync on) | The local tools, filtered by `mcp-tools.json` |
-   | Only a shared bridge | The bridge's tools under their own names (`chat`), a pure relay |
-   | Both | The local tools as above, plus the bridge's tools renamed `shared_<name>` (`shared_chat`) |
-   | Neither (the plugin is installed, setup has not run) | No tools |
-
-   With both, a `shared_*` tool's description starts with "Asks the shared memory at
-   &lt;bridge host&gt; (a teammate's memory), not yours.", its input schema is the
-   bridge's, and a call is relayed with the prefix stripped; every other name is
-   answered locally. The local switches never hide or store a shared tool, and the
-   app's switch list (`ALL_TOOLS`) holds local tools only. An unreachable bridge
-   never breaks local recall: its tools are left out of the list (or, if it answered
-   in the last minute, kept with a note that it is unreachable), and a `shared_*`
-   call returns an error naming the bridge. A shared name that would equal a local
-   one is skipped. The CLI's probes pass `--only bridge` (`bridge connect`, `bridge
-   test`, `doctor`'s `shared-bridge` check) or `--only local` (`doctor`'s `mcp`
-   check), so a down bridge still fails its own check.
+5. **Recall.** `scripts/mcp-server.mjs` is a stdio MCP server for this computer's
+   own memory: the local recall tools, filtered by `mcp-tools.json`, and none until
+   setup has given this computer a user peer. A teammate's memory does not go
+   through it. Each teammate's server is a remote MCP server of its own,
+   `team-<name>` at `https://<host>/mcp`, that `teammates connect` adds to Claude
+   Code and Codex, and each client logs in to it itself (see [Asking a teammate's
+   memory](#asking-a-teammates-memory--팀원-기억-연결)). Until 0.3.28 this server
+   relayed a teammate's bridge as `shared_chat`; that relay is gone.
 6. **Recall at the start of work.** `scripts/recall.mjs` is meant for Claude Code's
    SessionStart (`session-start`, on startup and `/clear`) and UserPromptSubmit
    (`prompt`) hooks. At session start it adds the short summary of the last
@@ -182,25 +165,29 @@ gets an answer, without reading the underlying messages.
   `subscription-gateway.ui`; `server prepare` or `host start` there would fetch a
   second gateway into the app directory and run that copy's `install`.
 - **`setup` rebuilds `config.json` from scratch.** Anything it does not own must be
-  carried through explicitly; `RELAY_FIELDS` in `scripts/cli.mjs` is that list for
-  the shared bridge. Before it existed, installing hooks silently disconnected a
-  teammate from the bridge.
-- **A bridge older than `BearerGate` accepts any token at `initialize`.** It only
-  refuses at the first tool call, so `bridge connect` against it reports success
-  with a wrong token. `honcho-selfhost` added the gate on 2026-09-28; a bridge
-  process started before that still runs the old code.
-- **Shared-bridge credentials never go on a command line.** `bridge connect` reads
-  them from `HONCHO_MCP_BEARER_TOKEN`, `CF_ACCESS_CLIENT_ID` and
-  `CF_ACCESS_CLIENT_SECRET`, refuses them as options, and the UI passes them to the
-  CLI through its environment.
-- **Two Cloudflare service tokens, never mixed.** `honcho.accessClientId/Secret`
-  (written by `bridge connect`, cleared by `bridge disconnect`) are the shared
-  bridge's. `honcho.access.{clientId,clientSecret}` is the memory server's own,
-  written only by `setup` from `HONCHO_CF_ACCESS_CLIENT_ID/SECRET`. Every request to
-  `honcho.baseUrl` builds its headers with `honchoHeaders` in
+  carried through explicitly. The shared-bridge fields of 0.3.28 and before
+  (`OLD_RELAY_FIELDS` in `scripts/cli.mjs`) are dropped on purpose, and `bridge
+  disconnect` removes them on a computer that never runs setup again.
+- **The memory server's Access service token.** `honcho.access.{clientId,clientSecret}`
+  is written only by `setup` from `HONCHO_CF_ACCESS_CLIENT_ID/SECRET`, for a server
+  whose Access application also covers `/v3`; a server shared by this app needs
+  none (see [Collecting from another computer](#collecting-from-another-computer)).
+  Every request to `honcho.baseUrl` builds its headers with `honchoHeaders` in
   `scripts/honcho-access.mjs`, and goes through `fetchHoncho`, which follows
   redirects only within that origin so an Access login redirect is seen, not
   followed.
+- **Everyone on the team list can ask about the whole memory.** A shared server's
+  `chat` is pinned to the owner's workspace and peer, and the bridge refuses any
+  other `workspace_id`, peer or filter, but nothing yet limits a question to a
+  project: whoever passes the Access login can ask about anything that peer's
+  memory holds.
+- **An install shared under 0.3.28 or before stops sharing on update.** Its tunnel
+  ran on the host. `server prepare` and `server start` remove that autostart
+  (moving its token into the `.env` when the `.env` has none), and drop `share` from
+  `COMPOSE_PROFILES` while `HONCHO_TUNNEL_TOKEN`, `HONCHO_TEAM_MCP_TOKEN` or
+  `HONCHO_TEAM_PEER` is empty, so the new `tunnel` and `mcp` services never restart
+  in a loop. The result says so in `share` and `warnings`; turn sharing on again
+  with `server share enable` (or `server share join` on a teammate's computer).
 - **Secrets are never in this repository.** Tokens live in the installed private
   `config.json` and `.env`, and in 1Password. `assertNoSecretFields` rejects a host
   profile that carries one. The gateway's router key comes from its `connect-info`,
@@ -279,10 +266,11 @@ npm run ui        # the Team Memory app on localhost
 
 Tests are the contract. Several of them exist specifically to fail when something
 drifts: the tool count in `tests/mcp-server.test.mjs`, the setup and connect forms'
-field names in `tests/ui.test.mjs`, the relay fields surviving `setup apply` in
-`tests/bridge-connect.test.mjs`, the absence of any OS-registration call in
-`tests/host-manager.test.mjs`, and the gateway's router key never appearing in a
-returned result in `tests/gateway.test.mjs` and `tests/server-manager.test.mjs`.
+field names in `tests/ui.test.mjs`, the CLI never printing the Cloudflare API token,
+a tunnel token or an invite in `tests/team-access.test.mjs`, the absence of any
+OS-registration call in `tests/host-manager.test.mjs`, and the gateway's router key
+never appearing in a returned result in `tests/gateway.test.mjs` and
+`tests/server-manager.test.mjs`.
 
 ### Licence
 
@@ -308,6 +296,7 @@ The repository bundles the conversation collectors, setup/diagnostic workflow, a
 - Run on macOS, Windows, and Linux wherever a recent Node.js runtime is available.
 
 - Also send the conversations from chosen folders to a second server, such as the company's shared Honcho (see "Also sending some folders to another server").
+- Let teammates ask one's memory through `chat` after a Google login through Cloudflare Access, and ask theirs the same way (see "Sending to this server from other computers" and "Asking a teammate's memory").
 
 Cross-device database synchronization is intentionally deferred until the personal-memory package is complete.
 
@@ -316,7 +305,9 @@ Cross-device database synchronization is intentionally deferred until the person
 - Node.js 18 or newer.
 - Docker Desktop/Engine with Compose when installing the bundled local Honcho server (`server prepare` starts a closed Docker Desktop on macOS and Windows and waits for its engine), or an existing Honcho API. For your own server on another computer, see [Collecting from another computer](#collecting-from-another-computer).
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
-- Cloudflare WARP, joined to the team, on every computer whatever its features: it is how a computer gets past Cloudflare Access to a server or a teammate's memory on another computer. `prereqs install warp --team <team>` (or 설치 with the team name on the app's 시작하기 screen) downloads Cloudflare's installer into a fresh temporary folder (not `~/Downloads`, which the root installer cannot read), checks its signature (`pkgutil`: Developer ID Installer: Cloudflare, Team ID `68WVV388M8`; on Windows a valid Authenticode signature from Cloudflare), deletes it when that fails, and installs it silently behind the system's own prompt: one macOS password dialog (`osascript … with administrator privileges` running `installer -pkg`) or one Windows UAC prompt (`msiexec /qn`). The same prompt writes Cloudflare's managed configuration with the team (`/Library/Application Support/Cloudflare/mdm.xml` with `organization` and `onboarding: false`, or the msi's `ORGANIZATION`/`ONBOARDING` properties), so the client skips its "1.1.1.1 or Cloudflare One" choice and opens the team login; an existing configuration naming another team is never overwritten. A cancelled prompt returns `cancelled: true`; when no prompt can be shown (no GUI session), the installer window opens instead. Nothing runs with sudo in a terminal. The team join (`warp-cli registration new <team>`, then `warp-cli connect`) follows. A Cloudflare service token is the fallback only for a computer that cannot run WARP.
+- For sharing, the team's owner only: a Cloudflare account with a domain on it, Zero Trust with a Google login method, and an API token (see [What the owner needs in Cloudflare](#what-the-owner-needs-in-cloudflare)). Teammates need only a Google account, and nothing from Cloudflare runs on any computer outside Docker.
+
+`prereqs [--features server,sync,chat]` reports Node.js and git for every feature, and Docker and Ollama for `server`.
 
 The `personal` profile also requires macOS or Windows, git, and a Codex and/or Claude subscription. Docker Desktop and Ollama are fetched by the app when this computer has neither (see [Docker Desktop and Ollama](#docker-desktop-and-ollama)). `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
 
@@ -373,21 +364,24 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 ### Collecting from another computer
 
 The memory server runs on one machine; another computer (a laptop, a work machine)
-sends its conversations there through a Cloudflare Tunnel protected by Cloudflare
-Access. On that other computer, setup needs up to three things:
+sends its conversations there through the server's Cloudflare Tunnel, once the
+server is shared (see [Sending to this server from other
+computers](#sending-to-this-server-from-other-computers-cloudflare--다른-컴퓨터에서-이-서버로-보내기)).
+On that other computer, setup needs two things:
 
 1. **The server's address**, with `--honcho-url https://memory.example.com`.
-2. **The server's API token**, in `HONCHO_API_TOKEN`, when the server requires one.
-3. **An Access service token, only if this computer is not on WARP.** The default
-   is to connect Cloudflare WARP with the team account: Access then lets the device
-   through by identity and nothing more is needed. A machine that cannot run WARP
-   presents a service token instead, in `HONCHO_CF_ACCESS_CLIENT_ID` and
-   `HONCHO_CF_ACCESS_CLIENT_SECRET` (both, or neither).
+2. **The server's gate token** (`server share token` on the server's computer), in
+   `HONCHO_API_TOKEN`.
+
+A shared server's `/v3` and `/health` sit under a Cloudflare Access application that
+lets every request through to the gate, so the gate token is what keeps them closed;
+the other computer needs no login and runs nothing from Cloudflare. Only a server
+whose Access application covers `/v3` too, set up by hand, also needs an Access
+service token, in `HONCHO_CF_ACCESS_CLIENT_ID` and `HONCHO_CF_ACCESS_CLIENT_SECRET`
+(both, or neither).
 
 ```bash
-export HONCHO_API_TOKEN=...                   # the server's bearer token
-export HONCHO_CF_ACCESS_CLIENT_ID=...         # only without WARP
-export HONCHO_CF_ACCESS_CLIENT_SECRET=...     # only without WARP
+export HONCHO_API_TOKEN=...                   # the server's gate token
 node scripts/cli.mjs setup plan --honcho-url https://memory.example.com --agents codex,claude --user-peer <id>
 node scripts/cli.mjs setup apply --honcho-url https://memory.example.com --agents codex,claude --user-peer <id>
 ```
@@ -396,7 +390,7 @@ Setup refuses any of these secrets as command-line options, prints them only as
 `"[redacted]"`, and saves them in the private `config.json` (`honcho.apiToken`,
 `honcho.access`). A later setup without them keeps them while the address stays on
 the same server, and drops them with a warning when it moves to another one. The
-Team Memory app's setup form takes the same three values and hands them to the CLI
+Team Memory app's setup form takes the same values and hands them to the CLI
 through its environment.
 
 The collector, the MCP server, the app and `doctor` all send the bearer token and,
@@ -405,12 +399,8 @@ program. When Access refuses this computer (a 403 from Access, or a redirect to 
 `*.cloudflareaccess.com` login page), `setup plan` warns that the server "is behind
 Cloudflare Access and refused this computer", `doctor`'s `honcho-health` check
 fails with `code: "cloudflare-access"`, and the app says so instead of reporting
-the server as down. Connect WARP with the team account, or add a service token and
-run setup again.
-
-This service token is the memory server's. The one `bridge connect` takes
-(`CF_ACCESS_CLIENT_ID/SECRET`) belongs to someone else's shared bridge, and the two
-never stand in for each other.
+the server as down. Add a service token and run setup again, or have the server's
+owner turn sharing on with `--cloudflare`, which makes the `/v3` application.
 
 ### Server profiles
 
@@ -481,64 +471,86 @@ Three things still assume the gateway is on this computer:
 
 ## Sending to this server from other computers (Cloudflare) / 다른 컴퓨터에서 이 서버로 보내기
 
-A personal server listens only on `127.0.0.1`, so the owner's other computers cannot reach it. Sharing puts two things in front of it, both on the server's computer:
+A personal server listens only on `127.0.0.1`. Sharing puts it behind a Cloudflare Tunnel with three Compose services under the `share` profile, all on the server's computer (see `server/README.md`):
 
-- **The gate** (`server/gate/gate.mjs`), a Compose service under the `share` profile that publishes `127.0.0.1:<gate port>` (8010, or the next free port; kept in the installed `.env` as `HONCHO_GATE_PORT` once chosen). Every request needs `Authorization: Bearer <gate token>`, compared in constant time; only `GET /health` and `/v3/*` are forwarded to the API, bodies stream both ways (dialectic SSE included), and bodies over 20 MB are refused. The gate token is 32 random bytes, generated once into the private `.env` as `HONCHO_GATE_TOKEN`.
-- **A Cloudflare tunnel** (`cloudflared`) from a public hostname to the gate. Cloudflare Access in front of the hostname decides which devices get in at all; the gate token decides which of them may use the API. There is no Tailscale path.
+- **`gate`** (`server/gate/gate.mjs`) publishes `127.0.0.1:<gate port>` (8010, or the next free port; kept in the installed `.env` as `HONCHO_GATE_PORT` once chosen). It has two ways through:
+  - `GET /health` and `/v3/*`, for the owner's other computers, with `Authorization: Bearer <gate token>`, compared in constant time. The gate token is 32 random bytes, generated once into the private `.env` as `HONCHO_GATE_TOKEN`. Bodies stream both ways (dialectic SSE included), and bodies over 20 MB are refused.
+  - `/mcp`, for teammates' agents, only with a verified Cloudflare Access login: `Cf-Access-Jwt-Assertion`, checked against the team's keys and the application's AUD tag, with an email in it. The gate passes the request on to `mcp` with that email.
+- **`mcp`**, honcho-selfhost's MCP bridge, answers `chat` only, as `HONCHO_TEAM_PEER` in `HONCHO_TEAM_WORKSPACE`, and records each call with the caller's email.
+- **`tunnel`**, `cloudflared` in a container, runs the tunnel whose token is `HONCHO_TUNNEL_TOKEN`. Its ingress, set in Cloudflare, is `http://gate:8010`.
 
-### Owner steps in the Cloudflare Zero Trust dashboard
+In Cloudflare the server's hostname has two Access applications. One covers `/v3` and `/health` and lets every request through to the gate, where the gate token is the lock. The other covers the rest of the hostname: it sends people to Google login and lets in only the emails on the team list, and MCP clients log in to it through Access's Managed OAuth. There is no Tailscale, WARP or Mesh path.
 
-1. **Networks → Tunnels → Create a tunnel**, type **Cloudflared**, any name. On the install step, copy the token from the shown command (the long value after `--token`). Do not run that command; the app installs and runs cloudflared itself.
-2. **Public hostname**: `<name>.<your domain>`, service **HTTP**, URL `http://localhost:<gate port>` (`server share status` shows the port, 8010 unless it was taken).
-3. **Access → Applications → Add an application → Self-hosted** on that same hostname, with a policy that allows your WARP device group and/or your email addresses.
-4. For a computer without WARP, create a **service token** (Access → Service credentials) and add a **Service Auth** policy for it on the same application. That computer's collector sends it when `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are set in its environment.
+### What the owner needs in Cloudflare
 
-For a team, an admin can create the tunnel and the Access application and hand the teammate only the tunnel token and the hostname.
+Once, by hand, in the dashboard:
 
-### Turning it on
+1. A domain (zone) on the Cloudflare account. Each server takes one hostname in it: the owner's is `<name>.<zone>`, a teammate's `memory-<name>.<zone>`.
+2. Zero Trust turned on (its team domain is `<team>.cloudflareaccess.com`), with Google under Settings → Authentication → Login methods.
+3. An API token with these permissions:
+   - Account → Cloudflare Tunnel → Edit
+   - Account → Access: Apps and Policies → Edit
+   - Account → Access: Organizations, Identity Providers, and Groups → Read
+   - Zone → DNS → Edit, and Zone → Zone → Read, on that zone
+
+Zero Trust's free plan has 50 seats. A person takes a seat at their first login to any Access application on the account, not when their email goes on the list, and the seats are shared with every other application there. Taking someone off the list does not free their seat; removing the user from Zero Trust's user list does.
+
+### Turning it on / 공유 켜기
 
 ```sh
-# The tunnel token goes in the environment, never on the command line.
-HONCHO_TUNNEL_TOKEN='<token from step 1>' node scripts/cli.mjs server share enable --public-url https://<name>.<your domain>
+# The API token goes in the environment, never on the command line.
+CLOUDFLARE_API_TOKEN='<api token>' node scripts/cli.mjs server share enable --cloudflare --email <owner's Google email> [--name memory] [--zone <zone>] [--idp <id|name>]
 node scripts/cli.mjs server share status --check
 node scripts/cli.mjs server share token     # the gate token, to copy to the other computers
 ```
 
-`enable` needs an installed personal server. It uses `cloudflared` from `PATH`, else `runtime/cloudflared/cloudflared` in the app directory, else downloads the latest release for this platform from `github.com/cloudflare/cloudflared` into that path and checks it with `cloudflared --version`. It writes the tunnel token to `runtime/cloudflared/tunnel-token` (owner-only), adds `share` to `COMPOSE_PROFILES` in the installed `.env` (other profiles are kept), runs `docker compose up -d gate`, and registers a per-user autostart that runs `cloudflared tunnel --no-autoupdate run --token-file <that file>`, with no admin rights:
+`enable --cloudflare` needs an installed personal server and a user peer (`setup apply --user-peer <id>` first: teammates' questions run as that peer). `--email` is needed the first time, `--zone` only when the token sees more than one zone, and `--idp` only when Zero Trust has more than one Google login. Through the API it makes the following, or keeps each one that is already right:
 
-| Platform | Autostart | Logs |
-| --- | --- | --- |
-| macOS | LaunchAgent `~/Library/LaunchAgents/team-memory-system.tunnel.plist` (RunAtLoad, KeepAlive) | `runtime/cloudflared/logs/tunnel.log`, `tunnel.error.log` |
-| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `TeamMemoryTunnel`, a hidden `wscript` running `runtime/cloudflared/tunnel.vbs` | `runtime/cloudflared/logs/tunnel.log` |
-| Linux | systemd user unit `team-memory-tunnel.service` | `runtime/cloudflared/logs/tunnel.log`, `tunnel.error.log` |
+- the tunnel `team-memory-<name>` with the ingress `http://gate:8010`, and a CNAME `<name>.<zone>` to it;
+- the reusable Access policies "Team Memory people" (Allow, exact emails only; the owner's is added) and "Team Memory gate token" (Bypass, everyone);
+- the application `Team Memory <host>` on the hostname: Google only and sent straight there, a 24-hour session, the people policy, and Managed OAuth with dynamic client registration for localhost and loopback redirects and a 336-hour grant;
+- the application on `<host>/v3` and `<host>/health` with the bypass policy.
 
-The public address must be `https://<hostname>` with no path, query or credentials; it is saved in `runtime/share.json`. The tunnel token is needed the first time only; a later `enable` without it keeps the saved file. `server start` brings the gate up by itself while sharing is on, because Compose reads `COMPOSE_PROFILES` from the installed `.env`. `server status` includes `share: {enabled, publicUrl}`.
+Then it writes `HONCHO_TUNNEL_TOKEN`, `HONCHO_ACCESS_TEAM_DOMAIN`, `HONCHO_ACCESS_AUD`, `HONCHO_TEAM_WORKSPACE` and `HONCHO_TEAM_PEER` into the installed `.env`, creates `HONCHO_GATE_TOKEN`, `HONCHO_TEAM_MCP_TOKEN` and `HONCHO_GATE_PORT` when they are missing, adds `share` to `COMPOSE_PROFILES` (other profiles are kept), and runs `docker compose up -d gate mcp tunnel`. Once a call with the API token has worked, the token is saved owner-only in `runtime/cloudflare/api-token`, so the `teammates` commands need it in the environment only the first time. What was made, by id, goes in `runtime/team-access.json`, and the address in `runtime/share.json`. Running `enable` again changes only what is missing or wrong; `cloudflare.changes` lists it.
 
-`server share status --check` also requests `<public address>/health` with the gate token and reports `publicCheck.state`: `ok`; `access` (Cloudflare Access stopped the request: a 403, a redirect to `*.cloudflareaccess.com`, or a `cf-access-*`/`cf-mitigated` header; this computer is not in the allowed WARP group); `token` (a 401 from the gate); `unreachable` (DNS or network failure, or a Cloudflare 502/530/1033 because the tunnel or the gate is down); or `error`.
+`server start` brings the share services up by itself while sharing is on, because Compose reads `COMPOSE_PROFILES` from the installed `.env`. `server status` includes `share: {enabled, publicUrl}`.
 
-`server share disable` removes the autostart, stops the tunnel, stops and removes the gate container, and removes `share` from `COMPOSE_PROFILES`. It keeps the gate token and the tunnel token file, so turning sharing on again keeps every other computer working. `server share rotate` makes a new gate token and recreates the gate; every other computer then needs the new one.
+`server share status` reports by name and state only: `gate`; `tunnel`, where `hostAutostart` means the host tunnel of an older version is still registered; `mcp: {configured, missing, running}`, where `missing` names the settings `/mcp` still needs; and `cloudflare: {managed, joined, host, apiTokenSaved, teammatesShared}`. `--check` also requests `<public address>/health` with the gate token and reports `publicCheck.state`: `ok`; `access` (Cloudflare Access stopped the request: a 403, a redirect to `*.cloudflareaccess.com`, or a `cf-access-*`/`cf-mitigated` header); `token` (a 401 from the gate); `unreachable` (DNS or network failure, or a Cloudflare 502/530/1033 because the tunnel or the gate is down); or `error`.
 
-### Without a domain: Cloudflare Mesh
+`server share disable` stops the tunnel first, then `mcp` and the gate, removes their containers, and removes `share` from `COMPOSE_PROFILES`. It keeps the tokens in the `.env` and changes nothing in Cloudflare (tunnel, hostname, Access applications), so turning sharing on again needs no new invite and keeps every other computer working. `server share rotate` makes a new gate token and recreates the gate; every other computer then needs the new one.
 
-For a server owner with no domain on Cloudflare. Every computer that should reach the server is enrolled in the same Cloudflare One account (see Prerequisites), and Mesh gives each one a fixed address in `100.96.0.0/12` that only devices in that account can reach, from any network.
+### Teammates / 팀원
+
+The owner keeps the team list with the saved API token, or the one in `CLOUDFLARE_API_TOKEN`:
 
 ```sh
-node scripts/cli.mjs server share enable --mesh [--port <n>]
+node scripts/cli.mjs teammates add <email>                                     # may log in and ask
+node scripts/cli.mjs teammates add <email> --share <name> --invite-out <file>   # also shares their own memory
+node scripts/cli.mjs teammates list
+node scripts/cli.mjs teammates remove <email>
+node scripts/cli.mjs teammates unshare <name>
 ```
 
-- **What it does.** It opens the gate (as above, without a tunnel or tunnel token) and turns on `server/host/mesh-forwarder.mjs` under the host supervisor. That forwarder listens on `0.0.0.0:<port>` (8011, or the next free port that is not the gate's), passes a connection on to the gate only when it arrived on a `100.96.0.0/12` address, and drops everything else at once, so the LAN never reaches the gate. If the supervisor is not running, `enable --mesh` starts it, and it comes back after a reboot with the `team-memory-system.host` login item.
-- **The address.** It is `http://100.96.x.y:<port>`, read from WARP's tunnel interface (`warp-cli -j debug network` → `tunnel_iface.name`, then that interface's IPv4). It stays the same until this computer's WARP registration is deleted or redone. `server share status` reports `address-changed` when it differs from the last one shown.
-- **One-time account settings**, done by the account owner:
-  - "Allow all Cloudflare One traffic to reach enrolled devices" (Networking → Mesh). This one exists only in the dashboard.
-  - `PATCH /accounts/{id}/devices/settings` with `{"use_zt_virtual_ip": true, "gateway_proxy_enabled": true, "gateway_udp_proxy_enabled": true}`.
-  - `100.96.0.0/12` in the split-tunnel Include list (Include mode), or not covered by an Exclude entry (Exclude mode; the default `100.64.0.0/10` exclusion covers it).
-  - An agent with the Cloudflare plugin can do the last two.
-- **Windows.** An inbound firewall rule "Team Memory Mesh" (TCP, the port, from `100.96.0.0/12`) is added behind one UAC prompt and kept when Mesh is turned off.
-- **`--check`.** It reports `ok`, `local-only`, `token`, `unreachable`, `no-address` or `error`. `local-only` (the forwarder runs and the gate answers) is what macOS shows, because a request to the computer's own Mesh address goes into the WARP tunnel instead of to the computer itself.
-- **Problem codes** in `mesh.problems`, which the app shows in Korean: `warp-missing`, `warp-not-team`, `warp-disconnected`, `no-mesh-ip`, `split-tunnel-include`, `split-tunnel-exclude`, `firewall-missing`, `forwarder-down`, `host-down`, `host-config-old` (rerun `server prepare --profile personal`), `port-taken`, `address-changed`.
-- **Turning it off.** `server share disable` closes both ways in; `--mesh` or `--tunnel` closes one, and the gate stays while the other is on.
+- `add` puts the email on "Team Memory people", which every server of the team uses. With `--share <name>` it also makes that teammate's server in the owner's account (`memory-<name>.<zone>`, the tunnel `team-memory-<name>` and both applications) and writes an invite to `<file>`, readable only by the user. The invite is `tm1.` followed by base64url JSON: the host, its tunnel token, the team domain, the AUD tag and the team's server list. Because it holds a tunnel token, it goes to the teammate over a private channel; the CLI never prints it, and the app shows it once.
+- `list` reports the emails, the servers and `addressText`, the 팀 주소: one `<name> https://<host>/mcp` line per server, with no secret in it, for teammates who only ask.
+- `remove` takes an email off the list, but never the owner's own. A server that teammate shares stays reachable to the others; `unshare <name>` deletes its applications, hostname and tunnel.
 
-On the other computer, `setup` takes the Mesh address like any other, with the gate token in `HONCHO_API_TOKEN`. `setup plan` warns, and `doctor`'s `honcho-health` check adds `hints`, when that computer's WARP is not connected to an account or its split tunnel leaves out `100.96.0.0/12`.
+### A teammate's own server / 팀원 서버 공유
+
+```sh
+node scripts/cli.mjs server share join --invite-file <file>      # or the code in HONCHO_SHARE_INVITE
+```
+
+`join` needs no Cloudflare account and no API token. It writes the invite's values into the installed `.env` the way `enable --cloudflare` does, starts the same three services, and keeps the team's server list in `runtime/share.json`, which `teammates connect` there offers.
+
+### Turning it on by hand
+
+```sh
+# The tunnel token goes in the environment, never on the command line.
+HONCHO_TUNNEL_TOKEN='<token>' node scripts/cli.mjs server share enable --public-url https://<name>.<your domain>
+```
+
+This is for a tunnel made in the dashboard (Networks → Tunnels → Create a tunnel → Cloudflared; copy the token from the install command, and do not run that command). Its public hostname's service must be `http://gate:8010`, since cloudflared runs beside the gate in Compose. The Access applications are the owner's to make: the gate token still covers `/v3`, and `/mcp` answers 404 until `HONCHO_ACCESS_TEAM_DOMAIN` and `HONCHO_ACCESS_AUD` are in the `.env`. An address on another host than before clears those two. The tunnel token is needed the first time only.
 
 ### On each other computer
 
@@ -548,7 +560,23 @@ Install the plugin, then run setup against the public address with the gate toke
 HONCHO_API_TOKEN='<gate token>' node scripts/cli.mjs setup apply --agents codex,claude --user-peer <id> --honcho-url https://<name>.<your domain>
 ```
 
-The Team Memory app offers the same steps on its server screen (`/api/server/share/*`); the tunnel token typed there reaches the CLI through its environment only.
+The Team Memory app offers all of this on 서버 → 공유: "Cloudflare로 공유 켜기" (the API token, the owner's email, and the zone and name under "token 권한과 주소"), "초대 코드로 공유 켜기", the folded "직접 만든 통로로 켜기", and, for the owner, the 팀원 list with "팀원 더하기", "공유 빼기" and "팀 주소 복사". A token typed there goes to the app's own server only, and no token or invite is logged.
+
+## Asking a teammate's memory / 팀원 기억 연결
+
+A teammate's shared server is a remote MCP server at `https://<host>/mcp`. Claude Code and Codex each keep it as `team-<name>` and log in to it themselves, so no token is written anywhere.
+
+```sh
+node scripts/cli.mjs teammates connect <name> <host|https://host/mcp>
+node scripts/cli.mjs teammates connected
+node scripts/cli.mjs teammates disconnect <name>
+```
+
+- `connect` runs `claude mcp add --transport http --scope user team-<name> https://<host>/mcp` and `codex mcp add team-<name> --url https://<host>/mcp`. The same address again changes nothing, and another address replaces the entry. A client that is not installed is reported, and the other is still done.
+- Log in once in each client. In Claude Code, run `/mcp`, choose `team-<name>` and Authenticate; for Codex, run `codex mcp login team-<name>`. Either one opens Google login through Cloudflare Access, and only an email on the team list gets in. The agent then has that server's `chat`.
+- `connected` lists every team server this computer knows and whether each client has it. It reads the invite's team list, the owner's `team-access.json`, and the `team-*` entries already in `~/.claude.json` and `~/.codex/config.toml`. This computer's own shared server is left out: its agents use their own memory directly.
+- The app's 연결 → 팀원 기억 연결 page does the same: paste the 팀 주소 and press "Claude Code·Codex에 연결"; "Codex 로그인" starts the Codex login.
+- `bridge disconnect` only removes the shared-bridge settings that 0.3.28 and before saved.
 
 ## Also sending some folders to another server (e.g. your company's)
 
@@ -560,7 +588,7 @@ memory:
 ```sh
 # The target's secrets go in the environment, never on the command line.
 export HONCHO_TARGET_API_TOKEN=...                  # when that server requires one
-export HONCHO_TARGET_CF_ACCESS_CLIENT_ID=...        # only behind Cloudflare Access without WARP
+export HONCHO_TARGET_CF_ACCESS_CLIENT_ID=...        # only when Cloudflare Access covers its API
 export HONCHO_TARGET_CF_ACCESS_CLIENT_SECRET=...
 node scripts/cli.mjs target add company --url https://memory.company.example \
   --folders ~/work/acme,~/work/acme-infra --label "ACME" --workspace acme
@@ -732,6 +760,10 @@ Honcho containers ──> gateway router :11400 ──> the gateway's own Codex 
 Honcho containers ──> host Ollama ────────────> Qwen3-Embedding 4B 1536d / 8192-token
 Gateway's own autostart ──────────────────────> gateway screen, adapters and router
 host supervisor's own autostart ──────────────> keeps Qwen resident
+
+while shared (Compose profile share):
+another computer's collector ──> tunnel ──> gate /v3 (gate token) ──────────────> Honcho API
+teammate's agent ──> Access (Google) ──> tunnel ──> gate /mcp ──> mcp (chat) ──> Honcho API
 ```
 
 The queue keeps failed imports and retries them on the next agent Stop hook or an explicit queue drain. Its personal local-server defaults drain every newly queued transcript immediately. Transcript parsing is provider-specific; storage, deduplication, peer configuration, and API writes are shared.
@@ -749,6 +781,8 @@ Codex loads `.mcp.json`; Claude Code loads `.mcp.claude.json`. Both start `scrip
 ```
 
 Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability.
+
+A teammate's `team-<name>` server is not one of these tools: it is a separate remote MCP server in Claude Code and Codex (see [Asking a teammate's memory](#asking-a-teammates-memory--팀원-기억-연결)), and `mcp-tools.json` does not list or switch it.
 
 ## Safety and rollback
 

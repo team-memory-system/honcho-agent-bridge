@@ -10,7 +10,7 @@ Use the deterministic CLI bundled at `<plugin-root>/scripts/cli.mjs`. Resolve `<
 
 Speak to the user in the language they wrote in: progress notes, questions, warnings and summaries alike (Korean for a Korean request). This file and the CLI's JSON are in English; translate what you pass on and never switch to English mid-setup.
 
-The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버), `models` (게이트웨이), `connect` (대화 보내기), `connect/share` (팀원 기억에 묻기). Do not send them to the gateway's own page at 11450.
+The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버, with 공유), `models` (게이트웨이), `connect` (대화 보내기), `connect/share` (팀원 기억 연결). Do not send them to the gateway's own page at 11450.
 
 ## Fixed lines
 
@@ -22,13 +22,6 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | Feature question | Question "이 컴퓨터에서 쓸 기능을 고르세요." with the three options in "First: which features" |
 | Prerequisites all present | 필요한 프로그램이 모두 있습니다. |
 | A required program missing | <프로그램>이 없습니다. 공식 설치 방법(<install.command 또는 install.url>)으로 설치할까요? |
-| WARP install | Cloudflare WARP를 설치합니다. 다른 컴퓨터의 기억 서버와 팀원 기억에 닿게 해 주는 프로그램입니다. |
-| WARP install, before running it | 곧 암호 창이 뜹니다. Mac 암호를 넣으면 WARP가 설치됩니다(Windows는 허용 창에서 예). |
-| WARP installer open (`warp-installer`, the fallback) | WARP 설치 창을 열었습니다. 계속 → 설치를 누르고 Mac 암호를 넣어 주세요. 처음 화면에서 1.1.1.1과 Cloudflare One 중에 고르라고 하면 Cloudflare One을 고르고 팀 이름 <team>을 넣으세요. 끝나면 "했어"라고 말해 주세요. |
-| WARP install cancelled | 설치를 취소했습니다. 다시 하려면 "다시"라고 말해 주세요. |
-| WARP team join | WARP를 같이 쓰는 Cloudflare 계정에 등록합니다. 그 계정의 팀 이름(로그인 주소 `<이름>.cloudflareaccess.com`의 앞부분)을 알려 주세요. 모르면 계정을 만든 사람에게 받고, 내 이메일을 기기 등록 허용 목록에 넣어 달라고 하세요. 계정을 직접 만들었다면 그 이름을 쓰면 됩니다. |
-| WARP login | 브라우저에 팀 로그인 창이 열렸습니다. 팀이 정한 방법(보통 이메일로 받은 코드)으로 로그인해 주세요. 끝나면 "했어"라고 말해 주세요. |
-| WARP login failed ("Enrollment request is invalid" or another error page) | 로그인이 끝나지 않았습니다. 제가 로그인 창을 새로 띄우겠습니다. 이번 창에서 바로 로그인해 주세요. (then run `warp-cli registration new <team>` again; if it fails twice, the email is probably not allowed in the team's device enrollment rules — tell the user to ask whoever runs the Cloudflare account to allow it) |
 | Server plan confirmation | Question "서버를 이렇게 설치합니다. 진행할까요?" whose text lists, one line each and only those in the plan: Docker Desktop 설치 (첫 실행 때 약관 동의와 Mac 암호 필요) / Ollama와 임베딩 모델(Qwen3-Embedding 4B, 약 2.5GB) 받기 / 구독 게이트웨이 설치 (로그인하면 자동으로 켜짐) / 기억 서버 설치 (주소 <apiUrl>), then the Docker license warning: 회사 직원이 250명 이상이거나 매출이 1천만 달러 이상이면 Docker 유료 구독이 필요합니다. Options "진행", "취소" |
 | Before prepare, when it installs Docker | 곧 Docker Desktop 창이 뜹니다. 약관에 동의(Accept)하고, 추천 설정(Use recommended settings)을 고른 뒤 Mac 암호를 넣어 주세요. 로그인이나 설문은 건너뛰어도 됩니다. 끝나면 제가 이어서 진행합니다. |
 | Before prepare otherwise | 서버를 준비합니다. 몇 분 걸릴 수 있습니다. |
@@ -41,10 +34,14 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | Setup plan confirmation | Question "대화 보내기를 이렇게 설정합니다. 진행할까요?" whose text lists the files from `operations`. Options "진행", "취소" |
 | `approve-hook` | Codex를 새로 열면 훅 승인 창이 뜹니다. "Syncing codex conversation to personal memory"만 승인하세요. 승인하기 전에는 Codex 대화가 모이지 않습니다. |
 | `reload-plugins` | 이미 열려 있는 Claude Code 창에서는 `/reload-plugins`를 입력하세요. |
-| Chat connection | 팀원에게 받은 주소와 토큰을 방금 연 앱 화면(<url>)에 넣고 "연결"을 누르세요. 채팅에는 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
-| Chat connected | 팀원 기억에 연결했습니다. 에이전트를 다시 시작하면 <chat 또는 shared_chat> 도구로 물을 수 있습니다. |
+| Chat connection | 팀원에게 받은 팀 주소를 방금 연 앱 화면(<url>)에 붙여 넣고 "Claude Code·Codex에 연결"을 누르세요. 끝나면 "했어"라고 말해 주세요. |
+| Chat login | 로그인이 한 번 필요합니다. Claude Code에서는 `/mcp`를 입력하고 <team-이름>을 골라 Authenticate를 누르세요. Codex는 앱 화면의 "Codex 로그인"을 누르세요. 브라우저가 열리면 팀에 등록된 Google 계정으로 로그인하세요. 끝나면 "했어"라고 말해 주세요. |
+| Chat connected | 팀원 기억에 연결했습니다. 에이전트는 <team-이름> 서버의 chat 도구로 물을 수 있습니다. |
+| Share with Cloudflare (the team's owner) | 방금 연 앱의 서버 → 공유 화면(<url>)에서 "Cloudflare로 공유 켜기"를 고르고, Cloudflare API token과 내 Google 이메일을 넣어 주세요. token은 채팅에 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
+| Share with an invite (a teammate) | 방금 연 앱의 서버 → 공유 화면(<url>)에서 "초대 코드로 공유 켜기"를 고르고, 팀 관리자에게 받은 초대 코드를 넣어 주세요. 초대 코드는 채팅에 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
+| Before adding a teammate | 지금은 등록한 사람이 내 기억 전체에 chat으로 물을 수 있습니다 (프로젝트별 제한은 아직 없음). |
 | Stopped on an error | <단계>에서 멈췄습니다. <오류를 사용자의 말로 옮긴 것> |
-| Done | 설치가 끝났습니다. 켠 기능: <기능들>. 필요하면 나중에 팀 메모리 앱에서 더 켤 수 있습니다: <켠 기능에 해당하는 것만: 다른 컴퓨터에서 쓰기(서버 화면) / 회사 서버에도 보내기, ChatGPT 기록 가져오기(대화 보내기 화면)>. 문제가 생기면 `/memory-doctor`를 입력하세요. |
+| Done | 설치가 끝났습니다. 켠 기능: <기능들>. 필요하면 나중에 팀 메모리 앱에서 더 켤 수 있습니다: <켠 기능에 해당하는 것만: 공유(서버 화면) / 회사 서버에도 보내기, ChatGPT 기록 가져오기(대화 보내기 화면)>. 문제가 생기면 `/memory-doctor`를 입력하세요. |
 
 Use the detected default data directory without asking; ask about it only when the user brings it up.
 
@@ -54,38 +51,32 @@ Ask one question before anything else: which of these three features this comput
 
 - **서버 설치** — 이 컴퓨터에 기억 서버를 설치합니다. 내 다른 컴퓨터의 대화도 이 서버로 모을 수 있습니다. → "Own memory workflow" below, step 1 (the server).
 - **대화 보내기** — 이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 보내고, 에이전트가 내 기억을 꺼내 쓰게 합니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다. → "Own memory workflow" below, steps 2–10, with "Own server on another computer" when the server is elsewhere.
-- **팀원 기억에 묻기** — 에이전트가 팀원이 열어 준 기억에 질문합니다. 팀원에게 받은 주소와 토큰이 필요합니다. → "Asking someone else's memory" below.
+- **팀원 기억에 묻기** — 에이전트가 팀원이 열어 준 기억에 질문합니다. 팀원에게 받은 팀 주소와, 팀에 등록된 내 Google 계정이 필요합니다. → "Asking someone else's memory" below.
 
 With 서버 설치 but not 대화 보내기, install and start the server and skip the hooks. With 대화 보내기 but not 서버 설치, never install a server here; ask for the address of the server they already have. Do them in this order: server, then sync, then chat.
 
-Opening the server to the user's other computers (다른 컴퓨터에서 쓰기), sending some folders to a company server as well, and importing past ChatGPT conversations are not features of this question. Do not ask about them or set them up during the first setup; the "Done" line names them once. Set one up only when the user asks for it: opening the server in "Own server on another computer", a company server in "Also sending some folders to another server", a ChatGPT import on the app's `connect/import` screen. The one exception: 대화 보내기 to a server on another computer needs that server opened first, as "Own server on another computer" describes.
+Opening the server to the user's other computers and teammates (공유), sending some folders to a company server as well, and importing past ChatGPT conversations are not features of this question. Do not ask about them or set them up during the first setup; the "Done" line names them once. Set one up only when the user asks for it: opening the server in "Own server on another computer", a company server in "Also sending some folders to another server", a ChatGPT import on the app's `connect/import` screen. The one exception: 대화 보내기 to a server on another computer needs that server opened first, as "Own server on another computer" describes.
 
 ## Then: required software, before anything else
 
-Once the features are chosen, check the software they need and get it installed first. Do not start the plugin's setup, `server plan` or `bridge connect` while something required is missing.
+Once the features are chosen, check the software they need and get it installed first. Do not start the plugin's setup, `server plan` or `teammates connect` while something required is missing.
 
 1. Node.js 18 or later must exist before the plugin's CLI can run. Check it with the shell (`node --version`). If it is missing, install it from nodejs.org (the LTS installer), or with `brew install node` when Homebrew is already there (macOS), or with `winget install --id OpenJS.NodeJS.LTS -e` (Windows).
-2. Then run `node <plugin-root>/scripts/cli.mjs prereqs --features <chosen,features>`. It reports each item as `required` or `app-installs`, with its `install.command`/`install.url`. Cloudflare WARP is required for every feature: every computer joins the team's WARP, and that is what lets it reach the servers and teammates' memories behind Cloudflare Access.
+2. Then run `node <plugin-root>/scripts/cli.mjs prereqs --features <chosen,features>`. It reports each item as `required` or `app-installs`, with its `install.command`/`install.url`: Node.js and git for every feature, and Docker and Ollama for 서버 설치. Nothing from Cloudflare is installed on any computer.
    - git missing: offer the reported official command, as its own confirmation. Never pipe a downloaded script into a shell. Rerun `prereqs` after.
-   - WARP missing: do not explain it; install it. First say the "WARP team join" line and get the team name (never guess it). Then say the "WARP install" and "WARP install, before running it" lines and run `node <plugin-root>/scripts/cli.mjs prereqs install warp --team <team>`. The team goes into the same install, so WARP never shows its "1.1.1.1 or Cloudflare One" choice. It downloads Cloudflare's signed installer, checks the signature and asks for the password in the system's own dialog, then installs silently. `nextAction.kind: "warp-team-login"` means WARP is installed and opens the team login in the browser by itself: say the "WARP login" line (if no browser window appears, run `warp-cli registration new <team>`); `cancelled: true` gets the "WARP install cancelled" line; `nextAction.kind: "warp-installer"` (no password dialog was possible, so the installer window was opened) gets the "WARP installer open" line and a rerun of `prereqs` once the user says it is done. If macOS asks to allow a VPN configuration when WARP first starts, the user allows it.
-   - WARP installed but not in a team (or already installed before this setup): say the "WARP team join" line. With the team name, run `warp-cli registration new <team>` (it opens a browser login) and say the "WARP login" line; when the user says it is done, run `warp-cli connect`. Never guess the team name. Rerun `prereqs`; it reports the team it is connected to.
    - `app-installs` (Docker Desktop and Ollama for 서버 설치): nothing to do now; `server prepare` installs them.
-   - Never bring up Cloudflare service tokens. They are an advanced fallback for a computer that cannot run WARP, and only when the user asks for that.
 3. The app's 시작하기 screen shows the same check as its first step.
 
 ## Asking someone else's memory
 
-The teammate who shares their memory gives the user two values: an address and a token. WARP (connected to the team, from the step above) gets this computer past Cloudflare Access. The user enters them in the Team Memory app, not in chat.
+A teammate's shared memory is a remote MCP server at `https://<host>/mcp`. The user needs the team's 팀 주소, one `<name> https://<host>/mcp` line per server, which the team's owner copies from 서버 → 공유 ("팀 주소 복사") and which holds no secret. They also need a Google account whose email the owner has put on the team list. Nothing from Cloudflare is installed on this computer.
 
-1. Run `node <plugin-root>/scripts/cli.mjs ui open --screen connect/share`. It starts the local Team Memory app if it is not already running, opens it on that screen, and returns its `url`. Give the user that address as text as well, in case no browser window appeared.
-2. Say the "Chat connection" line. The screen has the address and token fields; the service-token fields sit under "고급: WARP 없이 연결" and stay closed. The screen saves the values only after it has reached the bridge with them, and shows the tools the bridge offers (normally just `chat`).
-3. Never ask the user to paste these values into chat, and never pass them on a command line. The terminal equivalent is `bridge connect --url <address>` with the token in `HONCHO_MCP_BEARER_TOKEN` (and, without WARP only, `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`), set by the user in their own shell.
-4. When the user says it is done, run `node <plugin-root>/scripts/cli.mjs bridge test` and report `connected`, `url` and `tools`. On failure, report the `error` without guessing at values.
-5. Tell the user to restart the agent host so its tool list reloads: Claude Code may use `/reload-plugins`; Codex should start a new session.
+1. Run `node <plugin-root>/scripts/cli.mjs ui open --screen connect/share`. It starts the local Team Memory app if it is not already running, opens it on the 팀원 기억 연결 screen, and returns its `url`. Give the user that address as text as well, in case no browser window appeared.
+2. Say the "Chat connection" line. The screen adds each server to Claude Code and Codex as `team-<name>`. If the user pastes the 팀 주소 into chat instead, that is fine: run `node <plugin-root>/scripts/cli.mjs teammates connect <name> <address>` for each line. A client reported as `missing` is not installed here; say so, and the other one is still connected.
+3. Say the "Chat login" line. Claude Code logs in from `/mcp` (choose `team-<name>`, then Authenticate); a Claude Code session that was open before the connection may need a restart before `team-<name>` shows there. Codex logs in with the screen's "Codex 로그인", or with `codex mcp login team-<name>` in the user's own terminal. The browser goes to Google through Cloudflare Access. An email that is not on the team list is refused there, and only the team's owner can add it.
+4. When the user says it is done, run `node <plugin-root>/scripts/cli.mjs teammates connected` and report, per server, whether Claude Code and Codex have it. Then say the "Chat connected" line.
 
-This path installs no hooks and needs no local Honcho server. `bridge disconnect` removes the saved values.
-
-On a computer that also syncs its own conversations, `bridge connect` adds to what the agent has rather than replacing it. After the restart the agent keeps its own recall tools (`search`, `chat`, `get_peer_context` and the rest) for the user's own memory, and asks the teammate's memory with `shared_chat` (each shared tool is the bridge's tool with `shared_` in front). `bridge test` still reports the bridge's own names (`chat`). If the bridge is unreachable, the user's own tools keep working and only `shared_*` calls fail.
+This path installs no hooks, needs no local Honcho server, and stores no token: each client keeps its own login. `teammates disconnect <name>` takes a server out of both clients. On a computer that also syncs its own conversations, the agent keeps its own recall tools for the user's own memory, and the teammate's memory is the separate `team-<name>` server's `chat`. `bridge disconnect` only removes the shared-bridge settings that 0.3.28 and before saved.
 
 ## Own memory workflow
 
@@ -136,29 +127,32 @@ For a user whose own Honcho already runs on another of their computers (reachabl
 
 1. Install the plugin as usual. Skip `server ...` entirely.
 2. Run `setup plan` with `--honcho-url <that server's address>`. If the plan warns that the address requires an API token, ask the user to set `HONCHO_API_TOKEN` in their own terminal and run `setup apply` there themselves, for example `HONCHO_API_TOKEN=... node <plugin-root>/scripts/cli.mjs setup apply ...`. Never ask for the token in chat or put it on a command line you run.
-3. If the plan warns that the address "is behind Cloudflare Access and refused this computer", the default fix is for the user to connect Cloudflare WARP with the team account and run `setup plan` again. On a machine without WARP, the user sets both `HONCHO_CF_ACCESS_CLIENT_ID` and `HONCHO_CF_ACCESS_CLIENT_SECRET` (an Access service token) in their own terminal and runs `setup apply` there, the same way as the API token. These are not the `CF_ACCESS_CLIENT_*` values `bridge connect` takes.
+3. If the plan warns that the address "is behind Cloudflare Access and refused this computer", that server's Access application covers its API. A server shared through "Cloudflare로 공유 켜기" (or `--cloudflare`, or an invite) lets `/v3` through to the gate token, so sharing it that way fixes this. Otherwise the user sets both `HONCHO_CF_ACCESS_CLIENT_ID` and `HONCHO_CF_ACCESS_CLIENT_SECRET` (an Access service token) in their own terminal and runs `setup apply` there, the same way as the API token.
 4. Continue with `doctor` and `nextSteps` as above.
 
-To make that possible for a personal server on the other computer, share it there first. Ask one question: does the person running the server have a domain on Cloudflare? Without one, use Mesh; with one, either works, and the public address is the established way. Never Tailscale.
+To make that possible for a personal server on the other computer, share it there first (서버 → 공유). Sharing needs a domain on the team owner's Cloudflare account; never Tailscale, WARP or Mesh. Ask one question: does the user run the team's Cloudflare account, or did the owner give them an invite code?
 
-**Without a domain (Mesh).** Every computer involved must be enrolled in the same Cloudflare One account.
-1. The account owner turns on "Allow all Cloudflare One traffic to reach enrolled devices" once (Networking → Mesh in the Cloudflare One dashboard). This has no API, so the user does it. An agent with the Cloudflare plugin can do the rest, with the user's go-ahead: `PATCH /accounts/{id}/devices/settings` `{use_zt_virtual_ip, gateway_proxy_enabled, gateway_udp_proxy_enabled: true}`, and `100.96.0.0/12` in the split-tunnel Include list (read the list, add the entry, write it back) or out of the Exclude list.
-2. On the server's computer run `node <plugin-root>/scripts/cli.mjs server share enable --mesh`. On Windows it asks once for approval to add the firewall rule. Report `mesh.address` and translate every `mesh.problems` entry. `local-only` from `--check` is normal on macOS.
-3. On the other computer, `setup apply --honcho-url <mesh.address>` with the gate token in `HONCHO_API_TOKEN`, as below. If `setup plan` warns about WARP or the split tunnel there, that computer's WARP needs fixing, not the server.
-4. If `server share status` reports `address-changed`, every other computer needs the new address.
+**The team's owner (the Cloudflare account and domain):**
 
-**With a domain (public address, Cloudflare Tunnel plus Access):**
+1. Once, in the Cloudflare dashboard, the user sets up Zero Trust with Google as a login method and makes an API token with Account → Cloudflare Tunnel → Edit, Account → Access: Apps and Policies → Edit, Account → Access: Organizations, Identity Providers, and Groups → Read, and Zone → DNS → Edit and Zone → Zone → Read on the domain.
+2. Run `node <plugin-root>/scripts/cli.mjs ui open --screen server` and say the "Share with Cloudflare" line. The terminal equivalent, in the user's own terminal, is `CLOUDFLARE_API_TOKEN=... node <plugin-root>/scripts/cli.mjs server share enable --cloudflare --email <their Google email>`, with `--zone` when the token sees several zones and `--name` for a first label other than `memory`. Never ask for the API token in chat or pass it as an option; the CLI refuses it. The app keeps it for the teammate commands.
+3. Report `publicUrl` and `cloudflare.changes`. `publicUrl` is the address for the other computers.
+4. When the user asks to add someone, say the "Before adding a teammate" line, then add them on the same screen (팀원 더하기), or run `node <plugin-root>/scripts/cli.mjs teammates add <email>`; an email is not a secret. For a teammate who will share their own memory too, the screen's "이 사람도 자기 기억을 공유" shows an invite code once. In a terminal, `teammates add <email> --share <name> --invite-out <file>` writes it to a file only the user can read. The invite holds a tunnel token: the user passes it to the teammate over a private channel, never through chat, and you never read or print that file. `teammates remove <email>` takes someone off the list, and `teammates unshare <name>` removes a teammate's server. Teammates who only ask get the 팀 주소: "팀 주소 복사", or `addressText` from `teammates list`.
 
-1. The person running the server creates a tunnel in the Cloudflare Zero Trust dashboard (Networks → Tunnels → Create a tunnel → Cloudflared), sets its public hostname's service to `http://localhost:<gate port>` (`server share status` shows the port), and puts an Access application with a WARP-group or email policy on that hostname. For a team, an admin can do this and hand over only the tunnel token.
-2. On the server's computer the user runs `HONCHO_TUNNEL_TOKEN=... node <plugin-root>/scripts/cli.mjs server share enable --public-url https://<hostname>` in their own terminal. Never ask for the tunnel token in chat or pass it as an option; the CLI refuses a token option. The app's server screen does the same with the token kept off the command line.
-3. `server share status --check` reports `publicCheck.state`: `access` means Cloudflare Access did not let this device in (check the WARP group or the policy), `token` a wrong gate token, `unreachable` the tunnel or the gate being down.
-4. The gate token is the `HONCHO_API_TOKEN` for setup on the other computer. The user copies it from the app's server screen, or runs `server share token` in their own terminal; do not run that command yourself, since its output is the secret. `server share disable` turns sharing off and keeps both tokens; `server share rotate` replaces the gate token.
+**A teammate with an invite code:** run `ui open --screen server` and say the "Share with an invite" line. The terminal equivalent, in the user's own terminal, is `node <plugin-root>/scripts/cli.mjs server share join --invite-file <file>`, or with the code in `HONCHO_SHARE_INVITE`. No Cloudflare account or API token is needed.
+
+**A tunnel the user already made**, only when they ask for it: `HONCHO_TUNNEL_TOKEN=... node <plugin-root>/scripts/cli.mjs server share enable --public-url https://<hostname>` in their own terminal, with the tunnel's public hostname pointing at `http://gate:8010`. The Access setup is then theirs, and `/mcp` stays closed until `HONCHO_ACCESS_TEAM_DOMAIN` and `HONCHO_ACCESS_AUD` are set.
+
+**Then, either way:**
+
+1. `server share status --check` reports `publicCheck.state`: `ok`; `access`, where Cloudflare Access stopped `/health` (an Access application made by hand without the `/v3` bypass); `token`, a wrong gate token; or `unreachable`, the tunnel or the gate being down. `mcp.missing` names what `/mcp` still needs.
+2. The gate token is the `HONCHO_API_TOKEN` for setup on the other computer. The user copies it from the app's server screen ("서버 token 복사"), or runs `server share token` in their own terminal; do not run that command yourself, since its output is the secret. `server share disable` turns sharing off, keeps both tokens and leaves Cloudflare as it is; `server share rotate` replaces the gate token.
 
 ## Also sending some folders to another server
 
 When the user wants the conversations from certain folders to also reach another Honcho (usually the company's), add a target. Their own server still receives everything.
 
-1. Ask for the server address, the folders, and the workspace id there. The user sets `HONCHO_TARGET_API_TOKEN` (and, without WARP behind Cloudflare Access, `HONCHO_TARGET_CF_ACCESS_CLIENT_ID`/`_SECRET`) in their own terminal and runs `node <plugin-root>/scripts/cli.mjs target add <id> --url <https://…> --folders <a,b> [--workspace <id>]` there. Never ask for these in chat or pass them as options; the CLI refuses them.
+1. Ask for the server address, the folders, and the workspace id there. The user sets `HONCHO_TARGET_API_TOKEN` (and, when Cloudflare Access covers that server's API, `HONCHO_TARGET_CF_ACCESS_CLIENT_ID`/`_SECRET`) in their own terminal and runs `node <plugin-root>/scripts/cli.mjs target add <id> --url <https://…> --folders <a,b> [--workspace <id>]` there. Never ask for these in chat or pass them as options; the CLI refuses them.
 2. `target add` checks the server first. Report its `warnings` (a folder that does not exist yet) and its `note`: past conversations are not sent until the user asks for `target backfill <id> --since YYYY-MM-DD`. Run a backfill only when the user asks.
 3. `target test <id>` and `doctor` (check `target-<id>`) diagnose it; `target set <id> --folders … | --enabled false` changes or pauses it; `target remove <id>` removes it.
 
@@ -169,7 +163,8 @@ Only Codex and Claude Code sessions whose first working directory is inside a ta
 - Preserve unrelated hooks and settings. The CLI removes only entries bearing its managed markers and creates timestamped backups before rewriting existing files.
 - Never display API tokens, bearer tokens, or secret environment values.
 - Never put the gateway's router key on a command line or in chat. `server prepare` writes it into the installed private `.env`, and no result prints it. The opt-in live verification reads it there inside the process, sends it only to this machine's router, discards the completion response body, and reports only success/model.
-- The sharing this version supports is connecting to someone else's shared bridge and sending chosen folders to a target the user adds explicitly. Do not add targets, folders or backfills the user did not ask for, and do not add cross-device synchronization.
+- The sharing this version supports is asking teammates' memories (`teammates connect`), opening this computer's memory to the user's other computers and the team (서버 → 공유), and sending chosen folders to a target the user adds explicitly. Do not add teammates, targets, folders or backfills the user did not ask for, and do not add cross-device synchronization.
+- Never ask for, read or print a Cloudflare API token, a tunnel token or an invite code. The user types them into the app or sets them in their own terminal.
 - Do not claim Honcho was installed when `server start`, `server status`, or `doctor` reports it unreachable. For `personal`, success also requires the gateway's router answering (`host.gateway.router.ok`), healthy Ollama, and the Qwen alias resident.
 - Use the same profile for the complete lifecycle. `server status --profile personal` covers Docker, the gateway and Ollama; `server stop --profile personal` stops the containers and the Ollama supervisor while preserving configuration and Docker volumes. The gateway keeps running: it has its own lifecycle, and `node <app-directory>/runtime/subscription-gateway/gateway/cli.mjs uninstall` is what removes it.
 - `server stop` preserves Docker volumes. Never run `docker compose down -v` or otherwise delete memory data.

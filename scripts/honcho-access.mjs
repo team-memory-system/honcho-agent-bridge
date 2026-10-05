@@ -8,9 +8,8 @@
 // builds its headers here, so the collector, the MCP server, the app and setup's
 // probes send the same thing.
 //
-// These are credentials for the memory server only. The shared-bridge connection
-// (config.honcho.accessClientId/Secret, written by `bridge connect`) is a different
-// server's token and is never read here.
+// These are credentials for the memory server only. A teammate's memory is reached
+// by Claude Code and Codex themselves, through their own Access login.
 import { publicUrl } from "./redact.mjs";
 
 /** Where setup (and the collector, through its hook environment) reads the service token. */
