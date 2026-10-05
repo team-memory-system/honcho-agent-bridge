@@ -555,6 +555,7 @@ node scripts/cli.mjs backup remotes                                    # rclone 
 - **Archived sessions and earlier versions.**
   - When a session is archived, its copy in the normal date folder moves into `_아카이브/`. If it differs from the archived file, it is kept as `<stem>.pre-archive.jsonl`, because Codex rewrites a file when it archives it.
   - If a copy under a date folder's `_원본버전/` is the same bytes as this computer's file, or its beginning, it is moved onto the normal path. Nothing is uploaded again.
+  - On Google Drive these moves go up to 100 per `rclone backend moveid` call. Each one counts only when a listing shows the same file id under its new name. Anything not confirmed is tried again with `moveto`, and a move that still fails is an error and stays out of the ledger. Other remotes, files listed without an id and moves onto a taken name use one `moveto` each. Never put a `--drive-*` flag on a `moveid` call without `--server-side-across-configs`: rclone then copies the file and trashes the original instead of moving it.
 - **연결 대기.** If the folder's drive is not mounted, or the remote does not answer, the run waits. It never writes to the internal disk instead.
 - **State and schedule.**
   - State lives in `<data>/backup/`: `settings.json`, `status.json`, `ledger-<destination hash>.json` and `run.lock`. The log is `<data>/logs/backup.log`.
