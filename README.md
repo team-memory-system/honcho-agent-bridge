@@ -1,8 +1,8 @@
 # Honcho Agent Bridge
 
 Collector, installer and plugin for one person's self-hosted Honcho memory. Reads
-Codex / Claude Code / agy / ChatGPT conversations and writes them into that
-person's Honcho.
+Codex / Claude Code / agy / Grok CLI / ChatGPT conversations and writes them into
+that person's Honcho.
 
 ## Read this first (for agents)
 
@@ -237,6 +237,28 @@ gets an answer, without reading the underlying messages.
   turns as sent before the hook goes on. No command does this; that PC's state was
   written by a one-off script over the collector's own parsers and
   `turnHashCandidates`.
+- **Grok CLI also runs Claude Code's hooks.** It loads `~/.claude/settings.json`
+  too, and hands those hooks its own `updates.jsonl` as `transcript_path`; `main.mjs`
+  drops such a payload for claude and codex. Hooks there that need environment
+  variables fail inside Grok with "required env var(s) not set", which Grok ignores.
+  `[compat.claude] hooks = false` in `~/.grok/config.toml` would stop that, but it
+  turns off every other Claude hook in Grok as well.
+- **A Grok hook command must not contain `$` or `${…}`.** Grok checks environment
+  references before any shell starts, so in August all 392 runs of such a hook
+  failed. Source an env file by absolute path instead. The owner's hook is
+  `~/.grok/hooks/honcho-sync.json`, which needs no trust approval:
+  `/bin/sh -lc 'set -a; . /Users/<you>/.config/codex-honcho-sync/.env; set +a; exec
+  /opt/homebrew/bin/node /Users/<you>/…/scripts/main.mjs --provider grok'`.
+- **Grok's transcript is not the file its hook names.** The payload's
+  `transcript_path` is `updates.jsonl`; the collector reads `chat_history.jsonl`
+  beside it, and a session without one queues nothing. A turn is identified by
+  `grok-<session id>` plus line number and role. Typed prompts are the
+  `<user_query>` lines; the `<user_info>` line and every line with a
+  `synthetic_reason` are Grok's own and are dropped. Whether `/compact` rewrites
+  `chat_history.jsonl`, which would shift those line numbers, has not been checked.
+- **agy's hook lives in `~/.gemini/config/hooks.json`** (the named hook
+  `honcho-write`). Its payload keys are camelCase, such as `transcriptPath`, and
+  `normalizeHookInput` in `main.mjs` maps them.
 - **A new server does not assume 8001 and 4173 are free.** `server prepare` picks the
   first free port from each (another Honcho or an SSH tunnel often holds 8001) and
   writes `HONCHO_API_PORT` / `HONCHO_DASHBOARD_PORT` into the installed `.env`; an
@@ -249,7 +271,7 @@ gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 224 tests, no network, no Docker
+npm test          # 422 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # the Team Memory app on localhost
@@ -280,7 +302,7 @@ The repository bundles the conversation collectors, setup/diagnostic workflow, a
 
 ## Current scope
 
-- Capture Codex and Claude Code conversations into one personal Honcho workspace.
+- Capture Codex, Claude Code, agy and Grok CLI conversations from their Stop hooks into one personal Honcho workspace, and import a ChatGPT export once.
 - Recall memory through the Honcho tools exposed by the bundled MCP server: 19 recall tools by default, and 12 memory-changing tools once enabled.
 - Detect installed agents, preview setup changes, preserve unrelated settings, and create backups.
 - Run on macOS, Windows, and Linux wherever a recent Node.js runtime is available.
@@ -603,13 +625,16 @@ node scripts/cli.mjs backup remotes                                    # rclone 
 
 - **What is copied.**
   - Main transcripts: Claude Code `~/.claude/projects/*/<session>.jsonl` and Codex `~/.codex/sessions/**/rollout-*.jsonl`.
+  - agy: `transcript_full.jsonl` and `transcript.jsonl` from `~/.gemini/<product>/brain/<conversation>/.system_generated/logs/`, where `<product>` is `antigravity-cli`, `antigravity` or `antigravity-ide`.
+  - Grok CLI: `chat_history.jsonl` and `updates.jsonl` from `~/.grok/sessions/<encoded working folder>/<session>/`.
   - Each agent's `history.jsonl`.
   - Claude Code memory notes.
 
-  Subagent transcripts, tool results and runtime state are not copied. Codex archived sessions (`~/.codex/archived_sessions`) are copied under `codex/_아카이브/`. Collection never reads them.
+  Subagent transcripts, tool results and runtime state are not copied; `--dry-run --verbose` only counts them (`agy/other`, `grok/other`, and Grok's search index as `grok/search-index`). Codex archived sessions (`~/.codex/archived_sessions`) are copied under `codex/_아카이브/`. Collection never reads them.
 - **Where.**
   - Transcripts go to `<folder>/대화/<agent>/YYYY/MM/DD/<original file name>`. The date is the day the conversation started, in Korea time. A file stays in that folder while the conversation goes on.
-  - `history.jsonl` goes to `<agent>/_부속자료/<device>/history.jsonl`.
+  - agy and Grok name every conversation's files alike, so theirs go one folder deeper: `대화/<agy|grok>/YYYY/MM/DD/<conversation id>/<original file name>`. agy's start is the first `created_at` in the transcript; Grok's is `summary.json`'s `created_at`, else the time in its UUIDv7 session id, else the first line of `updates.jsonl`.
+  - `history.jsonl` goes to `<agent>/_부속자료/<device>/history.jsonl`; agy's comes from `~/.gemini/antigravity-cli/history.jsonl`.
   - Memory notes go to `claude/_부속자료/projects/<project>/memory/`.
   - The device id comes from the host name and is fixed when a destination is first saved. Set a short one with `--device`, because it becomes part of file names.
 - **Several computers, one destination.** There are no device folders. Backup only copies: it never deletes anything at the destination and never syncs. When the destination file differs:
