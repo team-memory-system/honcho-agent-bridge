@@ -3,7 +3,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { accountGroups, backendName, modelGroups, sharedGroups } from "../ui/lib/accounts.js";
+import {
+  accountGroups,
+  backendName,
+  callbackHost,
+  loginEnded,
+  loginPanelText,
+  loginPrompt,
+  loginSubmission,
+  modelGroups,
+  pendingLogin,
+  sharedGroups,
+  signInLink,
+} from "../ui/lib/accounts.js";
 
 const account = (id, backend) => ({ id, backend });
 
@@ -95,4 +107,85 @@ test("models are grouped by the backend of the account that offers them", () => 
     ["기타", ["mystery"]],
   ]);
   assert.deepEqual(modelGroups(undefined, undefined), []);
+});
+
+// A login whose browser is on another computer than the gateway. The shapes are
+// the gateway's own (subscription-gateway ui/server.mjs createLogins and its
+// /api/login, /api/login/code, /api/login/callback routes).
+const CODEX_SIGN_IN = "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_x&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid&state=st4te";
+const CLAUDE_SIGN_IN = "https://claude.com/cai/oauth/authorize?code=true&client_id=c&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s";
+const prompt = (backend, input, extra = {}) => ({ backend, url: backend === "codex" ? CODEX_SIGN_IN : CLAUDE_SIGN_IN, input, running: true, startedAt: "2026-10-05T14:00:00.000Z", ...extra });
+
+test("a gateway from before the login panel sends no prompt, and the screen keeps its old notice", () => {
+  // POST /api/login and /api/accounts/add from that gateway.
+  const login = { ok: true, started: true, accountId: "codex-1", backend: "codex", pid: 4000, logPath: "/x/login-codex-1.log" };
+  assert.equal(loginPrompt(login.prompt), null);
+  assert.equal(loginPrompt({ ok: true, account: { id: "codex-1" }, login }.login?.prompt), null);
+  for (const value of [undefined, null, "", "prompt", [], 3]) assert.equal(loginPrompt(value), null, String(value));
+  // Its status has no pendingLogin: nothing to pick up.
+  assert.equal(pendingLogin([{ id: "codex-1", backend: "codex", login: { loggedIn: false } }]), null);
+  assert.equal(pendingLogin(undefined), null);
+});
+
+test("Codex asks for the address its browser stopped at, Claude for its code", () => {
+  const codex = loginPanelText("callback", CODEX_SIGN_IN);
+  assert.equal(codex.kind, "callback");
+  assert.equal(codex.label, "브라우저가 멈춘 주소");
+  assert.match(codex.boxNote, /localhost:1455 주소에서 멈추면/);
+  assert.equal(codex.placeholder, "http://localhost:1455/auth/callback?code=…");
+
+  const claude = loginPanelText("code", CLAUDE_SIGN_IN);
+  assert.equal(claude.kind, "code");
+  assert.equal(claude.label, "코드");
+  assert.match(claude.boxNote, /코드/);
+
+  // Claude on a Windows gateway takes nothing back: a link and no box.
+  const neither = loginPanelText(null, CLAUDE_SIGN_IN);
+  assert.equal(neither.kind, null);
+  assert.equal(neither.label, undefined);
+  assert.match(neither.linkNote, /게이트웨이가 있는 컴퓨터/);
+
+  // The callback's port is the login's own; before the link arrives, Codex's usual one.
+  assert.equal(callbackHost(CODEX_SIGN_IN.replace("1455", "1457")), "localhost:1457");
+  assert.match(loginPanelText("callback", CODEX_SIGN_IN.replace("1455", "1457")).boxNote, /localhost:1457/);
+  assert.match(loginPanelText("callback", null).boxNote, /localhost:1455/);
+  assert.equal(callbackHost(CLAUDE_SIGN_IN), "", "Claude's redirect is not a localhost callback");
+});
+
+test("only an http(s) sign-in address becomes a link", () => {
+  assert.equal(signInLink(CODEX_SIGN_IN), CODEX_SIGN_IN);
+  assert.equal(signInLink(CLAUDE_SIGN_IN), CLAUDE_SIGN_IN);
+  for (const bad of ["javascript:alert(1)//authorize", "data:text/html,x", "not a url", "", null, undefined]) {
+    assert.equal(signInLink(bad), null, String(bad));
+  }
+});
+
+test("what is typed goes to the gateway route for that login, trimmed", () => {
+  assert.deepEqual(loginSubmission("code", "claude-1", "  abc#def \n"), { path: "/login/code", body: { account: "claude-1", code: "abc#def" } });
+  const address = "http://localhost:1455/auth/callback?code=ac_1&state=st4te";
+  assert.deepEqual(loginSubmission("callback", "codex-1", ` ${address} `), { path: "/login/callback", body: { account: "codex-1", address } });
+  assert.equal(loginSubmission("code", "claude-1", "   "), null);
+  assert.equal(loginSubmission("callback", "", address), null);
+  assert.equal(loginSubmission(null, "claude-1", "abc"), null);
+});
+
+test("a login that ended without logging in says why; one still waiting says nothing", () => {
+  assert.equal(loginEnded(prompt("claude", "code")), "");
+  assert.equal(loginEnded(null), "");
+  assert.equal(
+    loginEnded(prompt("claude", null, { running: false, exitCode: 1, message: "Login failed: Request failed with status code 400" })),
+    "로그인이 끝났지만 되지 않았습니다: Login failed: Request failed with status code 400. 로그인을 다시 누르세요.",
+  );
+  assert.equal(loginEnded(prompt("codex", null, { running: false, exitCode: "SIGTERM", message: "" })), "로그인이 끝났지만 되지 않았습니다. 로그인을 다시 누르세요.");
+});
+
+test("a login the gateway still waits on is picked up; ended, finished and absent ones are not", () => {
+  const accounts = [
+    { id: "codex-1", backend: "codex", login: { loggedIn: true }, pendingLogin: prompt("codex", "callback") },
+    { id: "claude-1", backend: "claude", login: { loggedIn: false }, pendingLogin: prompt("claude", null, { running: false, exitCode: 1 }) },
+    { id: "codex-2", backend: "codex", login: { loggedIn: false }, pendingLogin: null },
+    { id: "claude-2", backend: "claude", login: { loggedIn: false }, pendingLogin: prompt("claude", "code") },
+  ];
+  assert.deepEqual(pendingLogin(accounts), { accountId: "claude-2", backend: "claude", prompt: accounts[3].pendingLogin });
+  assert.equal(pendingLogin(accounts.slice(0, 3)), null);
 });

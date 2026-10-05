@@ -65,3 +65,101 @@ export function modelGroups(models, accounts) {
   }
   return byBackend(groups).map(([backend, ids]) => ({ backend, label: backendName(backend), models: [...ids] }));
 }
+
+// ── A login the gateway is waiting on ───────────────────────────────────────
+//
+// The gateway (subscription-gateway ui/server.mjs, createLogins) answers
+// POST /api/login and /api/accounts/add with a `prompt`, and puts the same shape
+// on each account in /api/status as `pendingLogin`:
+//
+//   { backend, url, input: "code" | "callback" | null, running, startedAt, exitCode?, message? }
+//
+// `url` is the CLI's own sign-in link. When the browser is on another computer
+// than the gateway, the end of the login comes back by hand: Claude's code
+// (POST /api/login/code) or the localhost address Codex's sign-in stopped at
+// (POST /api/login/callback). A gateway from before that sends no prompt, and the
+// screen keeps its old notice.
+
+const CODEX_CALLBACK_HOST = "localhost:1455";
+
+/** The prompt in a login answer, or null from a gateway that sends none. */
+export function loginPrompt(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+/** Only an http(s) address becomes a link. */
+export function signInLink(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Where Codex's sign-in sends the browser back to, read from its redirect_uri. */
+export function callbackHost(url) {
+  try {
+    const redirect = new URL(new URL(String(url || "")).searchParams.get("redirect_uri") || "");
+    return redirect.protocol === "http:" && redirect.host ? redirect.host : "";
+  } catch {
+    return "";
+  }
+}
+
+/** The words of the login panel, and the box it shows: `kind` is "code", "callback" or null. */
+export function loginPanelText(input, url) {
+  const intro = "브라우저에 열린 로그인 창에서 로그인하세요. 끝나면 이 화면이 알아서 연결합니다.";
+  if (input === "code") {
+    return {
+      kind: "code",
+      intro,
+      linkNote: "창이 안 열렸으면 이 링크를 여세요.",
+      boxNote: "로그인 뒤 코드가 나오면 복사해 붙여 넣으세요.",
+      label: "코드",
+      placeholder: "로그인 페이지에 나온 코드",
+      sent: "코드를 보냈습니다. 확인하는 중입니다…",
+    };
+  }
+  if (input === "callback") {
+    const host = callbackHost(url) || CODEX_CALLBACK_HOST;
+    return {
+      kind: "callback",
+      intro,
+      linkNote: "창이 안 열렸으면 이 링크를 여세요.",
+      boxNote: `로그인 뒤 브라우저가 ${host} 주소에서 멈추면 주소창의 주소를 통째로 붙여 넣으세요.`,
+      label: "브라우저가 멈춘 주소",
+      placeholder: `http://${host}/auth/callback?code=…`,
+      sent: "주소를 보냈습니다. 확인하는 중입니다…",
+    };
+  }
+  // Claude on a Windows gateway: its login cannot take the code back.
+  return { kind: null, intro, linkNote: "창이 안 열렸으면 이 링크를 게이트웨이가 있는 컴퓨터의 브라우저에서 여세요." };
+}
+
+/** The gateway call that hands back what was typed into the panel's box, or null for nothing to send. */
+export function loginSubmission(kind, accountId, value) {
+  const text = String(value || "").trim();
+  if (!text || !accountId) return null;
+  if (kind === "code") return { path: "/login/code", body: { account: accountId, code: text } };
+  if (kind === "callback") return { path: "/login/callback", body: { account: accountId, address: text } };
+  return null;
+}
+
+/** Why a login the gateway held has ended without logging in; "" while it still waits. */
+export function loginEnded(prompt) {
+  if (!prompt || prompt.running !== false) return "";
+  const message = String(prompt.message || "").trim();
+  return `로그인이 끝났지만 되지 않았습니다${message ? `: ${message}` : ""}. 로그인을 다시 누르세요.`;
+}
+
+/** The first login the gateway is still waiting on, for a screen that did not start it. */
+export function pendingLogin(accounts) {
+  for (const account of Array.isArray(accounts) ? accounts : []) {
+    const prompt = loginPrompt(account?.pendingLogin);
+    if (account?.id && prompt?.running === true && !account.login?.loggedIn) {
+      return { accountId: account.id, backend: account.backend || prompt.backend || "", prompt };
+    }
+  }
+  return null;
+}

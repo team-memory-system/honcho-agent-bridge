@@ -124,6 +124,34 @@ test("the dashboard and the gateway each receive their own paths", async () => {
   assert.equal((await send("/api/gw/health")).status, 400, "only the gateway's API is relayed");
 });
 
+test("a login step reaches the gateway without an Origin, and its refusal comes back as it said it", async () => {
+  // The gateway takes a POST only with no Origin or one equal to http://<Host>;
+  // the relay sends none, and Host is the gateway's own.
+  const seen = [];
+  const refusing = await listen(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    seen.push({ url: request.url, headers: request.headers, body: JSON.parse(raw) });
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: false, error: "localhost:1455/auth/callback 로 시작하는 주소가 아닙니다" }));
+  });
+  const previous = process.env.GATEWAY_UI_URL;
+  process.env.GATEWAY_UI_URL = `http://127.0.0.1:${refusing.port}`;
+  try {
+    const response = await send("/api/gw/api/login/callback", { method: "POST", body: { account: "codex-1", address: "http://localhost:9/x" } });
+    assert.equal(response.status, 400);
+    assert.deepEqual(response.body, { ok: false, error: "localhost:1455/auth/callback 로 시작하는 주소가 아닙니다" });
+    assert.equal(seen[0].url, "/api/login/callback");
+    assert.deepEqual(seen[0].body, { account: "codex-1", address: "http://localhost:9/x" });
+    assert.equal(seen[0].headers.origin, undefined);
+    assert.equal(seen[0].headers.host, `127.0.0.1:${refusing.port}`);
+    assert.equal(seen[0].headers["content-type"], "application/json");
+  } finally {
+    process.env.GATEWAY_UI_URL = previous;
+    refusing.server.close();
+  }
+});
+
 test("a program that is down is reported as down, not as an empty answer", async () => {
   const previous = process.env.GATEWAY_UI_URL;
   process.env.GATEWAY_UI_URL = "http://127.0.0.1:9";

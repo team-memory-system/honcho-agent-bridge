@@ -4,7 +4,7 @@
 // the memory server uses is a server setting, on the 서버 screen. Everything is
 // the gateway's own API; this page only puts it in one place.
 import { cli, gateway } from "../lib/api.js";
-import { accountGroups, backendName, modelGroups, sharedGroups } from "../lib/accounts.js";
+import { accountGroups, backendName, loginEnded, loginPanelText, loginPrompt, loginSubmission, modelGroups, pendingLogin, sharedGroups, signInLink } from "../lib/accounts.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { ago, number } from "../lib/format.js";
 import { app, go, refreshStatus } from "../lib/state.js";
@@ -34,6 +34,8 @@ export default {
     );
 
     let report = null;
+    // The login this screen waits on: { accountId, backend, since, prompt, view }.
+    // `prompt` is null from a gateway that sends none, which keeps the old notice.
     let waiting = null;
     let timer = null;
     // The advanced part stays open across redraws once someone opened it.
@@ -54,15 +56,35 @@ export default {
       const error = await load();
       if (!report) return drawDown(error);
       const accounts = report.accounts || [];
+      // A login the gateway still waits on, started before this screen opened.
+      if (!waiting) {
+        const found = pendingLogin(accounts);
+        if (found) beginWaiting(found.accountId, found.backend, found.prompt);
+      }
       const serving = new Set(report.servingAccounts || []);
       const models = report.models?.models || [];
+      const typing = typingIn(waiting?.view?.root);
       clear(body,
-        waiting ? loginPanel() : null,
+        waiting ? (waiting.view ? waiting.view.root : loginPanel()) : null,
         overview(accounts, serving),
         accountsSection(accounts, serving),
         modelsSection(models, accounts),
         servicesSection(report.services || []),
       );
+      typing();
+    }
+
+    // Redrawing moves the login panel, the same element, back into place; the
+    // box it holds keeps its text, and gets its caret back here.
+    function typingIn(root) {
+      const active = document.activeElement;
+      if (!root || !active || !root.contains(active)) return () => {};
+      const { selectionStart, selectionEnd } = active;
+      return () => {
+        if (!active.isConnected) return;
+        active.focus({ preventScroll: true });
+        try { active.setSelectionRange(selectionStart, selectionEnd); } catch {}
+      };
     }
 
     function drawDown(error) {
@@ -158,7 +180,7 @@ export default {
             : login.cliAvailable ? button("로그인", { kind: "small primary", onClick: (event) => busy(event.currentTarget, async () => {
               const result = await gateway.post("/login", { account: account.id });
               if (result.ok === false) throw new Error(result.error);
-              startWaiting(account.id, account.backend);
+              startWaiting(account.id, account.backend, result.prompt);
             }) }) : null,
           button("", { kind: "small icon-only quiet danger", iconName: "trash", title: "계정 빼기", onClick: async (event) => {
             const ok = await confirmSheet({
@@ -251,35 +273,163 @@ export default {
     async function addAccount(backend) {
       const result = await gateway.post("/accounts/add", { backend });
       if (!result.ok) throw new Error(result.error || "계정을 추가하지 못했습니다.");
-      startWaiting(result.account.id, backend);
+      startWaiting(result.account.id, backend, result.login?.prompt);
     }
 
-    function startWaiting(accountId, backend) {
-      waiting = { accountId, backend, since: Date.now() };
+    function startWaiting(accountId, backend, prompt) {
+      beginWaiting(accountId, backend, prompt);
       draw();
+    }
+
+    function beginWaiting(accountId, backend, prompt) {
+      const current = { accountId, backend, since: Date.now(), prompt: loginPrompt(prompt), view: null };
+      waiting = current;
+      if (current.prompt) {
+        current.view = loginView(current);
+        updateLoginView(current, current.prompt);
+      }
       clearInterval(timer);
-      timer = setInterval(async () => {
-        if (!waiting) return clearInterval(timer);
-        if (Date.now() - waiting.since > LOGIN_WAIT_MS) {
-          waiting = null;
-          clearInterval(timer);
-          toast("로그인을 5분 동안 기다렸지만 끝나지 않았습니다. 다시 시도하세요.", "bad");
+      timer = setInterval(() => poll(current), 3000);
+    }
+
+    function stopWaiting() {
+      waiting = null;
+      clearInterval(timer);
+    }
+
+    async function poll(current) {
+      if (!current || waiting !== current) return;
+      if (Date.now() - current.since > LOGIN_WAIT_MS) {
+        stopWaiting();
+        // A gateway that holds the login ends it too, so it does not come back as still waiting.
+        if (current.prompt) await gateway.post("/login/cancel", { account: current.accountId }).catch(() => {});
+        toast("로그인을 5분 동안 기다렸지만 끝나지 않았습니다. 다시 시도하세요.", "bad");
+        draw();
+        return;
+      }
+      try {
+        const next = await gateway.status();
+        if (waiting !== current) return;
+        const account = (next.accounts || []).find((item) => item.id === current.accountId);
+        if (account?.login?.loggedIn) {
+          stopWaiting();
+          const result = await gateway.post("/connect", {}).catch((error) => ({ ok: false, error: error.message }));
+          toast(result.ok ? `${backendName(current.backend)} 계정을 연결했습니다` : `로그인은 됐지만 연결하지 못했습니다: ${result.error}`, result.ok ? "" : "bad");
           draw();
+          refreshStatus();
           return;
         }
+        if (current.prompt && account?.pendingLogin) updateLoginView(current, account.pendingLogin);
+      } catch {}
+    }
+
+    // The login panel of a gateway that sends a prompt. Built once per login and
+    // updated in place, so the status poll never wipes what is being typed. On the
+    // gateway's own computer the browser finishes the login by itself; from
+    // another one this is where the link is, and where Claude's code or the
+    // address Codex's browser stopped at goes back.
+    function loginView(current) {
+      const intro = h("div", { class: "muted", style: { fontSize: "13px" } });
+      const linkNote = h("div", { class: "muted", style: { fontSize: "13px", marginTop: "10px" } });
+      const link = h("a", { class: "mono", target: "_blank", rel: "noopener noreferrer", style: { wordBreak: "break-all" } });
+      const copy = button("", { kind: "small icon-only quiet", iconName: "copy", title: "링크 복사", onClick: async () => {
+        if (!view.url) return;
+        await copyText(view.url);
+        toast("링크를 복사했습니다");
+      } });
+      const boxNote = h("div", { class: "muted", style: { fontSize: "13px", marginTop: "10px" } });
+      const label = h("span", {});
+      const input = h("input", { class: "input", autocomplete: "off", spellcheck: "false" });
+      const send = button("보내기", { kind: "primary", type: "submit" });
+      const form = h("form", { style: { display: "flex", gap: "8px", alignItems: "flex-end", marginTop: "6px" } },
+        h("label", { class: "field", style: { flex: "1", minWidth: "0" } }, label, input), send);
+      const status = h("div", { role: "status", style: { fontSize: "13px", marginTop: "8px" } });
+      const cancel = button("취소", { kind: "small quiet" });
+      const turning = spinner();
+      const root = h("div", { class: "panel", style: { marginBottom: "24px", display: "flex", gap: "12px", alignItems: "flex-start" } },
+        turning,
+        h("div", { style: { flex: "1", minWidth: "0" } },
+          h("b", {}, `${backendName(current.backend)} 로그인을 기다리는 중`),
+          intro,
+          linkNote,
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", marginTop: "4px" } }, link, copy),
+          boxNote,
+          form,
+          status,
+        ),
+        cancel,
+      );
+      const view = { root, turning, intro, linkNote, link, copy, boxNote, label, input, send, form, status, kind: undefined, text: null, url: null };
+
+      const say = (text, kind = "") => {
+        status.textContent = text;
+        status.style.color = kind === "bad" ? "var(--bad)" : "var(--ink-3)";
+      };
+      view.say = say;
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const submission = loginSubmission(view.kind, current.accountId, input.value);
+        if (!submission || send.disabled) return;
+        send.disabled = true;
         try {
-          const next = await gateway.status();
-          const account = (next.accounts || []).find((item) => item.id === waiting.accountId);
-          if (account?.login?.loggedIn) {
-            waiting = null;
-            clearInterval(timer);
-            const result = await gateway.post("/connect", {}).catch((error) => ({ ok: false, error: error.message }));
-            toast(result.ok ? `${backendName(backend)} 계정을 연결했습니다` : `로그인은 됐지만 연결하지 못했습니다: ${result.error}`, result.ok ? "" : "bad");
-            draw();
-            refreshStatus();
-          }
-        } catch {}
-      }, 3000);
+          const result = await gateway.post(submission.path, submission.body);
+          if (result?.ok === false) throw new Error(result.error || "보내지 못했습니다.");
+          input.value = "";
+          say(view.text.sent);
+          // Exchanging the code takes a moment; the five minutes start again from here.
+          current.since = Date.now();
+        } catch (error) {
+          say(error?.message || "보내지 못했습니다.", "bad");
+        } finally {
+          send.disabled = false;
+        }
+      });
+      cancel.addEventListener("click", async () => {
+        if (cancel.disabled) return;
+        cancel.disabled = true;
+        try {
+          const result = await gateway.post("/login/cancel", { account: current.accountId });
+          if (result?.ok === false) throw new Error(result.error || "취소하지 못했습니다.");
+          if (waiting === current) stopWaiting();
+          draw();
+        } catch (error) {
+          say(error?.message || "취소하지 못했습니다.", "bad");
+        } finally {
+          cancel.disabled = false;
+        }
+      });
+      return view;
+    }
+
+    function updateLoginView(current, prompt) {
+      const view = current.view;
+      if (!view || !prompt) return;
+      const url = signInLink(prompt.url);
+      if (url && url !== view.url) {
+        view.url = url;
+        view.link.href = url;
+        view.link.textContent = url;
+      }
+      if (!view.url) view.link.textContent = "로그인 링크를 기다리는 중입니다…";
+      // A .btn sets its own display, which the hidden attribute does not override.
+      view.copy.style.display = view.url ? "" : "none";
+      // The box is chosen once: a poll that finds the CLI gone must not take it away mid-typing.
+      if (view.kind === undefined) view.kind = loginPanelText(prompt.input).kind;
+      view.text = loginPanelText(view.kind, view.url || prompt.url);
+      view.intro.textContent = view.text.intro;
+      view.linkNote.textContent = view.text.linkNote;
+      view.boxNote.textContent = view.text.boxNote || "";
+      view.boxNote.hidden = !view.kind;
+      view.form.hidden = !view.kind;
+      view.form.style.display = view.kind ? "flex" : "none";
+      if (view.kind) {
+        view.label.textContent = view.text.label;
+        view.input.placeholder = view.text.placeholder;
+      }
+      const ended = loginEnded(prompt);
+      view.turning.style.visibility = ended ? "hidden" : "";
+      if (ended) view.say(ended, "bad");
     }
 
     function loginPanel() {
