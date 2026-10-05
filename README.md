@@ -532,6 +532,44 @@ On disk, each target keeps its own directory, `<data>/targets/<id>/`:
 been sent), `logs/<agent>.log`, and `backfill.json`. `target remove` deletes that
 directory; what is already on that server stays there.
 
+## Importing a ChatGPT export / ChatGPT 기록 가져오기
+
+ChatGPT has no hook, so its history comes in from a data export (Settings → Data
+controls → Export data), once or again later with a newer export:
+
+```sh
+HONCHO_USER_NAME=<your peer> node scripts/collector.mjs --provider chatgpt \
+  --export ~/Downloads/<export>.zip [--workspace <id>] --dry-run   # then without --dry-run
+```
+
+- **What it reads.** The export as downloaded:
+  - the zip itself, including a zip inside a zip, ZIP64, and zips over 4 GiB written without ZIP64;
+  - the unpacked folder, so put several `…-part-000N.zip` downloads in one folder;
+  - one JSON file.
+
+  It finds `conversations.json` or the numbered shards (`conversations-000.json`, …), and skips `Files_*` zips that hold only attachments. Conversations are parsed one at a time, so a large export does not need to fit in memory.
+- **Who and where.**
+  - The person is `HONCHO_USER_NAME`. Unset, it is `user`, so always set it.
+  - The assistant peer is `HONCHO_CHATGPT_ASSISTANT_NAME`, then `HONCHO_ASSISTANT_NAME`, then `assistant_chatgpt`.
+  - The workspace is `HONCHO_WORKSPACE_ID`; `--workspace` wins.
+- **What goes in:**
+  - Only the branch the conversation shows, so edited-away or regenerated turns stay out.
+  - Each message carries its original `create_time` as `created_at`. A message without one takes the time of the message before it.
+- **What is skipped:**
+  - system and hidden messages, custom instructions and user context;
+  - assistant turns addressed to a tool (python, web, memory, canvas) and tool output;
+  - thoughts and reasoning summaries;
+  - turns that are only an image or audio.
+
+  Citation markup is removed from answers.
+- **Order.** Conversations go in oldest first, each one whole. A conversation reopened months later goes in at its start.
+- **Safe to repeat.**
+  - The whole export is parsed before the first write, and a broken shard stops it before anything is sent.
+  - Running the same export again sends nothing, and a newer export sends only new messages.
+  - The dedupe state is kept per server and workspace, so a different workspace gets everything.
+- **`--dry-run`** sends nothing. It prints a `summary`: the files read, turns by role, the first and last time, and what was skipped and why.
+- **In the app**, 연결 → ChatGPT 기록 가져오기 runs the same import. It takes uploads up to 256 MB and always uses the configured workspace and peer. Use the command for anything bigger or for another workspace.
+
 ## Backing up the conversation originals / 대화 원본 백업
 
 This copies each agent's original conversation files, byte for byte, to a folder (a local folder, a NAS or an external drive) or to an rclone cloud remote. It is separate from collection. Nothing is converted, and Honcho never reads the backup.
