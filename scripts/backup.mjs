@@ -53,12 +53,15 @@ import {
   volumeRootOf,
 } from "./backup-store.mjs";
 import {
+  BACKUP_CHECK_HOUR,
+  backupCheckSpec,
   backupScheduleSpec,
   backupScheduleStatus,
   installBackupSchedule,
   removeBackupSchedule,
   scheduleMinute,
 } from "./backup-schedule.mjs";
+import { TEST_MESSAGE, alertState, checkAlert, cloudTypeOf, logLine, platformNotifier } from "./backup-alert.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS_VERSION = 1;
@@ -79,6 +82,7 @@ export function backupPaths(dataDir) {
     settings: path.join(directory, "settings.json"),
     status: path.join(directory, "status.json"),
     lock: path.join(directory, "run.lock"),
+    alert: path.join(directory, "alert.json"),
     ledger: (key) => path.join(directory, `ledger-${key}.json`),
     log: path.join(dataDir, "logs", "backup.log"),
   };
@@ -668,6 +672,68 @@ function lastRunRecord(result) {
   };
 }
 
+/**
+ * The run of unsuccessful runs to `label` this result continues or starts (null after a
+ * success): when it began and how many there were, for backup-alert.mjs.
+ */
+function failingAfter(before, result, label) {
+  if (result.ok) return null;
+  let previous = before.failing?.destination === label ? before.failing : null;
+  // A status from before this was kept: its last run, if it failed, starts the run.
+  if (!previous && before.failing === undefined && before.lastRun && !before.lastRun.ok && before.lastRun.destination === label) {
+    previous = { since: before.lastRun.startedAt, runs: 1 };
+  }
+  return { destination: label, since: previous?.since || result.startedAt, runs: (previous?.runs || 0) + 1 };
+}
+
+// ------------------------------------------------------------------ alerts
+
+function alertOptions(options, dataDir, settings, status) {
+  const paths = backupPaths(dataDir);
+  const env = options.env || process.env;
+  return {
+    statePath: paths.alert,
+    logPath: paths.log,
+    destination: settings.destination,
+    label: settings.destination ? destinationLabel(settings.destination) : "",
+    status,
+    alive: processAlive,
+    notifier: options.notifier || platformNotifier({ platform: options.platform || process.platform, env }),
+    cloudType: (remote) => cloudTypeOf(remote, { run: options.rcloneRun, env }),
+    // Tests move the clock; the command line cannot (its options are strings).
+    ...(typeof options.now === "number" ? { now: options.now } : {}),
+  };
+}
+
+/** After a recorded run: a scheduled one notifies a problem; any run that succeeded ends one. */
+async function alertAfterRun(options, dataDir) {
+  try {
+    const settings = await readSettings(dataDir);
+    const status = await readStatus(dataDir);
+    return await checkAlert({ ...alertOptions(options, dataDir, settings, status), send: options.scheduled === true, source: "run" });
+  } catch (error) {
+    await logLine(backupPaths(dataDir).log, `alert (run): the check failed: ${error.message}`);
+    return null;
+  }
+}
+
+/** `backup alert check|test`. */
+async function backupAlert(action, options, dataDir) {
+  const paths = backupPaths(dataDir);
+  if (action === "test") {
+    const notifier = options.notifier || platformNotifier({ platform: options.platform || process.platform, env: options.env || process.env });
+    const outcome = await notifier(TEST_MESSAGE);
+    await logLine(paths.log, outcome.ok ? `alert (test): shown by ${outcome.method}` : `alert (test): the notification failed: ${outcome.error}`);
+    return { ok: Boolean(outcome.ok), method: outcome.method || null, message: TEST_MESSAGE, ...(outcome.ok ? {} : { error: outcome.error }) };
+  }
+  if (action === "check") {
+    const settings = await readSettings(dataDir);
+    const status = await readStatus(dataDir);
+    return checkAlert({ ...alertOptions(options, dataDir, settings, status), send: true, source: "check" });
+  }
+  return { ok: false, error: "backup alert takes check or test" };
+}
+
 // ------------------------------------------------------------------ commands
 
 function scheduleContext(options) {
@@ -705,7 +771,7 @@ async function scheduleFor(options, settings, dataDir) {
   const hour = Number.isInteger(settings.hour) ? settings.hour : DEFAULT_HOUR;
   const ctx = scheduleContext(options);
   const cliPath = options.cliPath || await scheduledCli();
-  const spec = backupScheduleSpec(ctx, {
+  const paths = {
     nodePath: options.nodePath || stableNodePath(),
     cliPath,
     logPath: backupPaths(dataDir).log,
@@ -713,8 +779,8 @@ async function scheduleFor(options, settings, dataDir) {
     stateDir: backupPaths(dataDir).directory,
     hour,
     minute: scheduleMinute(device),
-  });
-  return { ctx, spec, hour, minute: scheduleMinute(device) };
+  };
+  return { ctx, spec: backupScheduleSpec(ctx, paths), checkSpec: backupCheckSpec(ctx, paths), hour, minute: scheduleMinute(device) };
 }
 
 function parseDestinationOptions(options) {
@@ -737,8 +803,10 @@ async function backupStatus(options, dataDir) {
   const running = status.running && processAlive(status.running.pid) ? status.running : null;
   // A run to a destination chosen before says nothing about the one chosen now.
   const lastRun = status.lastRun && settings.destination && status.lastRun.destination === destinationLabel(settings.destination) ? status.lastRun : null;
-  const { ctx, spec, hour, minute } = await scheduleFor(options, settings, dataDir);
-  const schedule = { hour, minute, ...(await backupScheduleStatus(ctx, spec).catch((error) => ({ registered: false, error: error.message }))) };
+  const { ctx, spec, checkSpec, hour, minute } = await scheduleFor(options, settings, dataDir);
+  const registration = (job) => backupScheduleStatus(ctx, job).catch((error) => ({ registered: false, error: error.message }));
+  const schedule = { hour, minute, ...(await registration(spec)), check: { hour: BACKUP_CHECK_HOUR, minute, ...(await registration(checkSpec)) } };
+  const alert = await alertState(alertOptions(options, dataDir, settings, status)).catch((error) => ({ problem: null, error: error.message }));
   let reachable;
   if (options.check === true && settings.destination) {
     const probe = await storeFor(settings.destination).probe().catch((error) => ({ ok: false, reason: "error", detail: error.message }));
@@ -759,6 +827,7 @@ async function backupStatus(options, dataDir) {
     ...(reachable ? { reachable } : {}),
     lastRun,
     lastSuccessAt: lastRun ? status.lastSuccessAt || null : null,
+    alert,
   };
 }
 
@@ -826,12 +895,17 @@ async function backupRun(options, dataDir) {
     let result;
     try { result = await run(); } catch (error) { result = { ok: false, error: error.message, startedAt: new Date().toISOString(), destination: destinationLabel(destination) }; }
     if (recorded) {
+      const before = await readStatus(dataDir);
       await writeStatus(dataDir, {
         running: null,
         lastRun: lastRunRecord(result),
         ...(result.ok ? { lastSuccessAt: result.finishedAt } : {}),
         ...(full && result.counts ? { lastFullAt: result.finishedAt } : {}),
+        failing: failingAfter(before, result, destinationLabel(destination)),
       });
+      // A notification that fails is in the log; it never fails the run.
+      const alert = await alertAfterRun(options, dataDir);
+      if (alert?.problem) result.alert = { problem: alert.problem, cause: alert.cause, notified: alert.notified };
     }
     return result;
   } finally {
@@ -868,11 +942,23 @@ async function backupSchedule(action, options, dataDir) {
   if (!validDeviceId(settings.device)) settings.device = defaultDeviceId();
   await writeSettings(dataDir, settings);
   await fsp.mkdir(path.dirname(backupPaths(dataDir).log), { recursive: true });
-  const { ctx, spec, hour, minute } = await scheduleFor(options, settings, dataDir);
+  const { ctx, spec, checkSpec, hour, minute } = await scheduleFor(options, settings, dataDir);
   if (!spec) return { ok: false, error: `there is no scheduler for ${ctx.platform}` };
   try {
-    const outcome = action === "on" ? await installBackupSchedule(ctx, spec) : await removeBackupSchedule(ctx, spec);
-    return { ok: true, schedule: { hour, minute, ...outcome, ...(await backupScheduleStatus(ctx, spec)) } };
+    // The nightly run, and next to it the daytime check that notifies while a problem lasts.
+    const apply = (job) => (action === "on" ? installBackupSchedule(ctx, job) : removeBackupSchedule(ctx, job));
+    const outcome = await apply(spec);
+    const checkOutcome = await apply(checkSpec);
+    return {
+      ok: true,
+      schedule: {
+        hour,
+        minute,
+        ...outcome,
+        ...(await backupScheduleStatus(ctx, spec)),
+        check: { hour: BACKUP_CHECK_HOUR, minute, ...checkOutcome, ...(await backupScheduleStatus(ctx, checkSpec)) },
+      },
+    };
   } catch (error) {
     if (error?.code === "ERR_OS_REGISTRATION_UNDER_TEST") throw error;
     return { ok: false, error: error.message };
@@ -888,7 +974,8 @@ export async function backupCommand(action, positional, options = {}) {
   if (action === "start") return backupStart(options, dataDir);
   if (action === "schedule") return backupSchedule(positional[0], options, dataDir);
   if (action === "remotes") return rcloneRemotes();
-  return { ok: false, error: `Unknown backup action: ${action}. Expected status, set, run, start, schedule or remotes.` };
+  if (action === "alert") return backupAlert(positional[0], options, dataDir);
+  return { ok: false, error: `Unknown backup action: ${action}. Expected status, set, run, start, schedule, alert or remotes.` };
 }
 
 export { ARCHIVE_FOLDER };

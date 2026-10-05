@@ -47,6 +47,17 @@ function reasonText(run) {
   return REASONS[run?.reason] || run?.detail || run?.error || "";
 }
 
+/** While a problem lasts: the same words as the notification this computer shows. */
+function alertBanner(alert) {
+  if (!alert?.problem || !alert.message) return null;
+  return h("div", { style: { marginBottom: "16px" } }, notice("bad",
+    h("b", {}, alert.message.title),
+    h("div", {}, alert.message.lines?.[0] || ""),
+    h("div", {}, `${alert.since ? `${fullDate(alert.since)}부터 이어지고 있어요. ` : ""}원인을 해결하고 지금 백업을 누르세요. 백업이 한 번 성공하면 알림이 멈춰요.`),
+    alert.lastNotifiedAt ? h("div", { class: "muted" }, `마지막 알림 ${ago(alert.lastNotifiedAt)}`) : null,
+  ));
+}
+
 export default {
   title: "백업",
   async mount(page) {
@@ -92,7 +103,8 @@ export default {
       const run = status.lastRun;
       const schedule = status.schedule || {};
       const when = `매일 ${pad(schedule.hour ?? 3)}:${pad(schedule.minute ?? 0)}`;
-      clear(summary, h("div", { class: "panel summary" },
+      const check = schedule.check || null;
+      clear(summary, alertBanner(status.alert), h("div", { class: "panel summary" },
         h("div", { class: "summary-head" },
           stateTag(status),
           h("b", {}, status.destination ? "이렇게 백업하고 있습니다" : "백업할 곳을 아직 고르지 않았습니다"),
@@ -114,8 +126,18 @@ export default {
               const result = await cli("/api/backup/schedule", { on });
               status.schedule = result.schedule || status.schedule;
               toast(on ? `${when}에 백업합니다` : "자동 백업을 껐습니다");
+              // The 알림 line follows whether the daytime check is registered now.
+              drawSummary();
             }, { label: "자동 백업", disabled: !status.destination }),
             h("span", { class: "muted", style: { marginLeft: "8px" } }, `${when} · 컴퓨터가 꺼져 있었으면 켜진 뒤에`),
+          ),
+          h("dt", {}, "알림"), h("dd", {},
+            "백업이 실패하거나 48시간 넘게 성공하지 못하면 이 컴퓨터에 알림을 보냅니다.",
+            schedule.registered && check && !check.registered
+              ? h("div", { class: "muted" }, "낮 확인이 아직 등록되지 않았습니다. 자동 백업을 껐다가 다시 켜세요.")
+              : check?.registered
+                ? h("span", { class: "muted" }, ` 문제가 이어지면 매일 ${pad(check.hour ?? 10)}:${pad(check.minute ?? 0)}에 다시 알립니다.`)
+                : null,
           ),
           h("dt", {}, "device id"), h("dd", {}, h("code", { class: "mono" }, status.device || "")),
         ),

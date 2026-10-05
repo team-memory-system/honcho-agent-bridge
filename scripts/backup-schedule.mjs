@@ -13,6 +13,17 @@
 // Each runs `node <cli.mjs> backup run --scheduled`. None needs admin rights. Every OS call
 // goes through ctx.run, which tests replace (autostart.mjs refuses the real
 // launchctl, systemctl and schtasks under node --test).
+//
+// Next to it, the same way, a daytime check at 10 and the same minute runs
+// `node <cli.mjs> backup alert check` (backup-alert.mjs): it reads the backup's local
+// status only and notifies while a problem lasts, since the nightly run happens
+// while the person sleeps.
+//
+//   launchd   ~/Library/LaunchAgents/team-memory-system.backup-check.plist
+//   systemd   ~/.config/systemd/user/team-memory-backup-check.{service,timer}
+//   windows   the task "TeamMemoryBackupCheck", which runs <state>/backup-check.vbs
+//
+// `backup schedule on` registers both and `backup schedule off` removes both.
 import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -23,6 +34,42 @@ export const BACKUP_LAUNCHD_LABEL = "team-memory-system.backup";
 export const BACKUP_TASK_NAME = "TeamMemoryBackup";
 export const BACKUP_SYSTEMD_SERVICE = "team-memory-backup.service";
 export const BACKUP_SYSTEMD_TIMER = "team-memory-backup.timer";
+export const BACKUP_CHECK_LAUNCHD_LABEL = "team-memory-system.backup-check";
+export const BACKUP_CHECK_TASK_NAME = "TeamMemoryBackupCheck";
+export const BACKUP_CHECK_SYSTEMD_SERVICE = "team-memory-backup-check.service";
+export const BACKUP_CHECK_SYSTEMD_TIMER = "team-memory-backup-check.timer";
+export const BACKUP_CHECK_HOUR = 10;
+
+// The two clock jobs. The nightly run's texts are what they were before the check
+// existed, so a computer that already has it registered keeps the same files.
+const JOBS = {
+  run: {
+    label: BACKUP_LAUNCHD_LABEL,
+    taskName: BACKUP_TASK_NAME,
+    service: BACKUP_SYSTEMD_SERVICE,
+    timer: BACKUP_SYSTEMD_TIMER,
+    command: ["backup", "run", "--scheduled"],
+    file: "backup",
+    serviceDescription: "Team Memory conversation backup",
+    timerDescription: "Team Memory conversation backup, once a day",
+    vbsComment: "' Team Memory: the daily conversation backup, with no window.",
+    taskDescription: "Team Memory: the daily conversation backup",
+    timeLimit: "PT12H",
+  },
+  check: {
+    label: BACKUP_CHECK_LAUNCHD_LABEL,
+    taskName: BACKUP_CHECK_TASK_NAME,
+    service: BACKUP_CHECK_SYSTEMD_SERVICE,
+    timer: BACKUP_CHECK_SYSTEMD_TIMER,
+    command: ["backup", "alert", "check"],
+    file: "backup-check",
+    serviceDescription: "Team Memory conversation backup check",
+    timerDescription: "Team Memory conversation backup check, once a day",
+    vbsComment: "' Team Memory: the daytime check for conversation backup problems, with no window.",
+    taskDescription: "Team Memory: the daytime check for conversation backup problems",
+    timeLimit: "PT10M",
+  },
+};
 
 /** The minute past the hour this device runs at, the same every time for the same id. */
 export function scheduleMinute(device) {
@@ -43,13 +90,22 @@ function xmlEscape(text) {
   return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/** The schedule for this platform, or null where there is none. */
-export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDirectory, stateDir, hour, minute }) {
+/** The nightly run's schedule for this platform, or null where there is none. */
+export function backupScheduleSpec(ctx, paths) {
   // --scheduled: once a week this run also checks past the ledger (backup.mjs).
-  const programArguments = [nodePath, cliPath, "backup", "run", "--scheduled"];
+  return clockJobSpec(ctx, JOBS.run, paths);
+}
+
+/** The daytime check's schedule for this platform (at BACKUP_CHECK_HOUR), or null where there is none. */
+export function backupCheckSpec(ctx, paths) {
+  return clockJobSpec(ctx, JOBS.check, { ...paths, hour: BACKUP_CHECK_HOUR });
+}
+
+function clockJobSpec(ctx, job, { nodePath, cliPath, logPath, workingDirectory, stateDir, hour, minute }) {
+  const programArguments = [nodePath, cliPath, ...job.command];
   if (ctx.platform === "darwin") {
     return launchAgent({
-      label: BACKUP_LAUNCHD_LABEL,
+      label: job.label,
       homeDir: ctx.homeDir,
       uid: ctx.uid,
       programArguments,
@@ -69,12 +125,13 @@ export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDir
     const comment = "# Written by `cli.mjs backup schedule on`; `cli.mjs backup schedule off` removes it.";
     return {
       kind: "systemd-timer",
-      servicePath: path.join(unitDir, BACKUP_SYSTEMD_SERVICE),
-      timerPath: path.join(unitDir, BACKUP_SYSTEMD_TIMER),
+      timerName: job.timer,
+      servicePath: path.join(unitDir, job.service),
+      timerPath: path.join(unitDir, job.timer),
       serviceText: [
         comment,
         "[Unit]",
-        "Description=Team Memory conversation backup",
+        `Description=${job.serviceDescription}`,
         "",
         "[Service]",
         "Type=oneshot",
@@ -87,7 +144,7 @@ export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDir
       timerText: [
         comment,
         "[Unit]",
-        "Description=Team Memory conversation backup, once a day",
+        `Description=${job.timerDescription}`,
         "",
         "[Timer]",
         `OnCalendar=*-*-* ${pad(hour)}:${pad(minute)}:00`,
@@ -102,11 +159,11 @@ export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDir
   if (ctx.platform === "win32") {
     const system32 = path.win32.join(ctx.env.SystemRoot || ctx.env.SYSTEMROOT || "C:\\Windows", "System32");
     const wscript = path.win32.join(system32, "wscript.exe");
-    const vbsPath = path.win32.join(stateDir, "backup.vbs");
+    const vbsPath = path.win32.join(stateDir, `${job.file}.vbs`);
     // cmd keeps what the run prints in the log; the outer quotes are cmd's own.
-    const commandLine = `cmd /c ""${nodePath}" "${cliPath}" backup run --scheduled >> "${logPath}" 2>&1"`;
+    const commandLine = `cmd /c ""${nodePath}" "${cliPath}" ${job.command.join(" ")} >> "${logPath}" 2>&1"`;
     const vbs = [
-      "' Team Memory: the daily conversation backup, with no window.",
+      job.vbsComment,
       "' Written by `cli.mjs backup schedule on`; `cli.mjs backup schedule off` removes it.",
       "Option Explicit",
       "Dim shell",
@@ -118,7 +175,7 @@ export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDir
     const xml = [
       '<?xml version="1.0" encoding="UTF-16"?>',
       '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
-      "  <RegistrationInfo><Description>Team Memory: the daily conversation backup</Description></RegistrationInfo>",
+      `  <RegistrationInfo><Description>${xmlEscape(job.taskDescription)}</Description></RegistrationInfo>`,
       "  <Triggers>",
       "    <CalendarTrigger>",
       `      <StartBoundary>2026-01-01T${pad(hour)}:${pad(minute)}:00</StartBoundary>`,
@@ -132,7 +189,7 @@ export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDir
       "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
       "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
       "    <StartWhenAvailable>true</StartWhenAvailable>",
-      "    <ExecutionTimeLimit>PT12H</ExecutionTimeLimit>",
+      `    <ExecutionTimeLimit>${job.timeLimit}</ExecutionTimeLimit>`,
       "    <Enabled>true</Enabled>",
       "  </Settings>",
       '  <Actions Context="Author">',
@@ -143,11 +200,11 @@ export function backupScheduleSpec(ctx, { nodePath, cliPath, logPath, workingDir
     ].join("\r\n");
     return {
       kind: "schtasks",
-      taskName: BACKUP_TASK_NAME,
+      taskName: job.taskName,
       schtasks: path.win32.join(system32, "schtasks.exe"),
       vbsPath,
       vbs,
-      xmlPath: path.win32.join(stateDir, "backup-task.xml"),
+      xmlPath: path.win32.join(stateDir, `${job.file}-task.xml`),
       xml,
     };
   }
@@ -177,8 +234,8 @@ export async function installBackupSchedule(ctx, spec) {
     const serviceChanged = await writeIfChanged(spec.servicePath, spec.serviceText, 0o644);
     const timerChanged = await writeIfChanged(spec.timerPath, spec.timerText, 0o644);
     await systemctl(ctx, ["daemon-reload"]);
-    await systemctl(ctx, ["enable", "--now", BACKUP_SYSTEMD_TIMER]);
-    if (timerChanged) await systemctl(ctx, ["restart", BACKUP_SYSTEMD_TIMER]);
+    await systemctl(ctx, ["enable", "--now", spec.timerName]);
+    if (timerChanged) await systemctl(ctx, ["restart", spec.timerName]);
     return { kind: spec.kind, path: spec.timerPath, changed: serviceChanged || timerChanged };
   }
   if (spec.kind === "schtasks") {
@@ -201,7 +258,7 @@ export async function removeBackupSchedule(ctx, spec) {
   }
   if (spec.kind === "systemd-timer") {
     const present = await exists(spec.timerPath);
-    if (present) await systemctl(ctx, ["disable", "--now", BACKUP_SYSTEMD_TIMER], { check: false });
+    if (present) await systemctl(ctx, ["disable", "--now", spec.timerName], { check: false });
     await fsp.rm(spec.timerPath, { force: true });
     await fsp.rm(spec.servicePath, { force: true });
     if (present) await systemctl(ctx, ["daemon-reload"], { check: false });
