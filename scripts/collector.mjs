@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { getProvider } from "./providers/index.mjs";
+import { codexSegmentId, segmentHashesFromStoredMessages, turnHashCandidates } from "./turn-identity.mjs";
 import { classifyAutomation as classifyCodexAutomation } from "./providers/codex.mjs";
 import { classifyAutomation as classifyClaudeAutomation } from "./providers/claude.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
@@ -249,45 +250,6 @@ async function saveState(provider, state) {
   await fsp.rename(tmp, target);
 }
 
-function digest(value) {
-  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function legacyTurnHash(sessionId, turn) {
-  const identity = {
-    session_id: sessionId,
-    source_message_id: turn.source_message_id || null,
-    line_index: turn.source_message_id ? null : turn.line_index,
-    step_index: turn.source_message_id ? null : turn.step_index,
-    role: turn.role,
-    content: turn.content,
-  };
-  return digest(identity);
-}
-
-function turnHashCandidates(sessionId, turn) {
-  const candidates = [];
-  if (turn.source_message_id) {
-    candidates.push(digest({ version: 2, session_id: sessionId, source_message_id: turn.source_message_id, role: turn.role }));
-  }
-  if (turn.line_index != null || turn.step_index != null) {
-    candidates.push(
-      digest({
-        version: 2,
-        session_id: sessionId,
-        line_index: turn.line_index ?? null,
-        step_index: turn.step_index ?? null,
-        role: turn.role,
-      }),
-    );
-  }
-  if (candidates.length === 0) {
-    candidates.push(digest({ version: 2, session_id: sessionId, role: turn.role, content: turn.content }));
-  }
-  candidates.push(legacyTurnHash(sessionId, turn));
-  return [...new Set(candidates)];
-}
-
 function primaryTurnHash(sessionId, turn) {
   return turnHashCandidates(sessionId, turn)[0];
 }
@@ -390,6 +352,7 @@ function buildCodexMessages(sessionId, parsed, sessionState) {
         memory_origin: memoryOrigin,
         direct_user: directUser,
       };
+      if (turn.segment_id) metadata.codex_segment_id = turn.segment_id;
       if (turn.phase) metadata.codex_phase = turn.phase;
       if (automationKind) metadata.automation_kind = automationKind;
       if (chunks.length > 1) {
@@ -527,6 +490,32 @@ async function syncStateFromHoncho(provider, workspace, sessionId, sessionState)
   return [recovered.length, listed.total, true];
 }
 
+/**
+ * Turns of a Codex continuation segment are told apart by their segment (see
+ * turn-identity.mjs). Earlier collectors sent them under bare line hashes, so the
+ * first time this collector reads a segment it rebuilds the segment hashes of the
+ * turns Honcho already holds from that file, using each stored message's rollout
+ * path. Without that list nothing is sent: the bare hashes alone cannot show which
+ * of a thread's files a sent turn came from.
+ */
+async function reconcileCodexSegment(workspace, sessionId, segmentId, sessionState) {
+  const reconciled = Array.isArray(sessionState.reconciled_segments) ? sessionState.reconciled_segments : [];
+  if (reconciled.includes(segmentId)) return false;
+  let listed;
+  try {
+    listed = await existingMessages(workspace, sessionId);
+  } catch (error) {
+    await logLine("codex", `SEGMENT_SYNC_FAILED ${sessionId} ${segmentId} ${error?.name || "Error"}: ${error?.message || error}`);
+    throw new Error(`Cannot safely import segment ${segmentId} of ${sessionId} until Honcho message reconciliation succeeds`);
+  }
+  sessionState.imported_hashes = mergeStateHashes(
+    sessionState.imported_hashes || [],
+    segmentHashesFromStoredMessages(sessionId, segmentId, listed.messages),
+  );
+  sessionState.reconciled_segments = [...reconciled, segmentId];
+  return true;
+}
+
 async function scheduleCodexDreamIfDue(workspace, sessionId, sessionState) {
   if (CODEX_DREAM_EVERY_MESSAGES <= 0) return false;
   if (Number(sessionState.messages_since_dream || 0) < CODEX_DREAM_EVERY_MESSAGES) return false;
@@ -563,6 +552,8 @@ async function importCodex(args, hookInput) {
   const parsed = await getProvider("codex").parseTranscript(rolloutPath, hookInput);
   if (outsideTargetFolders(parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath);
   const sessionId = parsed.session_id;
+  const segmentId = codexSegmentId(rolloutPath, parsed.metadata.original_session_id);
+  if (segmentId) for (const turn of parsed.turns) turn.segment_id = segmentId;
   return withStateLock("codex", async () => {
     const state = await loadState("codex");
     const sessions = (state.sessions ||= {});
@@ -573,6 +564,9 @@ async function importCodex(args, hookInput) {
     const [syncedTurns, honchoMessageTotal, stateReconciled] = args.dryRun
       ? [0, 0, false]
       : await syncStateFromHoncho("codex", args.workspace, sessionId, sessionState);
+    const segmentReconciled = segmentId && !args.dryRun
+      ? await reconcileCodexSegment(args.workspace, sessionId, segmentId, sessionState)
+      : false;
     const [messages, pendingHashes, peers] = buildCodexMessages(sessionId, parsed, sessionState);
     const result = {
       ok: true,
@@ -580,6 +574,7 @@ async function importCodex(args, hookInput) {
       workspace: args.workspace,
       session_id: sessionId,
       rollout_path: rolloutPath,
+      ...(segmentId ? { codex_segment_id: segmentId } : {}),
       parsed_turns: parsed.turns.length,
       new_turns: pendingHashes.length,
       new_messages: messages.length,
@@ -589,7 +584,7 @@ async function importCodex(args, hookInput) {
       honcho_message_total: honchoMessageTotal,
     };
     if (args.dryRun || messages.length === 0) {
-      if (stateReconciled && !args.dryRun) {
+      if ((stateReconciled || segmentReconciled) && !args.dryRun) {
         state.version = 2;
         await saveState("codex", state);
       }
