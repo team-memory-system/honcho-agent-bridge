@@ -40,34 +40,9 @@ function chosenFeatures() {
 
 const NEEDED = { required: ["꼭 필요", ""], "app-installs": ["없으면 앱이 설치", "accent"], optional: ["있으면 좋음", ""] };
 
-// WARP is the one program this screen installs. The app downloads it and the user
-// only answers the system's password or approval prompt. It needs the team name,
-// which the client is set up with so it goes straight to the team login.
-const INSTALLABLE = new Set(["warp"]);
-const TEAM_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
-
-/** The team name box and the 설치 button it unlocks. */
-function installControls(item, { onInstall, team = "", onTeam }) {
-  const valid = (value) => TEAM_NAME.test(value.trim());
-  const go = button("설치", { kind: "small primary", disabled: !valid(team), onClick: (event) => onInstall(item, event.currentTarget, box.value.trim()) });
-  const box = h("input", {
-    class: "input",
-    value: team,
-    placeholder: "로그인 주소 <이름>.cloudflareaccess.com의 앞부분",
-    "aria-label": "팀 이름",
-    autocomplete: "off",
-    spellcheck: "false",
-    style: { width: "240px", maxWidth: "100%" },
-    oninput: () => { onTeam?.(box.value.trim()); go.disabled = !valid(box.value); },
-    onkeydown: (event) => { if (event.key === "Enter" && !go.disabled) go.click(); },
-  });
-  return h("label", { style: { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "13px", flexWrap: "wrap" } }, "팀 이름", box, go);
-}
-
-function prereqList(items, { onInstall, team, onTeam } = {}) {
+function prereqList(items) {
   if (!items.length) return null;
   return h("div", { class: "rows prereqs" }, items.map((item) => {
-    const installable = !item.ok && item.install?.auto === true && INSTALLABLE.has(item.key) && onInstall;
     const [label, kind] = NEEDED[item.needed] || NEEDED.optional;
     return h("div", { class: "row" },
       h("div", { style: { minWidth: "0" } },
@@ -76,7 +51,6 @@ function prereqList(items, { onInstall, team, onTeam } = {}) {
         !item.ok && item.install?.note ? h("div", { class: "sub" }, item.install.note) : null,
       ),
       h("div", { class: "end", style: { flexWrap: "wrap", justifyContent: "flex-end" } },
-        installable ? installControls(item, { onInstall, team, onTeam }) : null,
         !item.ok && item.install?.command ? button("설치 명령 복사", { kind: "small", title: item.install.command, onClick: async () => { await copyText(item.install.command); toast(`복사했습니다: ${item.install.command}`); } }) : null,
         !item.ok && item.install?.url ? h("a", { class: "btn small quiet", href: item.install.url, target: "_blank", rel: "noreferrer" }, "내려받는 곳") : null,
       ),
@@ -118,47 +92,6 @@ export default {
       sync();
     }
 
-    // What the install left for the user to do, kept on screen until it is done:
-    // the wizard and a cancelled install until the program is found, the team
-    // login until the check passes.
-    let installNotice = null;
-    // The team name typed so far, kept across redraws and remembered once used.
-    let teamName = typeof app.prefs.warpTeam === "string" ? app.prefs.warpTeam : "";
-
-    async function installPrereq(item, target, team = teamName) {
-      await busy(target, async () => {
-        teamName = team;
-        savePrefs({ warpTeam: team });
-        const result = await post("/api/app/prereqs/install", { item: item.key, team });
-        if (result?.cancelled) {
-          installNotice = { key: item.key, item, team, text: result.error, tone: "warn", until: "found", retry: true };
-        } else if (!result || result.ok === false) {
-          throw new Error(result?.error || "설치하지 못했습니다.");
-        } else if (result.nextAction?.message) {
-          // Installed: the browser's team login is next, until WARP is connected.
-          const login = result.nextAction.kind === "warp-team-login";
-          installNotice = { key: item.key, item, team, text: result.nextAction.message, tone: login ? "ok" : "", until: login ? "ok" : "found" };
-        } else {
-          installNotice = null;
-          if (result.detail) toast(result.detail);
-        }
-        // Installed or not, the list shows where things stand now.
-        await drawSteps();
-      });
-    }
-
-    function noticeFor(items, ok) {
-      if (!installNotice) return null;
-      const current = items.find((entry) => entry.key === installNotice.key);
-      const settled = ok || !current || current.ok || (installNotice.until === "found" && current.version);
-      if (settled) { installNotice = null; return null; }
-      const notice = installNotice;
-      return h("div", { class: `notice ${notice.tone}`, style: { margin: "8px 0", alignItems: "center" } },
-        h("div", { style: { flex: "1" } }, notice.text),
-        notice.retry ? button("다시 설치", { kind: "small primary", onClick: (event) => installPrereq(notice.item, event.currentTarget, notice.team) }) : null,
-      );
-    }
-
     async function drawSteps() {
       const features = chosenFeatures();
       if (!features.length) { drawChoice(); return; }
@@ -185,10 +118,7 @@ export default {
         text: prereqs.error
           ? `확인하지 못했습니다: ${prereqs.error}`
           : prereqs.ok ? "고른 기능에 필요한 프로그램이 모두 있습니다." : `${missing.map((item) => item.label).join(", ")}부터 설치하세요. 설치한 뒤 다시 확인을 누릅니다.`,
-        body: h("div", {},
-          noticeFor(prereqs.items || [], Boolean(prereqs.ok)),
-          prereqList(prereqs.items || [], { onInstall: installPrereq, team: teamName, onTeam: (value) => { teamName = value; } }),
-        ),
+        body: prereqList(prereqs.items || []),
         action: prereqs.ok ? null : ["다시 확인", "recheck"],
       });
 
@@ -205,7 +135,7 @@ export default {
         steps.push({
           title: "대화 보내기 설정",
           done: Boolean(context?.configured),
-          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "기억 서버로 이 컴퓨터 서버를 고르고, 보낼 에이전트와 내 이름을 정합니다." : "서버를 둔 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두세요.",
+          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "기억 서버로 이 컴퓨터 서버를 고르고, 보낼 에이전트와 내 이름을 정합니다." : "서버를 둔 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 서버가 Cloudflare Access 뒤에 있으면 Access 서비스 토큰도 받아 넣습니다.",
           action: ["연결 화면에서 설정", () => go("connect/collect")],
         });
         // Only a conversation from an agent this computer collects, after setup, proves it works.

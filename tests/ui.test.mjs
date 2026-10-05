@@ -9,7 +9,7 @@ import path from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createUiServer, rejectUnsafeRequest, shareDisableInvocation, shareEnableInvocation, shareMeshEnableInvocation } from "../scripts/ui.mjs";
+import { createUiServer, rejectUnsafeRequest, shareEnableInvocation } from "../scripts/ui.mjs";
 import { BRIDGE_TOKEN, startBridge } from "./fake-bridge.mjs";
 import { fixtureZip } from "./chatgpt-fixture.mjs";
 
@@ -409,36 +409,13 @@ test("the share form's tunnel token goes to the CLI through its environment, nev
   assert.match(routes, /runCli\(args, \{ timeout: 900_000, env \}\)/);
 });
 
-test("the Mesh routes exist, run the CLI with --mesh, and pass no secret", async () => {
-  assert.deepEqual(shareMeshEnableInvocation({}), { args: ["server", "share", "enable", "--mesh"] });
-  assert.deepEqual(shareMeshEnableInvocation({ port: 8015 }), { args: ["server", "share", "enable", "--mesh", "--port=8015"] });
-  assert.deepEqual(shareMeshEnableInvocation({ port: "8016" }), { args: ["server", "share", "enable", "--mesh", "--port=8016"] });
-  for (const bad of [80, "8011; rm", 70000, "--public-url"]) assert.ok(shareMeshEnableInvocation({ port: bad }).error, String(bad));
-  assert.deepEqual(shareDisableInvocation({}), ["server", "share", "disable"]);
-  assert.deepEqual(shareDisableInvocation({ mode: "tunnel" }), ["server", "share", "disable", "--tunnel"]);
-  assert.deepEqual(shareDisableInvocation({ mode: "--rm" }), ["server", "share", "disable"]);
-
+test("sharing has one way in: the five share routes, and the screen closes it with a plain disable", async () => {
   const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
   const routes = server.match(/const SHARE_ROUTES = \{([\s\S]*?)\n\};/)[1];
-  assert.match(routes, /"\/api\/server\/share\/mesh\/enable"/);
-  assert.match(routes, /"\/api\/server\/share\/mesh\/disable": async \(\) => runCli\(\["server", "share", "disable", "--mesh"\]/);
-  // The screen calls both, and its public path closes only the tunnel.
+  assert.deepEqual([...routes.matchAll(/"\/api\/server\/share\/([^"]+)"/g)].map((match) => match[1]), ["status", "enable", "disable", "token", "rotate"]);
+  assert.match(routes, /"\/api\/server\/share\/disable": async \(\) => runCli\(\["server", "share", "disable"\]/);
   const screen = await fsp.readFile(path.join(ROOT, "ui", "views", "server.js"), "utf8");
-  assert.match(screen, /"\/api\/server\/share\/mesh\/enable"/);
-  assert.match(screen, /"\/api\/server\/share\/mesh\/disable"/);
-  assert.match(screen, /"\/api\/server\/share\/disable", \{ mode: "tunnel" \}/);
-  assert.match(screen, /도메인이 있음 \(공개 주소\)/);
-  assert.match(screen, /도메인이 없음 \(Mesh: 같은 Cloudflare 계정의 기기만\)/);
-
-  // Like every share route, POST only and refused before the CLI runs.
-  const read = await send("/api/server/share/mesh/enable");
-  assert.equal(read.status, 405);
-  const crossSite = await send("/api/server/share/mesh/disable", { method: "POST", body: {}, headers: { origin: "http://evil.example" } });
-  assert.equal(crossSite.status, 403);
-  const badPort = await send("/api/server/share/mesh/enable", { method: "POST", body: { port: 80 } });
-  assert.equal(badPort.status, 200);
-  assert.equal(badPort.body.ok, false);
-  assert.match(badPort.body.error, /1024 to 65535/);
+  assert.match(screen, /cli\("\/api\/server\/share\/disable", \{\}\)/);
 });
 
 test("the gate token is read with a same-origin POST only", async (t) => {
@@ -478,22 +455,11 @@ test("the prerequisite route validates its features before running the CLI", asy
   assert.equal(response.body.platform, process.platform);
 });
 
-test("the install route takes a same-origin POST naming warp, and refuses anything else before running the CLI", async () => {
-  assert.equal((await send("/api/app/prereqs/install")).status, 405);
-  for (const body of [{}, { item: "docker" }, { item: "warp; rm -rf /" }, { item: ["warp"] }, { item: "warp", team: "Acme Team" }, { item: "warp", team: "--force" }, { item: "warp", team: ["acme"] }]) {
-    const response = await send("/api/app/prereqs/install", { method: "POST", body });
-    assert.equal(response.status, 400, JSON.stringify(body));
-    assert.equal(response.body.ok, false, JSON.stringify(body));
-  }
-  const badTeam = await send("/api/app/prereqs/install", { method: "POST", body: { item: "warp", team: "Acme Team" } });
-  assert.match(badTeam.body.error, /^팀 이름은/, "the screen shows why in plain words");
-  // A valid request is never sent here: it would download and open the real installer.
-  const crossSite = await send("/api/app/prereqs/install", { method: "POST", body: { item: "warp" }, headers: { origin: "http://evil.example" } });
-  assert.equal(crossSite.status, 403);
-  const form = await send("/api/app/prereqs/install", { method: "POST", raw: "item=warp", headers: { "content-type": "application/x-www-form-urlencoded" } });
-  assert.equal(form.status, 415);
+test("the app installs no prerequisite itself: the install route is gone", async () => {
+  const response = await send("/api/app/prereqs/install", { method: "POST", body: {} });
+  assert.equal(response.status, 404);
   const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
-  assert.match(server, /const INSTALLABLE_PREREQS = Object\.freeze\(\["warp"\]\)/);
+  assert.equal(server.includes("/api/app/prereqs/install"), false);
 });
 
 test("every screen a link opens exists, and the 연결 pages other screens link to are there", async () => {

@@ -2,10 +2,11 @@
 // refusal by Cloudflare Access is told apart from any other failure.
 //
 // A server on another computer sits behind a Cloudflare Tunnel protected by
-// Cloudflare Access. A device on the team's WARP passes by identity; a machine
-// without WARP presents an Access service token (CF-Access-Client-Id/Secret) next
-// to the server's own bearer token. Every caller builds its headers here, so the
-// collector, the MCP server, the app and setup's probes send the same thing.
+// Cloudflare Access. A person passes Access by logging in through the browser; a
+// program on another computer presents an Access service token
+// (CF-Access-Client-Id/Secret) next to the server's own bearer token. Every caller
+// builds its headers here, so the collector, the MCP server, the app and setup's
+// probes send the same thing.
 //
 // These are credentials for the memory server only. The shared-bridge connection
 // (config.honcho.accessClientId/Secret, written by `bridge connect`) is a different
@@ -117,10 +118,10 @@ export async function isCloudflareAccessBlock(response) {
 
 /** What setup and doctor say when Access refused this computer. */
 export function accessRefusedMessage(url) {
-  return `${publicUrl(url)} is behind Cloudflare Access and refused this computer; connect Cloudflare WARP with the team account, or add an Access service token`;
+  return `${publicUrl(url)} is behind Cloudflare Access and refused this computer; add an Access service token for that server`;
 }
 
 /** The same, for the app's screens. */
-export const ACCESS_REFUSED_KO = "Cloudflare Access가 이 컴퓨터를 막았습니다. WARP를 팀 계정으로 켜거나 Access 서비스 토큰을 넣으세요.";
+export const ACCESS_REFUSED_KO = "Cloudflare Access가 이 컴퓨터를 막았습니다. 그 서버의 Access 서비스 토큰을 넣으세요.";
 
 export const ACCESS_CODE = "cloudflare-access";

@@ -22,14 +22,6 @@
 //
 // `--log <file>` appends the JSON log lines to that file (owner-only, rotated to
 // <file>.1 past 10 MB) instead of stdout.
-//
-// Mesh sharing (share-manager.mjs, `server share enable --mesh`): when the config
-// names `mesh` files, this reads the share state file (`mesh.shareStateFile`)
-// every `mesh.checkIntervalMs` (2 s by default) and, while it says
-// `mesh.enabled` with a port and the gate's port, runs mesh-forwarder.mjs as a
-// child with them. A forwarder that exits is started again with backoff (1 s,
-// doubling, up to 60 s); turning Mesh off, or a change of port, stops it. It
-// runs whether or not Ollama is managed.
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
@@ -38,7 +30,6 @@ import path from "node:path";
 
 let stopping = false;
 let ollamaChild = null;
-let meshChild = null;
 const timers = new Set();
 
 function option(name) {
@@ -111,14 +102,6 @@ function validateConfig(config, configFile) {
   if (!config || config.format !== 1) throw new Error("Unsupported host runtime config");
   for (const target of [config?.state?.pidFile, config?.supervisorFile]) {
     if (!target || !path.isAbsolute(target)) throw new Error("Host runtime config contains an invalid path");
-  }
-  if (config.mesh) {
-    // A bad mesh section turns only the forwarder off, never the Ollama keep-alive.
-    const targets = [config.mesh.shareStateFile, config.mesh.forwarderFile, config.mesh.stateFile];
-    if (!targets.every((target) => typeof target === "string" && path.isAbsolute(target))) {
-      log("mesh-config-invalid", { message: "Host runtime config contains an invalid mesh path" });
-      delete config.mesh;
-    }
   }
   if (config.ollama?.baseUrl) {
     const url = new URL(config.ollama.baseUrl);
@@ -343,93 +326,6 @@ async function warmLoop(config) {
   timers.add(timer);
 }
 
-// ------------------------------------------------------------------ mesh
-
-function validPort(value) {
-  return Number.isInteger(value) && value > 0 && value <= 65535;
-}
-
-/** {port, gatePort} while the share state turns Mesh on, else null. */
-async function wantedMesh(config) {
-  const state = await readJson(config.mesh.shareStateFile);
-  const mesh = state?.mesh;
-  if (mesh?.enabled !== true || !validPort(mesh.port) || !validPort(mesh.gatePort) || mesh.port === mesh.gatePort) return null;
-  return { port: mesh.port, gatePort: mesh.gatePort };
-}
-
-let meshRestartAt = 0;
-let meshBackoffMs = 0;
-let meshChecking = false;
-
-function stopMesh(reason) {
-  const child = meshChild;
-  if (!child) return;
-  child.stoppedOnPurpose = true;
-  log("mesh-forwarder-stop", { reason, pid: child.pid || null });
-  try { child.kill(); } catch {}
-}
-
-function startMesh(config, wanted) {
-  let child;
-  try {
-    child = spawn(process.execPath, [
-      config.mesh.forwarderFile,
-      "--port", String(wanted.port),
-      "--target-port", String(wanted.gatePort),
-      "--state", config.mesh.stateFile,
-    ], { env: safeEnvironment(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-  } catch (error) {
-    log("mesh-forwarder-error", { message: error?.message || error });
-    return;
-  }
-  child.wanted = wanted;
-  child.startedAt = Date.now();
-  meshChild = child;
-  pipeLines(child.stdout, "mesh-forwarder");
-  pipeLines(child.stderr, "mesh-forwarder-error");
-  child.once("error", (error) => log("mesh-forwarder-error", { message: error?.message || error }));
-  child.once("exit", (code, signal) => {
-    if (meshChild === child) meshChild = null;
-    // A forwarder killed hard (Windows has no SIGTERM) leaves its state behind.
-    readJson(config.mesh.stateFile).then((record) => {
-      if (record?.pid === child.pid) return fsp.rm(config.mesh.stateFile, { force: true });
-      return null;
-    }).catch(() => {});
-    if (child.stoppedOnPurpose || stopping) {
-      meshBackoffMs = 0;
-      meshRestartAt = 0;
-      return;
-    }
-    // One that ran a while had nothing wrong with its start; begin the backoff again.
-    meshBackoffMs = Date.now() - child.startedAt > 30_000 ? 1_000 : Math.min(meshBackoffMs ? meshBackoffMs * 2 : 1_000, 60_000);
-    meshRestartAt = Date.now() + meshBackoffMs;
-    log("mesh-forwarder-exited", { code, signal, restartInMs: meshBackoffMs });
-  });
-}
-
-async function keepMeshForwarding(config) {
-  if (stopping || meshChecking) return;
-  meshChecking = true;
-  try {
-    const wanted = await wantedMesh(config);
-    if (stopping) return;
-    if (!wanted) { stopMesh("mesh sharing is off"); return; }
-    const running = meshChild?.wanted;
-    if (running && (running.port !== wanted.port || running.gatePort !== wanted.gatePort)) {
-      stopMesh("the ports changed");
-      return;
-    }
-    if (!meshChild && Date.now() >= meshRestartAt) startMesh(config, wanted);
-  } finally {
-    meshChecking = false;
-  }
-}
-
-function meshCheckInterval(config) {
-  const value = Number(config.mesh?.checkIntervalMs);
-  return Number.isInteger(value) && value >= 100 ? value : 2_000;
-}
-
 async function removeOwnPid(config) {
   const record = await readJson(config.state.pidFile);
   if (record?.pid === process.pid) await fsp.rm(config.state.pidFile, { force: true });
@@ -440,14 +336,6 @@ async function shutdown(config, reason, exitCode = 0) {
   stopping = true;
   log("supervisor-stopping", { reason });
   for (const timer of timers) clearTimeout(timer);
-  const forwarder = meshChild;
-  stopMesh("the supervisor is stopping");
-  if (forwarder && forwarder.exitCode === null && forwarder.signalCode === null) {
-    await Promise.race([
-      once(forwarder, "exit").catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 750)),
-    ]);
-  }
   const child = ollamaChild;
   if (child && child.exitCode === null && child.signalCode === null) {
     child.kill();
@@ -495,13 +383,6 @@ async function main() {
     shutdown(config, "uncaught-exception", 1);
   });
   process.on("unhandledRejection", (error) => log("unhandled-rejection", { message: error?.message || error }));
-
-  if (config.mesh) {
-    // First, so a Mesh address answers while Ollama is still given its startup grace.
-    await keepMeshForwarding(config);
-    const checker = setInterval(() => keepMeshForwarding(config), meshCheckInterval(config));
-    timers.add(checker);
-  }
 
   if (config.ollama?.enabled) {
     // At login, Ollama's own app or service may still be starting; give it time

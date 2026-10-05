@@ -41,13 +41,11 @@ import { hostPlan, hostPrepare, hostStart, hostStatus, hostStop } from "./host-m
 import {
   shareDisable,
   shareEnable,
-  shareEnableMesh,
   shareRotate,
   shareStatus,
   shareToken,
   TUNNEL_TOKEN_ENV,
 } from "./share-manager.mjs";
-import { meshClientCheck } from "./mesh.mjs";
 import { gatewayDirectory, gatewayOpen } from "./gateway.mjs";
 import { getProvider } from "./providers/index.mjs";
 import {
@@ -64,7 +62,7 @@ import {
   targetWorkspace,
 } from "./targets.mjs";
 import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
-import { checkPrereqs, FEATURES, installWarp, parseFeatures, validWarpTeam, WARP_TEAM_INVALID } from "./prereqs.mjs";
+import { checkPrereqs, FEATURES, parseFeatures } from "./prereqs.mjs";
 import { backupCommand } from "./backup.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -157,7 +155,7 @@ function sameOrigin(left, right) {
 
 /**
  * A server that requires a token answers /health with 401 without one, and one
- * behind Cloudflare Access refuses a machine off WARP without its service token.
+ * behind Cloudflare Access refuses a machine without its service token.
  */
 function authHeaders(config, extra = {}) {
   return honchoHeaders({ token: config?.honcho?.apiToken, access: configuredAccess(config) }, extra);
@@ -380,9 +378,8 @@ async function setupPlan(options = {}) {
   const envToken = String(process.env[HONCHO_API_TOKEN_ENV] || "").trim();
   const savedToken = existing?.honcho?.apiToken && sameOrigin(existing.honcho.baseUrl, baseUrl) ? existing.honcho.apiToken : "";
   const apiToken = envToken || savedToken;
-  // The Cloudflare Access service token for a server behind Access, for a machine
-  // without WARP. Same rules as the token: environment only, kept for the same
-  // server, dropped for another one.
+  // The Cloudflare Access service token for a server behind Access. Same rules as
+  // the token: environment only, kept for the same server, dropped for another one.
   const envAccessId = String(process.env[ACCESS_ENV.clientId] || "").trim();
   const envAccessSecret = String(process.env[ACCESS_ENV.clientSecret] || "").trim();
   const envAccessGiven = Boolean(envAccessId || envAccessSecret);
@@ -461,9 +458,6 @@ async function setupPlan(options = {}) {
       warnings.push(`${provider} collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in ${provider}`);
     }
   }
-  // A Mesh address is reached only through this computer's own WARP.
-  const mesh = await meshClientCheck(config.honcho.baseUrl).catch(() => null);
-  for (const problem of mesh?.problems || []) warnings.push(`${publicUrl(config.honcho.baseUrl)} is a Cloudflare Mesh address: ${problem.message}`);
   // The address this plan writes, which is not always the one detect tried.
   const health = await probeHealth(config.honcho.baseUrl, config);
   const managed = health.ok ? managedByThisInstall(config.honcho.baseUrl) : null;
@@ -905,21 +899,6 @@ async function probeMcpServer(serverPath, timeoutMs = 2500, env = process.env, {
   });
 }
 
-/**
- * For a Mesh address that did not answer at all (no connection, a timeout): what
- * on this computer's WARP keeps it from that address, or what else to look at.
- */
-async function meshHint(baseUrl, health) {
-  if (health.ok || health.status) return {};
-  const mesh = await meshClientCheck(baseUrl).catch(() => null);
-  if (!mesh) return {};
-  const hints = mesh.problems.map((problem) => problem.message);
-  if (!hints.length) {
-    hints.push("This computer's WARP is connected and sends 100.96.0.0/12 through WARP; check that the server computer is on with WARP connected and Mesh sharing on (server share status there), and that the Cloudflare One account allows Cloudflare One traffic to reach enrolled devices (Networking -> Mesh)");
-  }
-  return { mesh: { ip: mesh.ip, warp: mesh.warp, splitTunnelOk: mesh.splitTunnelOk, problems: mesh.problems.map((problem) => problem.code) }, hints };
-}
-
 async function doctor() {
   const configuration = await inspectConfiguration();
   const config = configuration.config;
@@ -964,7 +943,7 @@ async function doctor() {
   });
   if (config) {
     const health = await probeHealth(config.honcho.baseUrl, config);
-    checks.push({ name: "honcho-health", ...health, url: publicUrl(config.honcho.baseUrl), ...(await meshHint(config.honcho.baseUrl, health)) });
+    checks.push({ name: "honcho-health", ...health, url: publicUrl(config.honcho.baseUrl) });
     checks.push({ name: "honcho-workspaces", ...(await probeWorkspaceAccess(config)), url: publicUrl(config.honcho.baseUrl) });
     const mcpPath = path.join(paths.runtimeDir, "mcp-server.mjs");
     // Own memory and a shared bridge: the agent gets both, so both are checked.
@@ -1710,7 +1689,6 @@ function usage() {
     usage: [
       "detect",
       "prereqs [--features server,sync,chat]",
-      "prereqs install warp --team <name>",
       "server plan [--profile portable|personal]",
       "server prepare [--profile portable|personal] [--model <id>]",
       "server start [--profile portable|personal] [--no-build] [--model <id>]",
@@ -1719,9 +1697,7 @@ function usage() {
       "server verify [--profile personal] [--live-completion]",
       "server share status [--check]",
       "server share enable --public-url <https://host> (the tunnel token in HONCHO_TUNNEL_TOKEN)",
-      "server share enable --mesh [--port <port>] (no domain: devices of the same Cloudflare One account, over WARP)",
       "server share disable",
-      "server share disable --mesh|--tunnel (close only that way in; the gate stays while the other is on)",
       "server share token",
       "server share rotate",
       "host plan [--profile personal]",
@@ -1757,9 +1733,8 @@ function usage() {
 
 /**
  * `server share <action>`: this server, reachable from the owner's other computers
- * through the gate, by a Cloudflare tunnel (a public hostname) or by Cloudflare
- * Mesh (`--mesh`, no domain). The tunnel token is read from HONCHO_TUNNEL_TOKEN
- * only; a command line is visible to every process here.
+ * through the gate, by a Cloudflare tunnel to a public hostname. The tunnel token is
+ * read from HONCHO_TUNNEL_TOKEN only; a command line is visible to every process here.
  */
 async function serverShare(args) {
   const action = args[0] && !args[0].startsWith("--") ? args[0] : "status";
@@ -1768,19 +1743,9 @@ async function serverShare(args) {
   if (onCommandLine.length) {
     return { ok: false, error: `pass the tunnel token through ${TUNNEL_TOKEN_ENV}, not the command line` };
   }
-  if (options.mesh !== undefined && options.mesh !== true) return { ok: false, error: "--mesh takes no value" };
-  if (options.tunnel !== undefined && options.tunnel !== true) return { ok: false, error: "--tunnel takes no value" };
   if (action === "status") return shareStatus({ check: options.check === true });
-  if (action === "enable" && options.mesh) {
-    if (options.publicUrl !== undefined) return { ok: false, error: "--mesh needs no --public-url; use one or the other" };
-    if (options.port !== undefined && !/^\d{1,5}$/.test(String(options.port))) return { ok: false, error: "--port takes a TCP port from 1024 to 65535" };
-    return shareEnableMesh(options.port === undefined ? {} : { port: Number(options.port) });
-  }
   if (action === "enable") return shareEnable({ publicUrl: optionString(options.publicUrl, "") });
-  if (action === "disable") {
-    if (options.mesh && options.tunnel) return { ok: false, error: "--mesh and --tunnel each close one way in; leave both out to close every way in" };
-    return shareDisable(options.mesh ? { only: "mesh" } : options.tunnel ? { only: "tunnel" } : {});
-  }
+  if (action === "disable") return shareDisable();
   if (action === "rotate") return shareRotate();
   if (action === "token") {
     const result = await shareToken();
@@ -1804,33 +1769,13 @@ async function prereqs(options = {}) {
   return checkPrereqs({ features, serverDir: installedServerDir(config) });
 }
 
-/**
- * `prereqs install warp --team <name>`: download Cloudflare WARP's official
- * installer, check its signature and install it, with the team preseeded, behind
- * the OS's password or approval prompt. WARP is the only program this installs;
- * Docker and Ollama come with `server prepare`.
- */
-async function prereqsInstall(args) {
-  const [name, ...rest] = args;
-  if (name !== "warp") return { ok: false, error: "prereqs install takes one program: warp" };
-  let team;
-  for (let index = 0; index < rest.length; index += 1) {
-    const item = rest[index];
-    if (item.startsWith("--team=")) team = item.slice("--team=".length);
-    else if (item === "--team") { team = rest[index + 1] ?? ""; index += 1; }
-    else return { ok: false, error: "prereqs install takes one program: warp, and only --team <name>" };
-  }
-  if (team !== undefined && !validWarpTeam(team.trim())) return { ok: false, error: WARP_TEAM_INVALID };
-  return installWarp({ team: team?.trim() });
-}
-
 async function main() {
   const args = process.argv.slice(2);
   // `setup apply --help` ran apply in the 2026-09-30 install test. Help never acts.
   if (args.some((item) => item === "--help" || item === "-h")) return usage();
   const command = args.shift() || "help";
   if (command === "detect") return detect();
-  if (command === "prereqs") return args[0] === "install" ? prereqsInstall(args.slice(1)) : prereqs(parseOptions(args));
+  if (command === "prereqs") return prereqs(parseOptions(args));
   if (command === "doctor" || command === "status") return doctor();
   if (command === "hook") return runHook((args.shift() || "").trim().toLowerCase());
   if (command === "server") {

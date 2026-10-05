@@ -20,7 +20,6 @@ import {
   RUN_VALUE,
   shareDisable,
   shareEnable,
-  shareEnableMesh,
   shareRotate,
   shareStatus,
   shareSummary,
@@ -64,46 +63,13 @@ function response(status, { headers = {}, body = "" } = {}) {
   };
 }
 
-async function readJsonFile(target) {
-  try { return JSON.parse(await fsp.readFile(target, "utf8")); } catch { return null; }
-}
-
-// What this computer's WARP reports in the Mesh tests unless a test changes it.
-function readyMesh() {
-  return {
-    warp: { installed: true, connected: true, team: "acme-team", iface: "utun4" },
-    ip: "100.96.3.4",
-    iface: "utun4",
-    splitTunnel: { ok: true, mode: "include" },
-  };
-}
-
-async function fixture(t, { platform = "darwin", profiles = "debug", env = { HONCHO_TUNNEL_TOKEN: TUNNEL_TOKEN }, binary = "present", meshForwarder = true, hostConfig = true } = {}) {
+async function fixture(t, { platform = "darwin", profiles = "debug", env = { HONCHO_TUNNEL_TOKEN: TUNNEL_TOKEN }, binary = "present" } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-share-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const serverDirectory = path.join(root, "app", "server");
   await fsp.mkdir(path.join(serverDirectory, "gate"), { recursive: true });
   await fsp.writeFile(path.join(serverDirectory, "compose.yaml"), "name: honcho-agent-bridge\n");
   await fsp.writeFile(path.join(serverDirectory, "gate", "gate.mjs"), "// gate\n");
-  if (meshForwarder) {
-    await fsp.mkdir(path.join(serverDirectory, "host"), { recursive: true });
-    await fsp.writeFile(path.join(serverDirectory, "host", "mesh-forwarder.mjs"), "// forwarder\n");
-  }
-  // The host supervisor's files, as host-manager names them.
-  const hostRuntime = path.join(root, "app", "runtime", "host");
-  const host = {
-    pidFile: path.join(hostRuntime, "supervisor.pid.json"),
-    configFile: path.join(hostRuntime, "host-config.json"),
-    forwarderFile: path.join(hostRuntime, "mesh-forwarder.json"),
-  };
-  const shareFile = path.join(root, "app", "runtime", "share.json");
-  if (hostConfig) {
-    await fsp.mkdir(hostRuntime, { recursive: true });
-    await fsp.writeFile(host.configFile, JSON.stringify({
-      format: 1,
-      mesh: { shareStateFile: shareFile, forwarderFile: path.join(serverDirectory, "host", "mesh-forwarder.mjs"), stateFile: host.forwarderFile },
-    }));
-  }
   const envLines = ["POSTGRES_PASSWORD=db-secret", "EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-4b-honcho-8192"];
   if (profiles) envLines.push(`COMPOSE_PROFILES=${profiles}`);
   await fsp.writeFile(path.join(serverDirectory, ".env"), `${envLines.join("\n")}\n`, { mode: 0o600 });
@@ -115,18 +81,9 @@ async function fixture(t, { platform = "darwin", profiles = "debug", env = { HON
   }
   const home = path.join(root, "home");
   const calls = [];
-  const state = { launchdLoaded: false, windowsRunning: false, versionOk: true, firewallPort: null, firewallAnswer: null, mesh: readyMesh(), hostStart: null };
+  const state = { launchdLoaded: false, windowsRunning: false, versionOk: true };
   const run = async (command, args) => {
     calls.push({ command, args });
-    const script = String(args.at(-1) || "");
-    if (/powershell/i.test(command) && script.includes("New-NetFirewallRule")) {
-      const answer = state.firewallAnswer || { code: 0, stdout: "" };
-      if (answer.code === 0) state.firewallPort = Number(/-LocalPort (\d+)/.exec(script)[1]);
-      return { stdout: "", stderr: "", ...answer };
-    }
-    if (/powershell/i.test(command) && script.includes("Get-NetFirewallRule")) {
-      return { code: 0, stdout: state.firewallPort ? `rule TCP ${state.firewallPort} 100.96.0.0/255.240.0.0\r\n` : "", stderr: "" };
-    }
     if (args[0] === "--version") {
       return state.versionOk ? { code: 0, stdout: "cloudflared version 2026.9.1 (built 2026-09-20)\n", stderr: "" } : { code: 1, stdout: "", stderr: "bad" };
     }
@@ -165,29 +122,6 @@ async function fixture(t, { platform = "darwin", profiles = "debug", env = { HON
     }
     return publicAnswer(url, options);
   };
-  // A stand-in for the host supervisor: while its PID file names a live process, the
-  // forwarder runs exactly when share.json turns Mesh on. It acts whenever the code
-  // under test waits.
-  const syncForwarder = async () => {
-    const supervisor = await readJsonFile(host.pidFile);
-    if (!supervisor) return;
-    const share = await readJsonFile(shareFile);
-    if (share?.mesh?.enabled === true) {
-      await fsp.writeFile(host.forwarderFile, JSON.stringify({ pid: process.pid, port: share.mesh.port, targetPort: share.mesh.gatePort }));
-    } else {
-      await fsp.rm(host.forwarderFile, { force: true });
-    }
-  };
-  const hostStarts = [];
-  const hostRuntimeFake = {
-    start: async (startOptions) => {
-      hostStarts.push(startOptions);
-      if (state.hostStart) return state.hostStart;
-      await fsp.mkdir(hostRuntime, { recursive: true });
-      await fsp.writeFile(host.pidFile, JSON.stringify({ pid: process.pid }));
-      return { ok: true, running: true, started: true };
-    },
-  };
   const options = {
     serverDirectory,
     homeDir: home,
@@ -201,13 +135,9 @@ async function fixture(t, { platform = "darwin", profiles = "debug", env = { HON
     spawnImpl,
     fetchImpl,
     which: () => null,
-    fileExists: () => false,
-    sleep: syncForwarder,
+    sleep: async () => {},
     portInUse: async (port) => port === 8010,
     gateWaitMs: 0,
-    meshProbe: async () => structuredClone(state.mesh),
-    hostRuntime: hostRuntimeFake,
-    meshWaitMs: 2_000,
   };
   return {
     root,
@@ -215,9 +145,7 @@ async function fixture(t, { platform = "darwin", profiles = "debug", env = { HON
     serverDirectory,
     envFile: path.join(serverDirectory, ".env"),
     tokenFile: path.join(runtime, "tunnel-token"),
-    shareFile,
-    host,
-    hostStarts,
+    shareFile: path.join(root, "app", "runtime", "share.json"),
     binaryPath,
     runtime,
     calls,
@@ -529,299 +457,18 @@ test("server status says cheaply whether the server is shared", async (t) => {
   assert.deepEqual((await inspect()).share, { enabled: true, publicUrl: PUBLIC_URL });
 });
 
-// ------------------------------------------------------------------ Mesh
-
-const MESH_ADDRESS = "http://100.96.3.4:8012";
-
-test("enable --mesh needs no domain or tunnel token, opens the gate and has the supervisor run the forwarder", async (t) => {
-  const f = await fixture(t, { env: {} });
-  const enabled = await shareEnableMesh(f.options);
-  assert.equal(enabled.ok, true, JSON.stringify(enabled));
-  assert.equal(enabled.enabled, true);
-  assert.equal(enabled.gateTokenCreated, true);
-  assert.equal(enabled.gate.port, 8011, "8010 was busy");
-  assert.equal(enabled.mesh.enabled, true);
-  assert.equal(enabled.mesh.port, 8012, "the first free port from 8011 that is not the gate's");
-  assert.equal(enabled.mesh.address, MESH_ADDRESS);
-  assert.deepEqual(enabled.mesh.warp, { installed: true, connected: true, team: "acme-team", iface: "utun4" });
-  assert.equal(enabled.mesh.splitTunnelOk, true);
-  assert.equal(enabled.mesh.forwarder.running, true);
-  assert.deepEqual(enabled.mesh.problems, []);
-  assert.equal("warnings" in enabled, false, JSON.stringify(enabled.warnings));
-  assert.match(enabled.note, /Allow all Cloudflare One traffic to reach enrolled devices/);
-  assert.ok(enabled.next.includes(`--honcho-url ${MESH_ADDRESS}`));
-  assert.deepEqual(enabled.host, { running: true, started: true }, "the supervisor was not running, so it was started");
-  assert.equal(f.hostStarts[0].skipPrepare, true);
-  assert.equal(f.hostStarts[0].installedServerDir, f.serverDirectory);
-
-  const environment = parseEnv(await fsp.readFile(f.envFile, "utf8"));
-  assert.match(environment.HONCHO_GATE_TOKEN, /^[A-Za-z0-9_-]{43}$/);
-  assert.equal(environment.COMPOSE_PROFILES, "debug,share");
-  assert.equal(environment.HONCHO_GATE_PORT, "8011");
-  const saved = JSON.parse(await fsp.readFile(f.shareFile, "utf8"));
-  assert.equal(saved.tunnel, false, "the tunnel was not on");
-  assert.deepEqual({ ...saved.mesh, enabledAt: undefined }, { enabled: true, port: 8012, gatePort: 8011, enabledAt: undefined, lastAddress: MESH_ADDRESS });
-
-  assert.ok(f.calls.some((call) => call.command === "docker compose" && call.args.join(" ") === "up -d gate"));
-  assert.equal(f.calls.some((call) => call.args[0] === "--version"), false, "cloudflared is not needed");
-  assert.equal(f.calls.some((call) => call.command === "/bin/launchctl"), false, "no tunnel autostart");
-  assert.equal(JSON.stringify(f.calls).includes(environment.HONCHO_GATE_TOKEN), false);
-  assert.equal(JSON.stringify(enabled).includes(environment.HONCHO_GATE_TOKEN), false);
-
-  // Again: the same port, so the address the other computers have keeps working.
-  const again = await shareEnableMesh(f.options);
-  assert.equal(again.mesh.port, 8012);
-  assert.equal(again.gateTokenCreated, false);
-  assert.deepEqual(again.host, { running: true, started: false });
-  assert.equal(f.hostStarts.length, 1);
-  assert.equal(JSON.parse(await fsp.readFile(f.shareFile, "utf8")).mesh.enabledAt, saved.mesh.enabledAt);
-
-  assert.deepEqual(await shareSummary({ serverDirectory: f.serverDirectory }), { enabled: true, publicUrl: null, mesh: { enabled: true, port: 8012 } });
-  assert.deepEqual((await serverStatus({
-    profile: "portable",
-    serverDirectory: f.serverDirectory,
-    dockerInspector: async () => ({ installed: true, running: false }),
-  })).share, { enabled: true, publicUrl: null, mesh: { enabled: true, port: 8012 } });
-});
-
-test("enable --mesh says what this computer's WARP lacks, and still turns on", async (t) => {
-  const f = await fixture(t, { env: {} });
-  f.state.mesh = { ...readyMesh(), splitTunnel: { ok: false, mode: "include" } };
-  const include = await shareEnableMesh(f.options);
-  assert.equal(include.ok, true);
-  assert.deepEqual(include.mesh.problems, ["split-tunnel-include"]);
-  assert.match(include.warnings[0], /Include mode without 100\.96\.0\.0\/12/);
-
-  f.state.mesh = { warp: { installed: true, connected: false, team: "acme-team", iface: "utun4" }, ip: null, iface: "utun4", splitTunnel: { ok: false, mode: "exclude", blocking: "100.64.0.0/10" } };
-  const offline = await shareEnableMesh(f.options);
-  assert.equal(offline.ok, true);
-  assert.equal(offline.mesh.address, null);
-  assert.deepEqual(offline.mesh.problems, ["warp-disconnected", "split-tunnel-exclude"]);
-  assert.match(offline.next, /Connect WARP/);
-  assert.equal(JSON.parse(await fsp.readFile(f.shareFile, "utf8")).mesh.lastAddress, MESH_ADDRESS, "no address does not forget the last one");
-
-  f.state.mesh = { warp: { installed: false, connected: false, team: "", iface: null }, ip: null, iface: null, splitTunnel: { ok: null, mode: null } };
-  assert.deepEqual((await shareEnableMesh(f.options)).mesh.problems, ["warp-missing"]);
-});
-
-test("status shows both ways in and points out a changed Mesh address once", async (t) => {
-  const f = await fixture(t);
-  const off = await shareStatus(f.options);
-  assert.equal(off.enabled, false);
-  assert.equal(off.tunnel.enabled, false);
-  assert.equal(off.mesh.enabled, false);
-  assert.equal(off.mesh.ip, "100.96.3.4", "WARP's state is shown before Mesh is on");
-  assert.deepEqual(off.mesh.problems, []);
-
-  assert.equal((await shareEnableMesh(f.options)).ok, true);
-  const mesh = await shareStatus(f.options);
-  assert.equal(mesh.enabled, true);
-  assert.equal(mesh.tunnel.enabled, false);
-  assert.equal(mesh.mesh.enabled, true);
-  assert.equal(mesh.mesh.address, MESH_ADDRESS);
-  assert.equal(mesh.mesh.forwarder.running, true);
-  assert.equal("warnings" in mesh, false, JSON.stringify(mesh.warnings));
-
-  f.state.mesh.ip = "100.96.9.9";
-  const moved = await shareStatus(f.options);
-  assert.deepEqual(moved.mesh.addressChanged, { from: MESH_ADDRESS, to: "http://100.96.9.9:8012" });
-  assert.ok(moved.mesh.problems.includes("address-changed"));
-  assert.ok(moved.warnings.some((line) => line.includes(`changed from ${MESH_ADDRESS} to http://100.96.9.9:8012`)));
-  const shown = await shareStatus(f.options);
-  assert.equal("addressChanged" in shown.mesh, false, "said once, then it is the address");
-  assert.equal(shown.mesh.lastAddress, "http://100.96.9.9:8012");
-
-  // The tunnel too: both are on, and each is reported.
-  assert.equal((await shareEnable({ ...f.options, publicUrl: PUBLIC_URL })).ok, true);
-  const both = await shareStatus(f.options);
-  assert.equal(both.tunnel.enabled, true);
-  assert.equal(both.mesh.enabled, true);
-  assert.equal(both.publicUrl, PUBLIC_URL);
-  const saved = JSON.parse(await fsp.readFile(f.shareFile, "utf8"));
-  assert.equal(saved.tunnel, true);
-  assert.equal(saved.mesh.enabled, true, "turning the tunnel on keeps Mesh");
-});
-
-test("status --check goes through this computer's own Mesh address, and says what only the account can open", async (t) => {
-  const f = await fixture(t, { env: {} });
-  assert.equal((await shareEnableMesh(f.options)).ok, true);
-  const gateToken = parseEnv(await fsp.readFile(f.envFile, "utf8")).HONCHO_GATE_TOKEN;
-  const checked = await shareStatus({ ...f.options, check: true });
-  assert.equal(checked.mesh.check.state, "ok");
-  assert.deepEqual(checked.mesh.check.local, { forwarder: true, gate: true });
-  assert.match(checked.mesh.check.note, /only this computer's forwarder and gate/);
-  assert.match(checked.mesh.check.note, /Networking -> Mesh/);
-  assert.equal("publicCheck" in checked, false, "a server shared over Mesh only has no public address to check");
-  const call = f.fetches.filter((item) => item.url === `${MESH_ADDRESS}/health`).at(-1);
-  assert.equal(call.options.headers.Authorization, `Bearer ${gateToken}`);
-
-  // macOS sends a request to its own WARP address into the tunnel: with the
-  // forwarder and the gate up, that is not a failure here.
-  f.setPublicAnswer((url) => {
-    if (url.startsWith(MESH_ADDRESS)) throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
-    return response(200);
-  });
-  const hairpin = await shareStatus({ ...f.options, check: true });
-  assert.equal(hairpin.mesh.check.state, "local-only");
-  assert.match(hairpin.mesh.check.detail, /Try from another computer/);
-  f.setPublicAnswer(() => response(401));
-  assert.equal((await shareStatus({ ...f.options, check: true })).mesh.check.state, "token");
-});
-
-test("disable --mesh keeps the gate for the tunnel, and closes it as before when the tunnel is off", async (t) => {
-  const f = await fixture(t);
-  assert.equal((await shareEnable({ ...f.options, publicUrl: PUBLIC_URL })).ok, true);
-  assert.equal((await shareEnableMesh(f.options)).ok, true);
-  f.calls.length = 0;
-
-  const meshOff = await shareDisable({ ...f.options, only: "mesh" });
-  assert.equal(meshOff.ok, true, JSON.stringify(meshOff));
-  assert.deepEqual(meshOff.mesh, { enabled: false, forwarderStopped: true });
-  assert.equal(meshOff.gateKept, true);
-  assert.equal(f.calls.some((call) => call.command === "docker compose"), false, "the gate stays for the tunnel");
-  assert.equal(f.calls.some((call) => call.args[0] === "bootout"), false, "and so does the tunnel");
-  await assert.rejects(fsp.access(f.host.forwarderFile), "the supervisor stopped the forwarder");
-  assert.equal(parseEnv(await fsp.readFile(f.envFile, "utf8")).COMPOSE_PROFILES, "debug,share");
-  const status = await shareStatus(f.options);
-  assert.equal(status.tunnel.enabled, true);
-  assert.equal(status.mesh.enabled, false);
-
-  // Mesh on again, then the tunnel off alone.
-  assert.equal((await shareEnableMesh(f.options)).ok, true);
-  f.calls.length = 0;
-  const tunnelOff = await shareDisable({ ...f.options, only: "tunnel" });
-  assert.equal(tunnelOff.ok, true);
-  assert.equal(tunnelOff.gateKept, true);
-  assert.ok(f.calls.some((call) => call.command === "/bin/launchctl" && call.args[0] === "bootout"));
-  assert.equal(f.calls.some((call) => call.command === "docker compose"), false);
-  const meshOnly = await shareStatus(f.options);
-  assert.equal(meshOnly.tunnel.enabled, false);
-  assert.equal(meshOnly.mesh.enabled, true);
-  assert.equal(meshOnly.enabled, true);
-
-  // Mesh off with the tunnel off already: everything closes, as plain disable did.
-  f.calls.length = 0;
-  const last = await shareDisable({ ...f.options, only: "mesh" });
-  assert.equal(last.ok, true);
-  assert.equal(last.enabled, false);
-  assert.equal(last.gateStopped, true);
-  assert.deepEqual(last.mesh, { enabled: false, forwarderStopped: true });
-  const lines = f.calls.map((call) => `${call.command} ${call.args.join(" ")}`);
-  assert.ok(lines.includes("docker compose stop gate"));
-  assert.ok(lines.includes("docker compose rm -f gate"));
-  assert.equal(parseEnv(await fsp.readFile(f.envFile, "utf8")).COMPOSE_PROFILES, "debug");
-  assert.deepEqual(await shareSummary({ serverDirectory: f.serverDirectory }), { enabled: false, publicUrl: PUBLIC_URL, mesh: { enabled: false, port: 8012 } });
-});
-
-test("plain disable closes both ways in, the tunnel first", async (t) => {
-  const f = await fixture(t);
-  assert.equal((await shareEnable({ ...f.options, publicUrl: PUBLIC_URL })).ok, true);
-  assert.equal((await shareEnableMesh(f.options)).ok, true);
-  const gateToken = parseEnv(await fsp.readFile(f.envFile, "utf8")).HONCHO_GATE_TOKEN;
-  f.calls.length = 0;
-  const disabled = await shareDisable(f.options);
-  assert.equal(disabled.ok, true, JSON.stringify(disabled));
-  assert.deepEqual(disabled.mesh, { enabled: false, forwarderStopped: true });
-  const order = f.calls.map((call) => `${call.command} ${call.args.join(" ")}`);
-  assert.ok(order.findIndex((line) => line.startsWith("/bin/launchctl bootout")) < order.indexOf("docker compose stop gate"));
-  const status = await shareStatus(f.options);
-  assert.equal(status.enabled, false);
-  assert.equal(status.tunnel.enabled, false);
-  assert.equal(status.mesh.enabled, false);
-  assert.equal(parseEnv(await fsp.readFile(f.envFile, "utf8")).HONCHO_GATE_TOKEN, gateToken, "the gate token is kept");
-
-  // Mesh alone afterwards: the tunnel it closed stays closed.
-  assert.equal((await shareEnableMesh(f.options)).ok, true);
-  const meshOnly = await shareStatus(f.options);
-  assert.equal(meshOnly.tunnel.enabled, false);
-  assert.equal(meshOnly.mesh.enabled, true);
-  assert.equal(meshOnly.mesh.port, 8012, "the port the other computers had");
-});
-
-test("a share.json from before Mesh still means the tunnel", async (t) => {
+test("a share.json without the tunnel field still means the tunnel", async (t) => {
   const f = await fixture(t, { profiles: "share" });
   await fsp.mkdir(path.dirname(f.shareFile), { recursive: true });
   await fsp.writeFile(f.shareFile, JSON.stringify({ publicUrl: PUBLIC_URL, enabledAt: "2026-09-20T00:00:00.000Z" }));
   const before = await shareStatus(f.options);
+  assert.equal(before.enabled, true);
   assert.equal(before.tunnel.enabled, true);
-  assert.equal(before.mesh.enabled, false);
-  assert.equal((await shareEnableMesh(f.options)).ok, true);
+  assert.equal((await shareDisable(f.options)).ok, true);
   const saved = JSON.parse(await fsp.readFile(f.shareFile, "utf8"));
-  assert.equal(saved.tunnel, true);
   assert.equal(saved.publicUrl, PUBLIC_URL);
+  assert.equal("tunnel" in saved, false, "an older file is closed as it is");
   const after = await shareStatus(f.options);
-  assert.equal(after.tunnel.enabled, true);
-  assert.equal(after.mesh.enabled, true);
-});
-
-test("enable --mesh refuses an older server, the gate's port and a taken port", async (t) => {
-  const old = await fixture(t, { meshForwarder: false });
-  const refused = await shareEnableMesh(old.options);
-  assert.equal(refused.ok, false);
-  assert.match(refused.error, /predates Mesh sharing; run server prepare --profile personal again/);
-  assert.equal(old.calls.length, 0, "nothing ran");
-
-  const f = await fixture(t);
-  assert.match((await shareEnableMesh({ ...f.options, port: 8011 })).error, /the gate's own port/);
-  assert.match((await shareEnableMesh({ ...f.options, port: 80 })).error, /1024 to 65535/);
-  assert.match((await shareEnableMesh({ ...f.options, port: 9000, meshPortInUse: async (port) => port === 9000 })).error, /taken by another program/);
-  assert.equal(f.calls.length, 0, "nothing ran for a refused port");
-  const chosen = await shareEnableMesh({ ...f.options, port: 9001 });
-  assert.equal(chosen.mesh.port, 9001);
-  assert.equal(chosen.mesh.address, "http://100.96.3.4:9001");
-  // The port it already has is never refused as taken by its own forwarder.
-  const kept = await shareEnableMesh({ ...f.options, port: 9001, meshPortInUse: async () => true });
-  assert.equal(kept.ok, true, JSON.stringify(kept));
-});
-
-test("enable --mesh reports a supervisor that would not start and a host config from before Mesh", async (t) => {
-  const f = await fixture(t);
-  f.state.hostStart = { ok: false, running: false, issues: ["Host runtime config was not generated"] };
-  const down = await shareEnableMesh({ ...f.options, meshWaitMs: 0 });
-  assert.equal(down.ok, true);
-  assert.deepEqual(down.host, { running: false, started: false, issues: ["Host runtime config was not generated"] });
-  assert.deepEqual(down.mesh.problems, ["host-down"]);
-  assert.match(down.warnings[0], /run host start/);
-
-  const old = await fixture(t);
-  await fsp.writeFile(old.host.configFile, JSON.stringify({ format: 1 }));
-  const stale = await shareEnableMesh({ ...old.options, meshWaitMs: 0, sleep: async () => {} });
-  assert.deepEqual(stale.mesh.problems, ["host-config-old"]);
-
-  // The supervisor runs, but the forwarder cannot listen: something else has the port.
-  const taken = await fixture(t);
-  const first = await shareEnableMesh(taken.options);
-  assert.equal(first.mesh.port, 8012);
-  await fsp.rm(taken.host.forwarderFile);
-  const blocked = await shareStatus({ ...taken.options, meshPortInUse: async (port) => port === 8012 });
-  assert.deepEqual(blocked.mesh.problems, ["port-taken"]);
-  assert.match(blocked.warnings[0], /--port <port>/);
-  assert.deepEqual((await shareStatus(taken.options)).mesh.problems, ["forwarder-down"]);
-});
-
-test("Windows: enable --mesh adds the firewall rule behind one prompt, and says when it was declined", async (t) => {
-  const f = await fixture(t, { platform: "win32", env: {} });
-  const elevations = () => f.calls.filter((call) => /powershell/i.test(call.command) && call.args.at(-1).includes("runas")).length;
-  f.state.firewallAnswer = { code: 1, stdout: "start-failed 1223 The operation was canceled by the user.\r\n" };
-  const declined = await shareEnableMesh(f.options);
-  assert.equal(declined.ok, true, JSON.stringify(declined));
-  assert.deepEqual(declined.mesh.firewall, { ok: false, name: "Team Memory Mesh", cancelled: true });
-  assert.ok(declined.mesh.problems.includes("firewall-missing"));
-  assert.ok(declined.warnings.some((line) => /declined/.test(line)));
-  assert.equal(elevations(), 1);
-
-  f.state.firewallAnswer = null;
-  const added = await shareEnableMesh(f.options);
-  assert.deepEqual(added.mesh.firewall, { ok: true, name: "Team Memory Mesh", added: true });
-  assert.equal(added.mesh.problems.includes("firewall-missing"), false);
-  assert.equal(f.state.firewallPort, 8012);
-  assert.equal(elevations(), 2);
-
-  const again = await shareEnableMesh(f.options);
-  assert.deepEqual(again.mesh.firewall, { ok: true, name: "Team Memory Mesh" });
-  assert.equal(elevations(), 2, "a rule that is there is not asked for again");
-  const status = await shareStatus(f.options);
-  assert.equal(status.mesh.firewall.ok, true);
-  f.state.firewallPort = null;
-  assert.ok((await shareStatus(f.options)).mesh.problems.includes("firewall-missing"), "status sees a rule that went away");
+  assert.equal(after.enabled, false);
+  assert.equal(after.tunnel.enabled, false);
 });

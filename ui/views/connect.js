@@ -25,7 +25,7 @@ const WARNINGS = [
   [/(\w+) collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in (\w+)/, (m) => `${m[2] === "codex" ? "Codex" : "Claude Code"}에 팀 메모리 플러그인이 켜져 있지 않습니다. 플러그인을 켜야 대화가 모입니다.`],
   [/A Honcho server answers at (\S+), but it is not the server this plugin installed/, (m) => `${m[1]}에 기억 서버가 있지만 이 앱이 설치한 서버는 아닙니다. 내 서버가 맞는지 확인하세요.`],
   [/requires an API token/, () => "이 서버는 토큰이 필요합니다. 서버 토큰 칸을 채우세요."],
-  [/is behind Cloudflare Access and refused this computer/, () => "Cloudflare Access가 이 컴퓨터를 막았습니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜거나, 고급: WARP 없이 연결에 Access 서비스 토큰을 넣으세요."],
+  [/is behind Cloudflare Access and refused this computer/, () => "Cloudflare Access가 이 컴퓨터를 막았습니다. Cloudflare Access 서비스 토큰을 열고 그 서버의 서비스 토큰 ID와 비밀을 넣으세요."],
   [/Cloudflare Access (?:client id|service token).*(?:both|together)/i, () => "Access 서비스 토큰은 ID와 비밀을 함께 넣어야 합니다."],
   [/rejected the API token/, () => "서버가 이 토큰을 받지 않습니다. 서버를 둔 컴퓨터의 토큰이 맞는지 확인하세요."],
   [/at least one detected agent must be selected/, () => "대화를 보낼 에이전트를 하나 이상 고르세요. 이 컴퓨터에 설치된 Claude Code나 Codex만 고를 수 있습니다."],
@@ -157,7 +157,7 @@ function checkText(check) {
   if (hook) return `${agent(hook[1])}에 대화 수집 훅이 없거나 예전 것입니다. 설정을 다시 적용하세요.`;
   if (check.name === "configuration") return "수집 설정이 없습니다.";
   if (check.name === "runtime") return `수집 프로그램이 ${check.actualVersion ? `예전 판(${check.actualVersion})` : "설치돼 있지 않습니다"}. 설정을 다시 적용하면 새로 설치합니다.`;
-  if (check.name === "honcho-health" && check.code === "cloudflare-access") return "Cloudflare Access가 이 컴퓨터를 막았습니다. WARP를 팀 계정으로 켜거나 Access 서비스 토큰을 넣으세요.";
+  if (check.name === "honcho-health" && check.code === "cloudflare-access") return "Cloudflare Access가 이 컴퓨터를 막았습니다. 그 서버의 Access 서비스 토큰을 넣으세요.";
   if (check.name === "honcho-health" && check.status === 401) return "기억 서버가 토큰을 받지 않습니다. 서버를 둔 컴퓨터에서 서버 토큰을 다시 복사해 넣으세요.";
   if (check.name === "honcho-health") return "기억 서버가 답하지 않습니다.";
   if (check.name === "honcho-workspaces") return "기억 서버에 닿았지만 workspace를 읽지 못했습니다. 토큰이 맞는지 확인하세요.";
@@ -296,7 +296,7 @@ function collectFlow(body) {
   setMode(mode);
   STEP_INFO.server.note = localUrl
     ? "이 컴퓨터에 기억 서버가 있습니다. 내 서버가 다른 컴퓨터에 있으면 그쪽을 고릅니다."
-    : "다른 컴퓨터에 둔 내 기억 서버로 보냅니다. 그 컴퓨터의 앱에서 서버 → 다른 컴퓨터에서 쓰기를 열면 주소와 서버 토큰이 있습니다. 이 컴퓨터에서 Cloudflare WARP를 팀 계정으로 켜 두세요.";
+    : "다른 컴퓨터에 둔 내 기억 서버로 보냅니다. 그 컴퓨터의 앱에서 서버 → 다른 컴퓨터에서 쓰기를 열면 주소와 서버 토큰이 있습니다. 서버가 Cloudflare Access 뒤에 있으면 Access 서비스 토큰도 넣습니다.";
 
   // Which agents this computer has; until known the boxes keep their values.
   let touched = false;
@@ -542,7 +542,7 @@ function targetsPage(container) {
         field("그 서버의 workspace", inputs.workspace, "비우면 내 서버와 같게 둡니다."),
         field("그 서버에서 쓸 peer 이름", inputs.userPeer, "비우면 내 서버와 같게 둡니다."),
         h("details", { class: "field wide access-fields" },
-          h("summary", {}, "고급: WARP 없이 연결"),
+          h("summary", {}, "Cloudflare Access 서비스 토큰"),
           h("div", { class: "form-grid" }, field("Access 서비스 토큰 ID", inputs.accessClientId), field("Access 서비스 토큰 비밀", inputs.accessClientSecret)),
         ),
       ),
@@ -617,7 +617,7 @@ function sharePage(share) {
     const form = template.querySelector("form");
     clear(share,
       h("div", { class: "panel" },
-        h("p", { class: "muted", style: { margin: "0 0 12px", fontSize: "13px" } }, "팀원에게 받은 주소와 토큰을 넣습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요. 이 컴퓨터에 Cloudflare WARP가 팀으로 연결돼 있어야 합니다."),
+        h("p", { class: "muted", style: { margin: "0 0 12px", fontSize: "13px" } }, "팀원에게 받은 주소와 토큰을 넣습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요."),
         template,
         h("div", { class: "form-actions" }, button("연결", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
           if (!form.reportValidity()) return;

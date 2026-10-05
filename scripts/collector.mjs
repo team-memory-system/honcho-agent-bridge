@@ -21,8 +21,8 @@ import { folderMatches, foldersFromEnvironment } from "./targets.mjs";
 const ROOT_URL = (process.env.HONCHO_BASE_URL || "http://127.0.0.1:8001").replace(/\/+$/, "");
 const AUTH_TOKEN = process.env.HONCHO_API_BEARER_TOKEN || "";
 // Cloudflare Access sits in front of Honcho once it is reachable from outside this
-// machine. A browser gets a login page; a collector without WARP has to present a
-// service token. The hook environment carries the one setup saved
+// machine. A browser gets a login page; a collector has to present a service
+// token. The hook environment carries the one setup saved
 // (HONCHO_CF_ACCESS_CLIENT_ID/SECRET); the older CF_ACCESS_CLIENT_ID/SECRET still
 // work when those are not set.
 const CF_ACCESS = environmentAccess(process.env, { legacy: true });

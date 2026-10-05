@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 import { appContext, localTools, relayDashboard, relayGateway, relayHoncho, sessionsPage, setLocalTool } from "./app-api.mjs";
 import { configEnvironment, loadConfig } from "./config.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
-import { FEATURES, parseFeatures, validWarpTeam, WARP_TEAM_INVALID } from "./prereqs.mjs";
+import { FEATURES, parseFeatures } from "./prereqs.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
 
@@ -224,23 +224,6 @@ export function shareEnableInvocation(body) {
   };
 }
 
-/**
- * What `/api/server/share/mesh/enable` runs. No secret is involved: the gate token
- * is made by the CLI, and the port, when given, is checked here first.
- */
-export function shareMeshEnableInvocation(body) {
-  const args = ["server", "share", "enable", "--mesh"];
-  if (body?.port === undefined || body.port === null || body.port === "") return { args };
-  const port = Number(body.port);
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) return { error: "The port must be a number from 1024 to 65535." };
-  return { args: [...args, `--port=${port}`] };
-}
-
-/** What `/api/server/share/disable` runs: `{ mode: "tunnel" }` closes only the tunnel. */
-export function shareDisableInvocation(body) {
-  return ["server", "share", "disable", ...(body?.mode === "tunnel" ? ["--tunnel"] : [])];
-}
-
 // POST only, so a cross-site GET can never read the gate token; the Host and
 // Origin checks above apply as they do to every route.
 const SHARE_ROUTES = {
@@ -249,17 +232,9 @@ const SHARE_ROUTES = {
     const { args, env } = shareEnableInvocation(body);
     return runCli(args, { timeout: 900_000, env });
   },
-  "/api/server/share/disable": async (body) => runCli(shareDisableInvocation(body), { timeout: 300_000 }),
+  "/api/server/share/disable": async () => runCli(["server", "share", "disable"], { timeout: 300_000 }),
   "/api/server/share/token": async () => runCli(["server", "share", "token"], { timeout: 30_000 }),
   "/api/server/share/rotate": async () => runCli(["server", "share", "rotate"], { timeout: 300_000 }),
-  // Mesh: no domain, only devices of the same Cloudflare One account. On Windows the
-  // enable waits for the user at one administrator prompt (the firewall rule).
-  "/api/server/share/mesh/enable": async (body) => {
-    const invocation = shareMeshEnableInvocation(body);
-    if (invocation.error) return { ok: false, error: invocation.error };
-    return runCli(invocation.args, { timeout: 900_000, env: secretEnvironment({}, SHARE_SECRET_FIELDS) });
-  },
-  "/api/server/share/mesh/disable": async () => runCli(["server", "share", "disable", "--mesh"], { timeout: 300_000 }),
 };
 
 /**
@@ -520,25 +495,6 @@ export function prereqsInvocation(query) {
   return { args: ["prereqs", `--features=${features.join(",")}`] };
 }
 
-// What the start screen may install for the user. Everything else is installed by
-// server prepare or by the user.
-const INSTALLABLE_PREREQS = Object.freeze(["warp"]);
-
-/**
- * `{ item: "warp", team }` as `cli.mjs prereqs install` arguments; nothing else
- * passes. The team, checked here too, goes as `--team=<name>` so it can never be
- * read as an option of its own.
- */
-export function prereqsInstallInvocation(body) {
-  const item = typeof body?.item === "string" ? body.item.trim() : "";
-  if (!INSTALLABLE_PREREQS.includes(item)) return { error: `item must be one of: ${INSTALLABLE_PREREQS.join(", ")}` };
-  const args = ["prereqs", "install", item];
-  if (body.team === undefined || body.team === null || body.team === "") return { args };
-  const team = typeof body.team === "string" ? validWarpTeam(body.team.trim()) : null;
-  if (!team) return { error: WARP_TEAM_INVALID };
-  return { args: [...args, `--team=${team}`] };
-}
-
 async function staticFile(req, res) {
   const requested = new URL(req.url, "http://ui").pathname;
   const relative = requested === "/" ? "index.html" : requested.replace(/^\/+/, "");
@@ -611,17 +567,6 @@ export function createUiServer() {
       const invocation = prereqsInvocation(url.searchParams);
       if (invocation.error) return json(res, 400, { ok: false, error: invocation.error });
       return json(res, 200, await runCli(invocation.args, { timeout: 60_000 }));
-    }
-    // Downloads an installer of about 150 MB (up to 25 minutes), then waits up to
-    // 10 minutes for the user at the password or approval prompt.
-    if (url.pathname === "/api/app/prereqs/install") {
-      if (req.method !== "POST") return json(res, 405, { ok: false, error: "Method not allowed" });
-      let body;
-      try { body = await readJsonBody(req); }
-      catch (error) { return json(res, 400, { ok: false, error: String(error?.message || error) }); }
-      const invocation = prereqsInstallInvocation(body);
-      if (invocation.error) return json(res, 400, { ok: false, error: invocation.error });
-      return json(res, 200, await runCli(invocation.args, { timeout: 2_400_000 }));
     }
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];

@@ -229,16 +229,11 @@ export default {
       );
     }
 
-    // 다른 컴퓨터에서 쓰기: a token gate in front of the API, reached one of two ways.
-    // With a domain, a Cloudflare tunnel to a public hostname: the owner makes the
-    // tunnel in the Cloudflare dashboard and pastes its token. Without one, Cloudflare
-    // Mesh: devices of the same Cloudflare One account reach this computer's WARP
-    // address, once the account allows it. Either way other computers get an address
-    // and this server's token.
+    // 다른 컴퓨터에서 쓰기: a token gate in front of the API and a Cloudflare tunnel
+    // to it. The owner makes the tunnel in the Cloudflare dashboard and pastes its
+    // token; other computers get this server's address and its server token.
     function shareSection() {
       const box = h("div", {}, h("div", { class: "empty" }, spinner()));
-      // Which way the owner picked while neither is on yet; kept across redraws.
-      let way = null;
       const drawShare = async (check = false) => {
         let share;
         try {
@@ -248,180 +243,15 @@ export default {
           return;
         }
         const tunnelOn = share.tunnel?.enabled ?? share.enabled;
-        const meshOn = share.mesh?.enabled === true;
-        if (tunnelOn || meshOn) {
-          clear(box, tunnelOn ? shareOn(share, drawShare) : null, meshOn ? meshPanelOn(share, drawShare) : null);
-          return;
-        }
-        const pick = (next) => { way = next; drawChoice(); };
-        const drawChoice = () => clear(box,
-          shareWays(way, pick),
-          way === "public" ? shareOff(share, drawShare) : null,
-          way === "mesh" ? meshPanelOff(share, drawShare) : null,
-        );
-        drawChoice();
+        clear(box, tunnelOn ? shareOn(share, drawShare) : shareOff(share, drawShare));
       };
       drawShare(false);
-      return section({ id: "share", title: "다른 컴퓨터에서 쓰기", note: "다른 컴퓨터가 대화를 이 서버로 보내게 합니다. Cloudflare를 거쳐서만 열고, 서버 토큰이 없는 요청은 받지 않습니다." }, box);
-    }
-
-    function shareWays(way, pick) {
-      const ways = [
-        ["public", "도메인이 있음 (공개 주소)", "내 도메인의 주소 하나로 엽니다. Cloudflare 통로와 Access가 지킵니다."],
-        ["mesh", "도메인이 없음 (Mesh: 같은 Cloudflare 계정의 기기만)", "같은 Cloudflare 계정의 WARP를 켠 기기끼리만 이 컴퓨터의 WARP 주소로 닿습니다."],
-      ];
-      return h("div", { class: "choices", style: { gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", marginBottom: "14px" } }, ways.map(([key, title, text]) => h("button", {
-        class: `choice ${way === key ? "picked" : ""}`,
-        type: "button",
-        "aria-pressed": way === key ? "true" : "false",
-        onclick: () => pick(key),
-      }, h("b", {}, title), h("span", {}, text))));
-    }
-
-    // What the share status's mesh.problems codes mean, in the words of this screen.
-    function meshProblemText(code, mesh) {
-      switch (code) {
-        case "warp-missing": return "이 컴퓨터에 Cloudflare WARP가 없습니다. 시작 화면에서 WARP를 설치하세요.";
-        case "warp-not-team": return "이 컴퓨터의 WARP가 팀(Cloudflare One)에 등록되어 있지 않습니다. 같은 계정의 팀에 등록해야 다른 컴퓨터와 이어집니다.";
-        case "warp-disconnected": return "이 컴퓨터의 WARP가 꺼져 있습니다. WARP를 켜면 Mesh 주소가 생깁니다.";
-        case "no-mesh-ip": return "WARP는 켜져 있지만 Mesh 주소(100.96.x.x)가 없습니다. 계정의 기기 설정에서 가상 IP(use_zt_virtual_ip)를 켜야 합니다.";
-        case "split-tunnel-include": return "이 컴퓨터의 WARP Split Tunnels가 Include 모드인데 100.96.0.0/12가 빠져 있습니다. 계정 주인이 기기 프로필의 Include 목록에 넣어야 합니다.";
-        case "split-tunnel-exclude": return `이 컴퓨터의 WARP Split Tunnels가 Mesh 주소 범위를 빼고 있습니다${mesh?.splitTunnel?.blocking ? ` (${mesh.splitTunnel.blocking})` : ""}. 계정 주인이 기기 프로필의 Exclude 목록에서 그 항목을 빼야 합니다.`;
-        case "firewall-missing": return mesh?.firewall?.cancelled
-          ? "관리자 승인을 하지 않아 Windows 방화벽이 다른 컴퓨터의 접속을 막고 있습니다. '방화벽 허용'을 누르면 다시 묻습니다."
-          : "Windows 방화벽이 다른 컴퓨터의 접속을 막고 있습니다. '방화벽 허용'을 누르면 관리자 승인 창이 한 번 뜹니다.";
-        case "forwarder-down": return "Mesh 중계가 아직 돌지 않습니다. 몇 초 뒤 다시 확인하세요.";
-        case "port-taken": return `다른 프로그램이 ${mesh?.port || "Mesh"} 포트를 쓰고 있어 Mesh 중계가 뜨지 못합니다. 그 프로그램을 끄거나, 에이전트에게 다른 포트로 다시 켜 달라고 하세요(주소가 바뀝니다).`;
-        case "host-down": return "Mesh 중계를 돌리는 감시 프로그램이 꺼져 있습니다. 아래 '서버 옆에서 도는 것'에서 켜세요.";
-        case "host-config-old": return "서버 옆 프로그램의 설정이 Mesh보다 오래되었습니다. 기억 서버를 한 번 다시 시작하세요.";
-        case "address-changed": return `이 컴퓨터의 Mesh 주소가 바뀌었습니다${mesh?.addressChanged?.from ? ` (이전: ${mesh.addressChanged.from})` : ""}. 다른 컴퓨터의 연결 화면에 새 주소를 넣으세요.`;
-        default: return "";
-      }
-    }
-
-    // Done once, by whoever owns the Cloudflare account. The dashboard toggle has no
-    // API; the rest an agent with the Cloudflare plugin can do.
-    function meshAccountChecklist() {
-      return h("div", { class: "notice share-guide" }, h("div", {},
-        h("b", {}, "Cloudflare 계정에서 한 번만 해 둘 일 (계정 주인)"),
-        h("ol", {},
-          h("li", {}, "Cloudflare One 대시보드 → Networking → Mesh에서 'Allow all Cloudflare One traffic to reach enrolled devices'를 켭니다. 이것은 대시보드에서만 바꿀 수 있습니다."),
-          h("li", {}, "기기 설정에서 가상 IP(use_zt_virtual_ip)와 Gateway 프록시(TCP, UDP)를 켭니다."),
-          h("li", {}, "기기 프로필의 Split Tunnels가 100.96.0.0/12를 WARP로 보내게 합니다. Include 모드면 목록에 넣고, Exclude 모드면 그 범위를 덮는 항목(기본 목록의 100.64.0.0/10 등)을 뺍니다."),
-          h("li", {}, "이 서버로 보낼 다른 컴퓨터도 같은 계정의 팀으로 WARP에 연결해 둡니다."),
-        ),
-        h("p", { class: "muted", style: { margin: "8px 0 0" } }, "2번과 3번은 Cloudflare 플러그인이 있는 에이전트에게 맡길 수 있습니다. 1번만 대시보드에서 직접 켭니다."),
-      ));
-    }
-
-    function warpRow(mesh) {
-      const warp = mesh?.warp || {};
-      const split = mesh?.splitTunnelOk === true ? "Split Tunnels: Mesh 주소가 WARP로 감" : mesh?.splitTunnelOk === false ? "Split Tunnels: Mesh 주소가 WARP로 가지 않음" : "";
-      const detail = !warp.installed ? "설치되어 있지 않습니다."
-        : !warp.team ? "팀에 등록되어 있지 않습니다."
-        : [`팀 ${warp.team}`, warp.connected ? null : "꺼져 있음", split].filter(Boolean).join(" · ");
-      return h("div", { class: "row" },
-        h("div", {}, h("div", { class: "title" }, statusTag(warp.connected && mesh?.splitTunnelOk !== false, ["준비됨", warp.connected ? "확인 필요" : "연결 안 됨"]), "이 컴퓨터의 WARP"), h("div", { class: "sub" }, detail)),
-        h("div", { class: "end" }),
-      );
-    }
-
-    function meshProblems(mesh, redraw) {
-      const codes = (mesh?.problems || []).filter((code) => meshProblemText(code, mesh));
-      if (!codes.length) return null;
-      const firewall = codes.includes("firewall-missing");
-      return h("div", { style: { marginTop: "12px" } }, notice(codes.some((code) => code !== "forwarder-down") ? "warn" : "",
-        h("ul", { style: { margin: 0 } }, codes.map((code) => h("li", {}, meshProblemText(code, mesh)))),
-        firewall ? h("div", { class: "form-actions", style: { marginTop: "8px" } }, button("방화벽 허용", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
-          await cli("/api/server/share/mesh/enable", {});
-          await redraw(false);
-        }) })) : null,
-      ));
-    }
-
-    function meshPanelOff(share, redraw) {
-      const mesh = share.mesh || {};
-      // Before it is on the CLI reports no problems; what this computer's WARP lacks is shown here.
-      const ready = mesh.warp?.connected && mesh.splitTunnelOk !== false;
-      return h("div", {},
-        meshAccountChecklist(),
-        h("div", { class: "rows", style: { marginTop: "14px" } }, warpRow(mesh)),
-        ready ? null : h("p", { class: "muted", style: { fontSize: "12.5px", marginTop: "8px" } }, "WARP가 준비되지 않아도 켤 수는 있습니다. 켠 뒤에 무엇이 빠졌는지 알려 드립니다."),
-        h("p", { class: "muted", style: { fontSize: "12.5px", marginTop: "8px" } }, "Windows에서는 켤 때 방화벽 허용을 위한 관리자 승인 창이 한 번 뜹니다."),
-        h("div", { class: "form-actions" },
-          button("켜기", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
-            await cli("/api/server/share/mesh/enable", {});
-            await redraw(false);
-          }, { done: "Mesh로 열었습니다" }) }),
-        ),
-      );
-    }
-
-    const MESH_CHECK_STATES = {
-      ok: ["ok", "이 컴퓨터 안의 길은 열려 있습니다", "Mesh 주소로 들어온 요청이 문지기를 거쳐 기억 서버까지 갑니다."],
-      token: ["bad", "서버 토큰이 맞지 않습니다", "길은 열렸지만 문지기가 토큰을 받지 않았습니다. 서버를 다시 시작해 보세요."],
-      unreachable: ["bad", "이 컴퓨터의 Mesh 주소로 닿지 않습니다", "WARP가 켜져 있는지, Mesh 중계가 도는지 확인하세요."],
-      "local-only": ["ok", "이 컴퓨터의 중계와 문지기는 돌고 있습니다", "다만 이 컴퓨터가 자기 Mesh 주소로 보낸 요청은 돌아오지 않았습니다. WARP가 그 요청을 Cloudflare로 보내기 때문에, 계정의 Mesh 설정이 켜져 있어야 돌아옵니다. 다른 컴퓨터에서 연결해 보세요."],
-      "no-address": ["warn", "Mesh 주소가 없습니다", "WARP를 켠 뒤 다시 확인하세요."],
-      error: ["bad", "확인하지 못했습니다", ""],
-    };
-
-    function meshPanelOn(share, redraw) {
-      const mesh = share.mesh || {};
-      const check = mesh.check;
-      const state = check ? MESH_CHECK_STATES[check.state] || MESH_CHECK_STATES.error : null;
-      const open = Boolean(mesh.forwarder?.running && mesh.address);
-      const tunnelOn = share.tunnel?.enabled === true;
-      return h("div", { style: tunnelOn ? { marginTop: "18px" } : {} },
-        h("div", { class: "rows" },
-          h("div", { class: "row" },
-            h("div", {}, h("div", { class: "title" }, statusTag(open, ["열림", "닫힘"]), "Mesh 주소"), h("div", { class: "sub mono" }, mesh.address || "WARP를 켜면 주소가 생깁니다")),
-            h("div", { class: "end" },
-              mesh.address ? button("", { kind: "small icon-only", iconName: "copy", title: "주소 복사", onClick: async () => { await copyText(mesh.address); toast("주소를 복사했습니다. 다른 컴퓨터의 연결 화면에 넣으세요."); } }) : null,
-              button("확인", { kind: "small", onClick: (event) => busy(event.currentTarget, () => redraw(true)) }),
-            ),
-          ),
-          tunnelOn ? null : h("div", { class: "row" },
-            h("div", {}, h("div", { class: "title" }, statusTag(share.gate?.running, ["지키는 중", "멈춤"]), "문지기"), h("div", { class: "sub" }, "서버 토큰이 있는 요청만 기억 서버로 넘깁니다.")),
-            h("div", { class: "end" },
-              button("서버 토큰 복사", { kind: "small primary", onClick: (event) => busy(event.currentTarget, async () => {
-                const result = await cli("/api/server/share/token", {});
-                await copyText(result.token);
-                toast("서버 토큰을 복사했습니다. 다른 컴퓨터의 연결 화면에 붙여 넣으세요.");
-              }) }),
-            ),
-          ),
-          warpRow(mesh),
-        ),
-        meshProblems(mesh, redraw),
-        state ? h("div", { style: { marginTop: "12px" } }, notice(state[0], h("b", {}, state[1]), state[2] ? ` ${state[2]}` : "", check.error ? h("div", { class: "muted" }, check.error) : null)) : null,
-        h("p", { class: "muted", style: { fontSize: "12.5px", marginTop: "10px" } }, "'확인'은 이 컴퓨터 안의 길만 봅니다. 다른 컴퓨터에서 닿으려면 계정의 Mesh 설정도 켜져 있어야 합니다."),
-        h("details", { class: "raw", style: { marginTop: "6px" } }, h("summary", { class: "muted" }, "Cloudflare 계정에서 해 둘 일 다시 보기"), h("div", { style: { marginTop: "10px" } }, meshAccountChecklist())),
-        h("div", { class: "form-actions" },
-          tunnelOn ? null : button("서버 토큰 바꾸기", { kind: "small quiet", onClick: async (event) => {
-            const ok = await confirmSheet({ title: "서버 토큰을 바꿀까요?", text: "지금 토큰을 쓰는 다른 컴퓨터는 모두 끊깁니다. 각 컴퓨터의 연결 화면에 새 토큰을 넣어야 다시 모입니다. 끊긴 동안의 대화는 다시 연결하면 이어서 보냅니다.", confirm: "바꾸기", danger: true });
-            if (!ok) return;
-            await busy(event.currentTarget, async () => { await cli("/api/server/share/rotate", {}); await redraw(false); }, { done: "새 서버 토큰을 만들었습니다" });
-          } }),
-          button("끄기", { kind: "small quiet danger", onClick: async (event) => {
-            const ok = await confirmSheet({
-              title: "Mesh로 여는 길을 끌까요?",
-              text: tunnelOn
-                ? "Mesh 중계만 멈춥니다. 공개 주소와 문지기는 그대로 둡니다."
-                : "Mesh 중계와 문지기를 멈춥니다. 다른 컴퓨터의 대화는 다시 켤 때까지 그 컴퓨터에 쌓여 있다가 이어서 옵니다. 토큰과 주소의 포트는 그대로 두니 다시 켜면 설정을 바꿀 필요가 없습니다.",
-              confirm: "끄기",
-              danger: true,
-            });
-            if (!ok) return;
-            await busy(event.currentTarget, async () => { await cli("/api/server/share/mesh/disable", {}); await redraw(false); }, { done: "껐습니다" });
-          } }),
-        ),
-      );
+      return section({ id: "share", title: "다른 컴퓨터에서 쓰기", note: "다른 컴퓨터가 대화를 이 서버로 보내게 합니다. Cloudflare 통로로만 열고, 서버 토큰이 없는 요청은 받지 않습니다." }, box);
     }
 
     const PUBLIC_STATES = {
       ok: ["ok", "밖에서 닿습니다", "다른 컴퓨터에서 이 주소와 서버 토큰으로 연결하면 됩니다."],
-      access: ["ok", "Cloudflare Access가 지키고 있습니다", "이 컴퓨터는 Access를 통과하지 못해 안쪽까지는 확인하지 못했습니다. WARP를 켠 다른 컴퓨터에서 연결해 보세요."],
+      access: ["ok", "Cloudflare Access가 지키고 있습니다", "이 컴퓨터는 Access를 통과하지 못해 안쪽까지는 확인하지 못했습니다. Access 서비스 토큰을 넣은 다른 컴퓨터에서 연결해 보세요."],
       token: ["bad", "서버 토큰이 맞지 않습니다", "통로는 열렸지만 문지기가 토큰을 받지 않았습니다. 서버를 다시 시작해 보세요."],
       unreachable: ["bad", "밖에서 닿지 않습니다", "Cloudflare 대시보드에서 통로의 공개 주소가 이 주소이고, 서비스가 http://localhost:게이트 포트인지 확인하세요."],
       error: ["bad", "확인하지 못했습니다", ""],
@@ -458,18 +288,9 @@ export default {
             await busy(event.currentTarget, async () => { await cli("/api/server/share/rotate", {}); await redraw(false); }, { done: "새 서버 토큰을 만들었습니다" });
           } }),
           button("닫기", { kind: "small quiet danger", onClick: async (event) => {
-            const meshOn = share.mesh?.enabled === true;
-            const ok = await confirmSheet({
-              title: "다른 컴퓨터에서 쓰지 않게 닫을까요?",
-              text: meshOn
-                ? "공개 주소로 여는 통로만 멈춥니다. Mesh로 여는 길과 문지기는 그대로 둡니다."
-                : "통로와 문지기를 멈춥니다. 다른 컴퓨터의 대화는 다시 열 때까지 그 컴퓨터에 쌓여 있다가 이어서 옵니다. 토큰은 그대로 두니 다시 열면 설정을 바꿀 필요가 없습니다.",
-              confirm: "닫기",
-              danger: true,
-            });
+            const ok = await confirmSheet({ title: "다른 컴퓨터에서 쓰지 않게 닫을까요?", text: "통로와 문지기를 멈춥니다. 다른 컴퓨터의 대화는 다시 열 때까지 그 컴퓨터에 쌓여 있다가 이어서 옵니다. 토큰은 그대로 두니 다시 열면 설정을 바꿀 필요가 없습니다.", confirm: "닫기", danger: true });
             if (!ok) return;
-            // Only the tunnel: with Mesh off as well, the CLI closes the gate too, as before.
-            await busy(event.currentTarget, async () => { await cli("/api/server/share/disable", { mode: "tunnel" }); await redraw(false); }, { done: "닫았습니다" });
+            await busy(event.currentTarget, async () => { await cli("/api/server/share/disable", {}); await redraw(false); }, { done: "닫았습니다" });
           } }),
         ),
       );
@@ -486,7 +307,7 @@ export default {
             h("li", {}, "Cloudflare Zero Trust 대시보드 → Networks → Tunnels → Create a tunnel → Cloudflared를 고르고 이름을 붙입니다."),
             h("li", {}, "설치 명령이 나오면 명령은 실행하지 말고, 그 안의 긴 토큰만 복사해 아래에 붙여 넣습니다."),
             h("li", {}, `Public hostname에 쓸 주소(예: memory.내도메인)를 정하고, Service는 HTTP, URL은 localhost:${port}로 둡니다.`),
-            h("li", {}, "Access → Applications에서 그 주소를 등록하고, 내 팀 WARP 사용자만 들어오게 정책을 겁니다. WARP를 못 켜는 컴퓨터가 있으면 서비스 토큰도 하나 만듭니다."),
+            h("li", {}, "Access → Applications에서 그 주소를 등록하고, 내 Google 계정으로 로그인한 사람만 들어오게 정책을 겁니다. 다른 컴퓨터가 쓸 서비스 토큰도 하나 만들어 Service Auth 정책으로 들여보냅니다."),
           ),
           h("p", { class: "muted", style: { margin: "8px 0 0" } }, "팀원이라면 관리자에게 통로 토큰과 주소를 받아 넣기만 하면 됩니다."),
         )),

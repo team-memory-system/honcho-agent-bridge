@@ -29,11 +29,6 @@
 // `--config <host-config.json> --log <logs>/supervisor.log`. `host stop` (and so
 // `server stop`) removes it first, so nothing starts the supervisor again. After a
 // reboot the supervisor comes back at login, and with it the app's own `ollama serve`.
-//
-// The supervisor also runs the Mesh forwarder (server/host/mesh-forwarder.mjs)
-// while the share state (<runtime>/share.json, written by share-manager.mjs) turns
-// Mesh sharing on, so it comes back with the same autostart. The host config names
-// the three files that takes; `host status` reports the forwarder.
 import { execFile, spawn as nodeSpawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -153,12 +148,6 @@ export function resolveHostPaths({
     // The app's own Ollama, when this computer had none.
     ollamaDir: ollamaRuntimeDir(serverDir),
     supervisorFile: path.join(serverDir, "host", "supervisor.mjs"),
-    // Mesh sharing: the forwarder the supervisor runs, the share state that turns it
-    // on (share-manager's sharePaths().stateFile), and what the forwarder writes once
-    // it listens.
-    meshForwarderFile: path.join(serverDir, "host", "mesh-forwarder.mjs"),
-    shareStateFile: path.join(path.dirname(serverDir), "runtime", "share.json"),
-    meshStateFile: path.join(runtimeDir, "mesh-forwarder.json"),
     // Generated right before `ollama create`, from the alias's own base model.
     modelfileFor: (model) => path.join(runtimeDir, `${String(model).replace(/[^A-Za-z0-9._-]/g, "_")}.Modelfile`),
     profileFile: (profile) => path.join(serverDir, `host-profile.${profile}.json`),
@@ -302,9 +291,6 @@ export function deriveHostTopology({
       logDir: paths.logDir,
     },
     supervisorFile: paths.supervisorFile,
-    ...(paths.shareStateFile && paths.meshForwarderFile && paths.meshStateFile
-      ? { mesh: { shareStateFile: paths.shareStateFile, forwarderFile: paths.meshForwarderFile, stateFile: paths.meshStateFile } }
-      : {}),
   };
 }
 
@@ -699,7 +685,6 @@ export async function hostPrepare(options = {}) {
     ollama: topology.ollama,
     state: topology.state,
     supervisorFile: topology.supervisorFile,
-    mesh: topology.mesh,
   };
   await writePrivateAtomic(topology.state.configFile, `${JSON.stringify(runtimeConfig, null, 2)}\n`, 0o600, {
     platform: options.platform || process.platform,
@@ -738,33 +723,6 @@ async function pidState(pidFile) {
     const record = JSON.parse(await fsp.readFile(pidFile, "utf8"));
     return { record, running: processAlive(record.pid) };
   } catch { return { record: null, running: false }; }
-}
-
-async function readJsonFile(target) {
-  try { return JSON.parse(await fsp.readFile(target, "utf8")); } catch { return null; }
-}
-
-/**
- * The Mesh forwarder the supervisor runs while Mesh sharing is on: whether the
- * share state turns it on, its port, and whether a forwarder listens on that port.
- * Files and a PID check only.
- */
-export async function meshForwarderStatus(paths, config = null) {
-  const shareStateFile = config?.mesh?.shareStateFile || paths.shareStateFile;
-  const stateFile = config?.mesh?.stateFile || paths.meshStateFile;
-  const [share, record] = await Promise.all([readJsonFile(shareStateFile), readJsonFile(stateFile)]);
-  const mesh = share?.mesh && typeof share.mesh === "object" ? share.mesh : null;
-  const port = Number.isInteger(mesh?.port) ? mesh.port : null;
-  const pid = Number.isInteger(record?.pid) ? record.pid : null;
-  const running = Boolean(pid && processAlive(pid) && (!port || record.port === port));
-  return {
-    enabled: mesh?.enabled === true,
-    port,
-    running,
-    pid: running ? pid : null,
-    // An older host config has no mesh files, so its supervisor cannot run the forwarder.
-    supported: Boolean(config ? config.mesh : true),
-  };
 }
 
 /** The gateway answered and has nobody logged in, so its router has nothing to route to. */
@@ -1053,9 +1011,6 @@ export async function hostStatus(options = {}) {
     supervisor: { pid: pid.record?.pid || null, processAlive: pid.running },
     gateway,
     ollama: { enabled: config.ollama.enabled, healthy: ollamaHealth.ok, status: ollamaHealth.status, model: config.ollama.model, resident },
-    // Reported, never part of `ok`: `host start` waits for `ok`, and the forwarder is
-    // only wanted while Mesh sharing is on.
-    mesh: await meshForwarderStatus(paths, config),
     autostart,
     paths,
   };

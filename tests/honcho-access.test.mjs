@@ -1,9 +1,9 @@
 // Another computer sends its conversations to the owner's memory server through a
-// Cloudflare Tunnel behind Cloudflare Access. A device on the team's WARP passes by
-// identity; one without it presents an Access service token next to the server's
-// bearer token. These tests hold the client half: the service token is set up the
-// way the API token is, reaches the server on every path that talks to it and on
-// no other, and a refusal by Access is reported as Access and not as something else.
+// Cloudflare Tunnel behind Cloudflare Access. A program there presents an Access
+// service token next to the server's bearer token. These tests hold the client
+// half: the service token is set up the way the API token is, reaches the server on
+// every path that talks to it and on no other, and a refusal by Access is reported
+// as Access and not as something else.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -29,7 +29,7 @@ const MCP_SERVER = path.join(ROOT, "scripts", "mcp-server.mjs");
 const ACCESS_ID = "access-id-value.access";
 const ACCESS_SECRET = "access-secret-value";
 const API_TOKEN = "server-api-token";
-const ACCESS_WARNING = /is behind Cloudflare Access and refused this computer; connect Cloudflare WARP with the team account, or add an Access service token/;
+const ACCESS_WARNING = /is behind Cloudflare Access and refused this computer; add an Access service token for that server/;
 
 // Every credential variable any of these programs reads starts out unset, whatever
 // the environment running the tests holds.
@@ -426,7 +426,7 @@ for (const refusal of ["403", "302"]) {
     const body = await response.json();
     assert.equal(body.unreachable, false);
     assert.equal(body.access, true);
-    assert.equal(body.error, "Cloudflare Access가 이 컴퓨터를 막았습니다. WARP를 팀 계정으로 켜거나 Access 서비스 토큰을 넣으세요.");
+    assert.equal(body.error, "Cloudflare Access가 이 컴퓨터를 막았습니다. 그 서버의 Access 서비스 토큰을 넣으세요.");
 
     await assert.rejects(sessionsPage({ workspace: "memory" }, options), (error) => error.access === true && /Cloudflare Access/.test(error.message));
   });
