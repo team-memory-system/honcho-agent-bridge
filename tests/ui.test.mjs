@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { createUiServer, rejectUnsafeRequest, shareDisableInvocation, shareEnableInvocation, shareMeshEnableInvocation } from "../scripts/ui.mjs";
 import { BRIDGE_TOKEN, startBridge } from "./fake-bridge.mjs";
+import { fixtureZip } from "./chatgpt-fixture.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let server;
@@ -156,6 +157,17 @@ test("an uploaded ChatGPT export reaches Honcho, and re-uploading it adds nothin
   const second = await send("/api/import/chatgpt", { method: "POST", raw: exported });
   assert.equal(second.body.new_messages, 0);
   assert.equal(honchoRequests.filter((entry) => entry.url?.endsWith("/messages")).length, writesBefore);
+});
+
+test("the export zip itself can be uploaded, numbered shards and all", async () => {
+  honchoRequests = [];
+  const uploaded = await send("/api/import/chatgpt", { method: "POST", raw: fixtureZip() });
+  assert.equal(uploaded.status, 200);
+  assert.equal(uploaded.body.ok, true, JSON.stringify(uploaded.body));
+  assert.equal(uploaded.body.conversations, 7, "both conversations-00N.json shards are read");
+  assert.equal(uploaded.body.imported_sessions, 5);
+  assert.equal(uploaded.body.new_messages, 16);
+  assert.ok(honchoRequests.some((entry) => entry.url?.endsWith("/messages")));
 });
 
 test("an empty or unreadable upload is reported instead of silently succeeding", async () => {

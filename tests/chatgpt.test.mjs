@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { activeBranch, parseConversation, parseExport } from "../scripts/providers/chatgpt.mjs";
+import { jsonArrayItems } from "../scripts/providers/chatgpt-archive.mjs";
+import { activeBranch, cleanAnswerMarkup, loadExport, parseConversation, parseExport } from "../scripts/providers/chatgpt.mjs";
+import { fixtureConversations, fixtureEntries, fixtureZip, makeZip, startFakeHoncho } from "./chatgpt-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -213,4 +215,206 @@ test("the Access headers are omitted when no service token is configured", async
   const write = api.requests.find((entry) => entry.url?.endsWith("/messages"));
   assert.equal("cf-access-client-id" in write.headers, false);
   assert.equal("authorization" in write.headers, false);
+});
+
+// ── The 2026 export: a zip of numbered shards, read as it arrives ──────────────
+
+test("the JSON reader takes an array apart one item at a time, across any chunk boundary", async () => {
+  const items = [{ a: "x]}\\\"[{," }, [1, 2], "s,]", 3, null, { k: "한글 ✓", nested: { deep: [{}] } }];
+  const raw = Buffer.from(`﻿ [ ${items.map((item) => JSON.stringify(item)).join(" ,\n")} ] \n`);
+  const oneByteChunks = (async function* () {
+    for (const byte of raw) yield Buffer.from([byte]);
+  })();
+  const read = [];
+  for await (const item of jsonArrayItems(oneByteChunks, "probe")) read.push(item);
+  assert.deepEqual(read, items);
+
+  const truncated = (async function* () {
+    yield Buffer.from(`[${JSON.stringify(items[0])}, {"cut": "of`);
+  })();
+  await assert.rejects(async () => {
+    for await (const item of jsonArrayItems(truncated, "cut.json")) void item;
+  }, /invalid JSON\): cut\.json: the file ends before its closing \]/);
+});
+
+test("only what the reader saw is kept: tool calls, tool output, reasoning and hidden turns are left out", () => {
+  const { a, b } = fixtureConversations();
+  const branched = parseConversation(a);
+  assert.deepEqual(branched.turns.map(({ role, content }) => [role, content]), [
+    ["user", "How do I keep a sourdough starter alive?"],
+    ["assistant", "Feed it flour and water every day."],
+    ["user", "Which flour works best?"],
+    ["assistant", "Use whole wheat. Example Mills sells it."],
+  ], "the regenerated answer and the edited-away question are off the branch; citation markup is gone");
+  assert.equal(branched.stats.off_branch_messages, 3);
+  assert.deepEqual(branched.stats.skipped, { "role:system": 1, hidden: 1, "content:thoughts": 1, "content:reasoning_recap": 1 });
+  assert.equal(branched.turns[2].created_at, branched.turns[1].created_at, "a message with no time takes the time before it");
+  assert.equal(branched.turns[1].created_at, "2024-01-10T09:00:20.250Z", "fractional seconds survive");
+  assert.equal(branched.stats.time_filled, 1);
+  assert.equal(branched.metadata.default_model_slug, "gpt-4o");
+
+  const tools = parseConversation(b);
+  assert.deepEqual(tools.turns.map(({ role, content }) => [role, content]), [
+    ["user", "What plant is this?"],
+    ["assistant", "It looks like a monstera."],
+    ["assistant", "Noted."],
+    ["user", "Remind me to water it"],
+    ["assistant", "Sure, once a week."],
+  ]);
+  assert.deepEqual(tools.stats.skipped, { custom_instructions: 1, tool_call: 3, "role:tool": 5, no_text: 1 });
+  assert.deepEqual(tools.stats.dropped_parts, { image_asset_pointer: 2, audio_asset_pointer: 2 });
+});
+
+test("answer markup keeps the words the app showed", () => {
+  assert.equal(cleanAnswerMarkup("Seoul is large citeturn0search1.\nNext"), "Seoul is large.\nNext");
+  assert.equal(cleanAnswerMarkup("Ask entity[\"people\",\"Someone Madeup\"] about it"), "Ask Someone Madeup about it");
+  assert.equal(cleanAnswerMarkup("Quoted words 【7:2†notes.pdf】"), "Quoted words");
+  assert.equal(cleanAnswerMarkup("image_group{\"query\":[\"made up\"]}\nText"), "Text");
+});
+
+async function sessionsOf(input) {
+  const loaded = await loadExport(input);
+  return {
+    loaded,
+    shape: loaded.sessions.map((parsed) => [parsed.session_id, parsed.turns.map((turn) => [turn.role, turn.content, turn.created_at])]),
+  };
+}
+
+test("the export is read the same from the zip, its folder, a nested archive, ZIP64, or a zip saved as conversations.json", async (t) => {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "chatgpt-layouts-"));
+  t.after(() => fsp.rm(directory, { recursive: true, force: true }));
+  const zipFile = path.join(directory, "export.zip");
+  await fsp.writeFile(zipFile, fixtureZip());
+  const expected = await sessionsOf(zipFile);
+  assert.deepEqual(expected.shape.map(([id]) => id), [
+    "chatgpt-conv-c-0000-4000-8000-000000000003",
+    "chatgpt-conv-g-0000-4000-8000-000000000007",
+    "chatgpt-conv-a-0000-4000-8000-000000000001",
+    "chatgpt-conv-b-0000-4000-8000-000000000002",
+    "chatgpt-conv-d-0000-4000-8000-000000000004",
+  ], "oldest conversation first, whatever order the shards hold them in; the empty one is left out");
+  assert.deepEqual(expected.loaded.files.map((file) => path.basename(file.source)), ["export.zip#conversations-000.json", "export.zip#conversations-001.json"]);
+  assert.equal(expected.loaded.summary.duplicate_conversations, 1, "the older copy of a conversation is dropped");
+  assert.equal(expected.shape[2][1].length, 4, "the newer copy of the duplicated conversation is the one kept");
+
+  const folder = path.join(directory, "unzipped");
+  for (const entry of fixtureEntries()) {
+    await fsp.mkdir(path.dirname(path.join(folder, entry.name)), { recursive: true });
+    await fsp.writeFile(path.join(folder, entry.name), entry.data);
+  }
+  assert.deepEqual((await sessionsOf(folder)).shape, expected.shape, "the unpacked folder");
+
+  const portal = path.join(directory, "portal.zip");
+  await fsp.writeFile(portal, makeZip([
+    { name: "report.html", data: "<html>made up</html>" },
+    { name: "User Online Activity/Conversations_madeup-chatgpt-0001.zip", data: fixtureZip(), method: 0 },
+    { name: "User Online Activity/Files_madeup-files-0001.zip", data: makeZip([{ name: "file-x.dat", data: "made up" }]), method: 8 },
+  ]));
+  const nested = await sessionsOf(portal);
+  assert.deepEqual(nested.shape, expected.shape, "an inner zip stored in an outer one");
+  assert.deepEqual(nested.loaded.skipped_archives.map((entry) => entry.reason), ["attachments only, not conversations"]);
+
+  const deflatedInner = path.join(directory, "deflated.zip");
+  await fsp.writeFile(deflatedInner, makeZip([{ name: "Conversations_madeup-chatgpt-0001-part-0001.zip", data: fixtureZip(), method: 8 }]));
+  assert.deepEqual((await sessionsOf(deflatedInner)).shape, expected.shape, "an inner zip that was compressed again");
+
+  const zip64 = path.join(directory, "zip64.zip");
+  await fsp.writeFile(zip64, fixtureZip({ zip64: true }));
+  assert.deepEqual((await sessionsOf(zip64)).shape, expected.shape, "ZIP64 records");
+
+  const spooled = path.join(directory, "spool", "conversations.json");
+  await fsp.mkdir(path.dirname(spooled));
+  await fsp.writeFile(spooled, fixtureZip());
+  assert.deepEqual((await sessionsOf(spooled)).shape, expected.shape, "the UI spools an upload as conversations.json; a zip is still a zip");
+
+  const unrelated = path.join(directory, "unrelated.zip");
+  await fsp.writeFile(unrelated, makeZip([{ name: "notes.txt", data: "made up" }]));
+  await assert.rejects(() => loadExport(unrelated), /no conversations found/);
+});
+
+function collectorEnv(api, workdir, extra = {}) {
+  const env = {
+    ...process.env,
+    HONCHO_BASE_URL: api.url,
+    HONCHO_WORKSPACE_ID: "memory",
+    HONCHO_USER_NAME: "chenjing",
+    HONCHO_AGENT_HOOK_STATE: path.join(workdir, "state.json"),
+    HONCHO_AGENT_HOOK_LOG: path.join(workdir, "collector.log"),
+    ...extra,
+  };
+  for (const name of ["HONCHO_ASSISTANT_NAME", "HONCHO_CHATGPT_ASSISTANT_NAME", "HONCHO_API_BEARER_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "HONCHO_CF_ACCESS_CLIENT_ID", "HONCHO_CF_ACCESS_CLIENT_SECRET", "HONCHO_AGENT_TARGET_FOLDERS", "HONCHO_AGENT_DRY_RUN"]) {
+    if (!(name in extra)) delete env[name];
+  }
+  return env;
+}
+
+async function runImport(env, ...args) {
+  const { stdout } = await execFileAsync(process.execPath, [COLLECTOR, "--provider", "chatgpt", ...args], { env, maxBuffer: 16 * 1024 * 1024 });
+  return JSON.parse(stdout);
+}
+
+test("a zipped export imports end to end into the chosen workspace and peer, once", async (t) => {
+  const api = await startFakeHoncho();
+  t.after(() => api.server.close());
+  const workdir = await fsp.mkdtemp(path.join(os.tmpdir(), "chatgpt-e2e-"));
+  t.after(() => fsp.rm(workdir, { recursive: true, force: true }));
+  const zipFile = path.join(workdir, "export.zip");
+  await fsp.writeFile(zipFile, fixtureZip());
+  const env = collectorEnv(api, workdir);
+
+  const dry = await runImport(env, "--export", zipFile, "--workspace", "rebuilt", "--dry-run");
+  assert.equal(api.requests.length, 0, "a dry run sends nothing");
+  assert.equal(dry.new_messages, 16);
+  assert.deepEqual(dry.new_messages_by_peer, { chenjing: 7, assistant_chatgpt: 9 });
+
+  const first = await runImport(env, "--export", zipFile, "--workspace", "rebuilt");
+  assert.equal(first.ok, true, JSON.stringify(first.sessions.filter((session) => session.error)));
+  assert.equal(first.workspace, "rebuilt", "--workspace wins over HONCHO_WORKSPACE_ID");
+  assert.equal(first.user_peer, "chenjing");
+  assert.equal(first.assistant_peer, "assistant_chatgpt");
+  assert.equal(first.conversations, 7);
+  assert.equal(first.imported_sessions, 5);
+  assert.equal(first.new_messages, 16, "15 turns, the long answer split in two");
+  assert.deepEqual(first.new_messages_by_peer, { chenjing: 7, assistant_chatgpt: 9 });
+  assert.deepEqual(first.summary.turns_by_role, { user: 7, assistant: 8 });
+  assert.equal(first.summary.do_not_remember_conversations, 1);
+  assert.ok(api.requests.every((entry) => entry.url.startsWith("/v3/workspaces/rebuilt/")), "nothing goes to another workspace");
+
+  const sent = api.store.get("rebuilt/chatgpt-conv-a-0000-4000-8000-000000000001");
+  assert.deepEqual(sent.map((message) => [message.peer_id, message.created_at]), [
+    ["chenjing", "2024-01-10T09:00:00.000Z"],
+    ["assistant_chatgpt", "2024-01-10T09:00:20.250Z"],
+    ["chenjing", "2024-01-10T09:00:20.250Z"],
+    ["assistant_chatgpt", "2024-01-10T09:00:43.000Z"],
+  ]);
+  assert.ok(sent.every((message) => message.metadata.source === "chatgpt" && message.metadata.source_message_id));
+  const sessionWrites = api.requests.filter((entry) => /\/sessions$/.test(entry.url));
+  const created = sessionWrites.find((entry) => entry.body.id === "chatgpt-conv-d-0000-4000-8000-000000000004");
+  assert.equal(created.body.metadata.is_do_not_remember, true);
+  assert.equal(created.body.metadata.default_model_slug, "gpt-5-thinking");
+  assert.deepEqual(created.body.configuration, {}, "summaries follow the workspace's configuration");
+  assert.deepEqual(created.body.peers.assistant_chatgpt, { observe_me: false, observe_others: false });
+  const order = [...new Set(api.requests.filter((entry) => entry.url.endsWith("/messages")).map((entry) => entry.url.split("/")[5]))];
+  assert.deepEqual(order, first.sessions.map((session) => session.session_id), "conversations are sent oldest first");
+
+  const writes = () => api.requests.filter((entry) => entry.url.endsWith("/messages")).length;
+  const before = writes();
+  const again = await runImport(env, "--export", zipFile, "--workspace", "rebuilt");
+  assert.equal(again.new_messages, 0, "the same export again adds nothing");
+  assert.equal(writes(), before);
+
+  await fsp.rm(path.join(workdir, "state.json"));
+  const withoutState = await runImport(env, "--export", zipFile, "--workspace", "rebuilt");
+  assert.equal(withoutState.new_messages, 0, "with the local state gone, what the workspace holds still counts");
+  assert.equal(writes(), before);
+
+  const newer = path.join(workdir, "newer.zip");
+  await fsp.writeFile(newer, fixtureZip({ continued: true }));
+  const update = await runImport(env, "--export", newer, "--workspace", "rebuilt");
+  assert.equal(update.new_messages, 4, "two new turns in an old conversation and one new conversation");
+  assert.deepEqual(api.store.get("rebuilt/chatgpt-conv-a-0000-4000-8000-000000000001").slice(-2).map((message) => message.content), ["And how warm should it be?", "Around room temperature."]);
+
+  const elsewhere = await runImport(env, "--export", zipFile, "--workspace", "scratch");
+  assert.equal(elsewhere.new_messages, 16, "the state kept for one workspace does not hold back another");
+  assert.equal(api.store.get("rebuilt/chatgpt-conv-a-0000-4000-8000-000000000001").length, 6, "and the first workspace is untouched");
 });

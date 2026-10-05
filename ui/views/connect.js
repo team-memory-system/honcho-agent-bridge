@@ -643,7 +643,7 @@ function sharePage(share) {
 // ── ChatGPT 기록 가져오기 ────────────────────────────────
 
 function importPage(importer) {
-  const file = h("input", { type: "file", accept: ".json,application/json", class: "input", style: { paddingTop: "4px" } });
+  const file = h("input", { type: "file", accept: ".zip,.json,application/zip,application/json", class: "input", style: { paddingTop: "4px" } });
   const result = h("div", {});
   const upload = button("올리기", { kind: "primary", iconName: "upload", disabled: true });
   file.addEventListener("change", () => {
@@ -672,7 +672,7 @@ function importPage(importer) {
   clear(importer,
     h("ol", { class: "how" },
       h("li", {}, "ChatGPT 설정 → 데이터 제어 → 데이터 내보내기를 누르면 메일로 파일이 옵니다."),
-      h("li", {}, "받은 zip을 풀고 안에 있는 conversations.json을 아래에 올립니다."),
+      h("li", {}, "받은 zip 파일을 풀지 말고 그대로 아래에 올립니다. 대화가 많으면 zip 안에 conversations-000.json, conversations-001.json처럼 여러 파일로 나뉘어 있는데, zip을 올리면 전부 읽습니다."),
       h("li", {}, "같은 파일을 다시 올려도 겹쳐 쌓이지 않습니다."),
     ),
     context.configured

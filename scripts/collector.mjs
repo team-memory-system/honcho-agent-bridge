@@ -616,7 +616,7 @@ async function importGenericProvider(args, hookInput) {
   return importParsedSession(args, parsed, args.transcript);
 }
 
-async function importParsedSession(args, parsed, transcriptPath) {
+async function importParsedSession(args, parsed, transcriptPath, options = {}) {
   // Every non-Codex write passes here; a target run never writes a session from
   // outside its folders, whoever called.
   if (outsideTargetFolders(parsed)) return skippedOutsideFolders(args.provider, parsed, transcriptPath);
@@ -624,7 +624,13 @@ async function importParsedSession(args, parsed, transcriptPath) {
   return withStateLock(args.provider, async () => {
     const state = await loadState(args.provider);
     const sessions = (state.sessions ||= {});
-    const sessionState = (sessions[sessionId] ||= { imported_hashes: [] });
+    let sessionState = (sessions[sessionId] ||= { imported_hashes: [] });
+    // `destination` names the server and workspace the state was recorded for. A
+    // state recorded for another one says nothing about this one, so it is
+    // dropped and rebuilt from what this workspace holds.
+    if (options.destination && sessionState.destination !== options.destination) {
+      sessionState = sessions[sessionId] = { imported_hashes: [], destination: options.destination };
+    }
     sessionState.transcript_path = transcriptPath;
     const basePeers = new Set([DEFAULT_USER_PEER, assistantPeer(args.provider)]);
     if (!args.dryRun) await ensureSession(args.workspace, args.provider, sessionId, parsed, basePeers);
@@ -632,6 +638,7 @@ async function importParsedSession(args, parsed, transcriptPath) {
       ? [0, 0, false]
       : await syncStateFromHoncho(args.provider, args.workspace, sessionId, sessionState);
     const [messages, pendingHashes, peers] = buildMessages(args.provider, sessionId, parsed, sessionState);
+    options.onMessages?.(messages);
     const result = {
       ok: true,
       provider: args.provider,
@@ -674,35 +681,50 @@ async function importChatGptExport(args) {
   if (!exportPath) throw new Error("missing ChatGPT export path (--export)");
   if (!fs.existsSync(exportPath)) throw new Error(`export not found: ${exportPath}`);
 
-  const chatgpt = getProvider("chatgpt");
-  const { path: sourcePath, conversations } = await chatgpt.readExport(exportPath);
+  // The whole export is read and parsed before anything is sent, so a damaged or
+  // truncated file stops the import before its first write. Conversations go in
+  // oldest first.
+  const loaded = await getProvider("chatgpt").loadExport(exportPath);
+  const destination = `${ROOT_URL}/v3/workspaces/${args.workspace}`;
+  const newMessagesByPeer = {};
+  const countMessages = (messages) => {
+    for (const message of messages) newMessagesByPeer[message.peer_id] = (newMessagesByPeer[message.peer_id] || 0) + 1;
+  };
   const sessions = [];
   let newMessages = 0;
   let failed = 0;
-  for (const conversation of conversations) {
-    const parsed = chatgpt.parseConversation(conversation);
-    if (!parsed.turns.length) continue;
-    parsed.metadata.file_path = sourcePath;
+  const progress = process.stderr.isTTY && !args.dryRun;
+  for (const [index, parsed] of loaded.sessions.entries()) {
     try {
-      const result = await importParsedSession(args, parsed, sourcePath);
+      const result = await importParsedSession(args, parsed, parsed.metadata.file_path, { destination, onMessages: countMessages });
       newMessages += result.new_messages;
       sessions.push({ session_id: result.session_id, new_messages: result.new_messages, parsed_turns: result.parsed_turns });
     } catch (error) {
-      // One unreadable conversation must not abandon the rest of the export.
+      // One conversation that cannot be sent must not abandon the rest of the export.
       failed += 1;
       sessions.push({ session_id: parsed.session_id, error: String(error?.message || error) });
     }
+    if (progress && ((index + 1) % 100 === 0 || index + 1 === loaded.sessions.length)) {
+      process.stderr.write(`chatgpt: ${index + 1}/${loaded.sessions.length} conversations, ${newMessages} new messages, ${failed} failed\n`);
+    }
   }
   return {
-    ok: failed === 0,
+    ok: failed === 0 && loaded.unreadable.length === 0,
     provider: "chatgpt",
     workspace: args.workspace,
-    export_path: sourcePath,
-    conversations: conversations.length,
+    user_peer: DEFAULT_USER_PEER,
+    assistant_peer: assistantPeer("chatgpt"),
+    export_path: path.resolve(exportPath),
+    files: loaded.files,
+    skipped_archives: loaded.skipped_archives,
+    conversations: loaded.conversations,
     imported_sessions: sessions.filter((session) => !session.error).length,
     failed_sessions: failed,
+    unreadable_conversations: loaded.unreadable,
     new_messages: newMessages,
+    new_messages_by_peer: newMessagesByPeer,
     dry_run: Boolean(args.dryRun),
+    summary: loaded.summary,
     sessions,
   };
 }
