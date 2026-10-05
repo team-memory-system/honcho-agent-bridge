@@ -12,6 +12,7 @@ import {
   MOVE_BATCH_PAIRS,
   chunkMovePairs,
   folderStore,
+  locateRclone,
   parseCloudDestination,
   rcloneMessage,
   rcloneStore,
@@ -111,6 +112,15 @@ async function backupTo(home, folder, { device = "studio", dataDir, ...rest } = 
 }
 
 // ------------------------------------------------------------- dates (KST)
+
+test("on Windows a scheduled run finds rclone in the user's .local\\bin, which is not on its PATH", async (t) => {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), "rclone-home-"));
+  t.after(() => fsp.rm(home, { recursive: true, force: true }));
+  const binary = path.join(home, ".local", "bin", "rclone.exe");
+  await fsp.mkdir(path.dirname(binary), { recursive: true });
+  await fsp.writeFile(binary, "");
+  assert.equal(locateRclone({ USERPROFILE: home, LOCALAPPDATA: home, PATH: "" }, "win32"), binary);
+});
 
 test("the start day is the day in Korea, whatever the UTC date", () => {
   assert.equal(kstDateFolder("2026-10-04T14:27:19.645Z"), "2026/10/04");

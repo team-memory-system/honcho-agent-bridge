@@ -147,7 +147,7 @@ export function locateRclone(env = process.env, platform = process.platform) {
   const name = platform === "win32" ? "rclone.exe" : "rclone";
   const directories = String(env.PATH || env.Path || "").split(path.delimiter).filter(Boolean);
   if (platform === "win32") {
-    directories.push(path.join(env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links"), "C:\\Program Files\\rclone", path.join(env.USERPROFILE || "", "scoop", "shims"));
+    directories.push(path.join(env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links"), "C:\\Program Files\\rclone", path.join(env.USERPROFILE || "", "scoop", "shims"), path.join(env.USERPROFILE || "", ".local", "bin"));
   } else {
     directories.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/snap/bin", path.join(env.HOME || "", ".local", "bin"));
   }
