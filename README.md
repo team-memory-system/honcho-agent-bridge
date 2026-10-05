@@ -141,6 +141,28 @@ gets an answer, without reading the underlying messages.
 - **The hook is what keeps collection alive.** Changing the hook command format has
   happened twice already; `LEGACY_HOOK_MARKERS` in `scripts/cli.mjs` exists so the
   installer can still recognise and clean up hooks it wrote under an older name.
+- **One Codex thread can span several files.** Codex writes a long thread as
+  `rollout-<ts>-<A>.jsonl` plus continuation segments `rollout-<ts>-<A>_<B>.jsonl`
+  (`history_mode: "paginated"`), all with session id A and lines numbered from 1.
+  A segment's turns are identified by session, segment B, line and role
+  (`scripts/turn-identity.mjs`); every other file keeps the line identity. The first
+  time a segment is read, the collector rebuilds the hashes of the turns Honcho
+  already holds from it through each message's `codex_rollout_path`, and imports
+  nothing while Honcho cannot list them (`SEGMENT_SYNC_FAILED` in the log). New
+  segment messages carry `codex_segment_id`. Rolling back to a collector without
+  this sends segment turns again. Before 2026-10-05 a segment turn at the same line
+  and role as an earlier file's was skipped; on the owner's Mac those were sent
+  then (`memory_trigger` `segment_backfill`, plus `segment_backfill_recheck` for
+  parent-file tails).
+- **Only what the person typed goes in as their words.** The parsers drop what the
+  app wrote in the user role: Codex's in-app browser and Chrome tab state, IDE
+  context, mentioned-file lists and ChatGPT reference previews in front of
+  `## My request:` (what follows is kept whole), `<user_instructions>`,
+  `<user_action>`, `<user_shell_command>`, image markers, and a goal continuation
+  except its objective (once per file); Claude rows marked `isMeta`, except a
+  command or typed slash command with arguments and a goal reminder. Turn
+  identities hold no text, so changing a filter never sends a turn again. Messages
+  stored before 2026-10-05 still hold such text.
 - **The owner's machine is hand-wired, not installed.** Its hooks read
   `~/.config/codex-honcho-sync/.env` and use `CODEX_HONCHO_SYNC_ROOT`. Those names
   are deliberately left at the old spelling: renaming them buys nothing and can
