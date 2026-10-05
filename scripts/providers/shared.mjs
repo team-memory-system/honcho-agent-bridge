@@ -63,13 +63,23 @@ export function isInjectedContextText(text, tags) {
   return true;
 }
 
+// Claude Code marks the user-role rows it writes itself with isMeta: skill and
+// command bodies, image markers ("[Image: source: …]"), hook feedback, caveats,
+// messages from other sessions, resume notes. Of these, only a slash command's
+// arguments or a goal are the person's own words.
+function metaCarriesPersonText(text) {
+  if (/<command-args>\s*\S[\s\S]*?<\/command-args>/.test(text)) return true;
+  if (/^\/[^\s/]+\s+\S/.test(text)) return true;
+  return /^<system-reminder>\s*Current goal:/.test(text);
+}
+
 export function normalizeText(text, role = "user", isMeta = false) {
   const normalized = normalizeRawText(text);
   if (!normalized) return "";
   if (role !== "user") return normalized;
+  if (isMeta && !metaCarriesPersonText(normalized)) return "";
   if (isInjectedContextText(normalized, NOISE_TAGS)) return "";
   if (/^\[Request interrupted by user(?: for tool use)?\]$/.test(normalized)) return "";
-  if (isMeta && /^Base directory for this skill: [^\n]+\n/.test(normalized)) return "";
   return normalized;
 }
 
