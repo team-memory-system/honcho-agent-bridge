@@ -868,6 +868,10 @@ test("the schedule is a clock job on each OS, at the device's own minute, and in
   assert.match(windows.xml, /<StartBoundary>2026-01-01T03:17:00<\/StartBoundary>/);
   assert.match(windows.xml, /<StartWhenAvailable>true<\/StartWhenAvailable>/);
   assert.match(windows.vbs, /backup run --scheduled/);
+  // A node removed by an upgrade (winget's versioned folder) falls back to the one on PATH.
+  assert.match(windows.vbs, /^node = "\/usr\/local\/bin\/node"\r$/m);
+  assert.match(windows.vbs, /^If Not CreateObject\("Scripting\.FileSystemObject"\)\.FileExists\(node\) Then node = "node"\r$/m);
+  assert.match(windows.vbs, /^shell\.Run "cmd \/c """"" & node & """ ""\/app\/cli\.mjs"" backup run --scheduled >> ""[^"]+"" 2>&1""", 0, True\r$/m);
   assert.match(linux.serviceText, /"backup" "run" "--scheduled"/);
 
   const calls = [];

@@ -161,15 +161,20 @@ function clockJobSpec(ctx, job, { nodePath, cliPath, logPath, workingDirectory, 
     const wscript = path.win32.join(system32, "wscript.exe");
     const vbsPath = path.win32.join(stateDir, `${job.file}.vbs`);
     // cmd keeps what the run prints in the log; the outer quotes are cmd's own.
-    const commandLine = `cmd /c ""${nodePath}" "${cliPath}" ${job.command.join(" ")} >> "${logPath}" 2>&1"`;
+    // winget's portable Node lives in a folder named after its version, which an
+    // upgrade removes, so when the recorded node is gone the node on PATH runs.
+    const vbsString = (text) => `"${String(text).replace(/"/g, '""')}"`;
+    const afterNode = `" "${cliPath}" ${job.command.join(" ")} >> "${logPath}" 2>&1"`;
     const vbs = [
       job.vbsComment,
       "' Written by `cli.mjs backup schedule on`; `cli.mjs backup schedule off` removes it.",
       "Option Explicit",
-      "Dim shell",
+      "Dim shell, node",
       'Set shell = CreateObject("WScript.Shell")',
-      `shell.CurrentDirectory = "${String(workingDirectory).replace(/"/g, '""')}"`,
-      `shell.Run "${commandLine.replace(/"/g, '""')}", 0, True`,
+      `node = ${vbsString(nodePath)}`,
+      'If Not CreateObject("Scripting.FileSystemObject").FileExists(node) Then node = "node"',
+      `shell.CurrentDirectory = ${vbsString(workingDirectory)}`,
+      `shell.Run ${vbsString('cmd /c ""')} & node & ${vbsString(afterNode)}, 0, True`,
       "",
     ].join("\r\n");
     const xml = [
