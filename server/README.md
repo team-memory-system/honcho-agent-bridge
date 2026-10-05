@@ -11,19 +11,38 @@ full 40-character `commit` so a plugin version always installs the reviewed sour
 The prepared source records upstream and patch provenance in `.honcho-source.json`.
 
 The local collector and MCP process stay on the host; this Compose project runs
-Honcho API, Deriver, PostgreSQL/pgvector, Redis, and the dashboard.
+Honcho API, Deriver, PostgreSQL/pgvector, Redis, and the dashboard, and, while the
+server is shared, the gate, the team MCP bridge and the tunnel.
 
 The setup CLI creates `.env`, generates a database password, and starts this
 project. API and dashboard ports bind only to `127.0.0.1`; PostgreSQL and Redis
 are not published to the host. Persistent memory lives in named Docker volumes.
 
-`gate/gate.mjs` is the token gate that `server share enable` runs as the `gate`
-service (Compose profile `share`, reusing the dashboard image's Node) when the
-owner shares this server with their other computers through a Cloudflare tunnel.
-It publishes only `127.0.0.1:${HONCHO_GATE_PORT:-8010}` and forwards only
-`GET /health` and `/v3/*`, and only with the gate token.
+Sharing runs three services under the Compose profile `share`.
 
-`host/mesh-forwarder.mjs` is the Mesh way in (`server share enable --mesh`, for an owner with no domain). The host supervisor runs it as a child process while `runtime/share.json` has `mesh.enabled`. It listens on `0.0.0.0:<mesh.port>`, passes only connections that arrived on a `100.96.0.0/12` address to `127.0.0.1:<mesh.gatePort>`, and writes `runtime/host/mesh-forwarder.json` while it listens. `share.json` holds `tunnel` (true while the Cloudflare tunnel is on) and `mesh: {enabled, port, gatePort, enabledAt, lastAddress}`.
+`gate/gate.mjs` runs as the `gate` service on the dashboard image's Node. It
+publishes only `127.0.0.1:${HONCHO_GATE_PORT:-8010}` and has two ways through:
+
+- `GET /health` and `/v3/*`, for the owner's other computers, only with the gate
+  token (`HONCHO_GATE_TOKEN`).
+- `/mcp` and `/mcp/*`, for teammates, only with a person's Cloudflare Access login.
+  The gate verifies `Cf-Access-Jwt-Assertion` against
+  `https://<HONCHO_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` and
+  `HONCHO_ACCESS_AUD`, and requires an `email` claim. It drops the caller's own
+  credentials and `x-honcho-*` headers, then passes the request to `mcp` with
+  `HONCHO_TEAM_MCP_TOKEN` and the verified email. Until the team domain, the AUD
+  and the team MCP token are all set, `/mcp` answers 404. Each refused login
+  leaves an `mcp_refused` line with its reason in the gate's log.
+
+`mcp` is honcho-selfhost's `local-mcp-bridge`, built from
+`honcho/local-mcp-bridge`. It answers `chat` only, pinned to
+`HONCHO_TEAM_WORKSPACE` (default `memory`) and `HONCHO_TEAM_PEER`. It records each
+call in the audit schema as bridge `team`, with the caller's email. It has no host
+port.
+
+`tunnel` is `cloudflared` (pinned image tag). It runs the tunnel whose token is
+`HONCHO_TUNNEL_TOKEN` in `.env`, and the tunnel's ingress, set in Cloudflare, is
+`http://gate:8010`. No cloudflared runs on the host.
 
 `env.personal.example` is the personal profile's template. Every chat model
 points at the subscription gateway's router (`host.docker.internal:11400`) and
