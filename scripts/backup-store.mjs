@@ -22,13 +22,6 @@ const DEFAULT_TPS_LIMIT = 4;
 export const MOVE_BATCH_PAIRS = 100;
 export const MOVE_BATCH_CHARS = 24_000;
 
-export class DestinationUnreachable extends Error {
-  constructor(reason, detail = "") {
-    super(detail || reason);
-    this.reason = reason;
-  }
-}
-
 /** md5 of a whole file, as Google Drive and rclone report it. */
 export async function md5OfFile(filePath) {
   const hash = crypto.createHash("md5");

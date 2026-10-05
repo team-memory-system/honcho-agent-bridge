@@ -247,20 +247,16 @@ test("Docker and Ollama are checked only with server, and the app installs them"
   assert.equal(item(win, "ollama").ok, true);
 });
 
-test("WARP is required for every feature, whatever remote says, and absent with none", async () => {
+test("WARP is required for every feature, and absent with none", async () => {
   assert.equal(item(await mac(), "warp"), undefined);
-  assert.equal(item(await mac({ remote: true }), "warp"), undefined, "remote asks for nothing on its own");
   for (const features of [["server"], ["sync"], ["chat"], ["server", "sync"], ["sync", "chat"], ["server", "sync", "chat"]]) {
-    for (const remote of [false, true]) {
-      const label = `${features.join(",")} remote=${remote}`;
-      const missing = await mac({ features, remote });
-      assert.equal(item(missing, "warp").needed, "required", label);
-      assert.equal(item(missing, "warp").ok, false, label);
-      assert.equal(missing.ok, false, `${label}: WARP missing fails the check`);
-      assert.equal(missing.remote, remote, label);
-      const connected = await mac({ features, remote, which: { "warp-cli": MAC_WARP }, responses: warpResponses(MAC_WARP) });
-      assert.equal(item(connected, "warp").ok, true, label);
-    }
+    const label = features.join(",");
+    const missing = await mac({ features });
+    assert.equal(item(missing, "warp").needed, "required", label);
+    assert.equal(item(missing, "warp").ok, false, label);
+    assert.equal(missing.ok, false, `${label}: WARP missing fails the check`);
+    const connected = await mac({ features, which: { "warp-cli": MAC_WARP }, responses: warpResponses(MAC_WARP) });
+    assert.equal(item(connected, "warp").ok, true, label);
   }
   const windowsChat = await windows({ features: ["chat"] });
   assert.equal(item(windowsChat, "warp").needed, "required");
@@ -339,7 +335,6 @@ test("on Linux WARP is required but not installed by the plugin", async () => {
 test("a command that throws or hangs up is a failed check, never a throw", async () => {
   const result = await checkPrereqs({
     features: ["server", "sync", "chat"],
-    remote: true,
     platform: "darwin",
     env: { PATH: "/usr/bin" },
     homeDir: "/Users/test",
@@ -355,7 +350,7 @@ test("a command that throws or hangs up is a failed check, never a throw", async
 test("the CLI refuses unknown features and lists prereqs in its help", async () => {
   const { stdout } = await execFileAsync(process.execPath, [CLI, "help"]);
   const usage = JSON.parse(stdout).usage;
-  assert.ok(usage.includes("prereqs [--features server,sync,chat] [--remote]"));
+  assert.ok(usage.includes("prereqs [--features server,sync,chat]"));
   assert.ok(usage.includes("prereqs install warp --team <name>"));
   await assert.rejects(execFileAsync(process.execPath, [CLI, "prereqs", "--features", "server,docker"]), (error) => {
     const output = JSON.parse(String(error.stdout));
@@ -384,14 +379,11 @@ test("the CLI refuses unknown features and lists prereqs in its help", async () 
 });
 
 test("the UI route takes only the three feature names", () => {
-  const ok = prereqsInvocation(new URLSearchParams("features=server,sync&remote=1"));
-  assert.deepEqual(ok, { args: ["prereqs", "--features=server,sync", "--remote"] });
+  assert.deepEqual(prereqsInvocation(new URLSearchParams("features=server,sync")), { args: ["prereqs", "--features=server,sync"] });
   assert.deepEqual(prereqsInvocation(new URLSearchParams("")), { args: ["prereqs", "--features="] });
-  assert.deepEqual(prereqsInvocation(new URLSearchParams("features=chat&remote=0")), { args: ["prereqs", "--features=chat"] });
-  assert.match(prereqsInvocation(new URLSearchParams("features=server,--remote")).error, /unknown feature/);
+  assert.match(prereqsInvocation(new URLSearchParams("features=server,--force")).error, /unknown feature/);
   assert.match(prereqsInvocation(new URLSearchParams("features=sync;rm")).error, /unknown feature/);
   assert.match(prereqsInvocation(new URLSearchParams("features=sync&features=chat")).error, /once/);
-  assert.match(prereqsInvocation(new URLSearchParams("features=sync&remote=yes")).error, /remote/);
 });
 
 test("the UI install route takes warp and a team name, and nothing else", () => {

@@ -404,7 +404,6 @@ const ROUTES = {
  */
 const HOST_ROUTES = {
   "/api/host/status": ["host", "status", "--profile", "personal"],
-  "/api/host/prepare": ["host", "prepare", "--profile", "personal"],
   "/api/host/start": ["host", "start", "--profile", "personal"],
   "/api/host/stop": ["host", "stop", "--profile", "personal"],
   "/api/gateway/open": ["gateway", "open"],
@@ -510,19 +509,15 @@ async function importChatGpt(req, res) {
 }
 
 /**
- * `?features=server,sync&remote=1` as `cli.mjs prereqs` arguments. Only the
- * three feature names pass; `remote` is "1"/"true" or "0"/"false" or absent.
+ * `?features=server,sync` as `cli.mjs prereqs` arguments. Only the three
+ * feature names pass.
  */
 export function prereqsInvocation(query) {
   const values = query.getAll("features");
   if (values.length > 1) return { error: "features is given once, as a comma-separated list" };
   const { features, invalid } = parseFeatures(values[0] || "");
   if (invalid.length) return { error: `unknown feature: ${invalid.join(", ")} (expected ${FEATURES.join(", ")})` };
-  const remote = query.get("remote");
-  if (remote !== null && !["1", "true", "0", "false", ""].includes(remote)) return { error: "remote takes 1 or 0" };
-  const args = ["prereqs", `--features=${features.join(",")}`];
-  if (remote === "1" || remote === "true") args.push("--remote");
-  return { args };
+  return { args: ["prereqs", `--features=${features.join(",")}`] };
 }
 
 // What the start screen may install for the user. Everything else is installed by

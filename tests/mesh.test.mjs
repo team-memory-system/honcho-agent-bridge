@@ -27,7 +27,6 @@ import {
   FIREWALL_RULE_NAME,
   firewallRuleCovers,
   ipv4Range,
-  meshAddress,
   meshAddressFrom,
   meshClientCheck,
   meshIPv4,
@@ -303,10 +302,11 @@ test("the Mesh address is the 100.96.0.0/12 IPv4 of the interface warp-cli names
   assert.deepEqual(meshAddressFrom({ network: null, interfaces: { en0: INTERFACES.en0 } }), { ip: null, iface: null, source: null });
 });
 
-test("meshAddress reads warp-cli and the interfaces, and never passes on an identifier", async () => {
+test("meshState reads warp-cli and the interfaces, and never passes on an identifier", async () => {
   const warp = fakeWarp();
-  const found = await meshAddress(warp);
-  assert.deepEqual(found, { ok: true, ip: "100.96.0.1", iface: "utun0", connected: true, team: "acme-team" });
+  const found = await meshState(warp);
+  assert.deepEqual(found.warp, { installed: true, connected: true, team: "acme-team", iface: "utun0" });
+  assert.equal(found.ip, "100.96.0.1");
   assert.deepEqual(warp.calls.sort(), [
     `${MAC_WARP} -j debug network`,
     `${MAC_WARP} -j registration show`,
@@ -317,11 +317,15 @@ test("meshAddress reads warp-cli and the interfaces, and never passes on an iden
   assert.deepEqual(state.splitTunnel, { ok: false, mode: "include" });
   assert.equal(JSON.stringify(state).includes("secret"), false);
 
-  assert.deepEqual(await meshAddress(fakeWarp({ connected: false })), { ok: false, ip: null, iface: "utun0", connected: false, team: "acme-team", error: "WARP is not connected" });
+  // An address on a WARP that is not connected reaches nothing.
+  const disconnected = await meshState(fakeWarp({ connected: false }));
+  assert.deepEqual([disconnected.ip, disconnected.iface, disconnected.warp.connected], [null, "utun0", false]);
   // Without a team there is no Mesh address on the WARP interface.
-  assert.equal((await meshAddress(fakeWarp({ team: "", iface: "utun9" }))).error, "WARP is not enrolled in a Cloudflare One team");
-  const missing = await meshAddress({ platform: "darwin", env: {}, which: () => null, fileExists: () => false, run: async () => assert.fail("nothing to run") });
-  assert.deepEqual(missing, { ok: false, ip: null, iface: null, connected: false, team: "", error: "Cloudflare WARP is not installed" });
+  const teamless = await meshState(fakeWarp({ team: "", iface: "utun9" }));
+  assert.deepEqual([teamless.ip, teamless.warp.team], [null, ""]);
+  const missing = await meshState({ platform: "darwin", env: {}, which: () => null, fileExists: () => false, run: async () => assert.fail("nothing to run") });
+  assert.deepEqual(missing.warp, { installed: false, connected: false, team: "", iface: null });
+  assert.equal(missing.ip, null);
 });
 
 test("the split tunnel is read from warp-cli settings: Include needs 100.96.0.0/12, Exclude must not cover it", () => {

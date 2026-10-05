@@ -511,13 +511,6 @@ function isManagedHookHandler(handler) {
   return command.includes(CURRENT_HOOK_MARKER) || LEGACY_HOOK_MARKERS.some((marker) => command.includes(marker));
 }
 
-function isManagedHook(document) {
-  return (document?.hooks?.Stop || []).some((entry) => {
-    if (isManagedHookHandler(entry)) return true;
-    return Array.isArray(entry?.hooks) && entry.hooks.some(isManagedHookHandler);
-  });
-}
-
 /** A managed hook for this runtime whose node binary still exists, whatever PATH doctor runs with. */
 function hasCurrentManagedHook(document, runtimeDir, provider) {
   const suffix = ` "${path.join(runtimeDir, "cli.mjs")}" hook ${provider} ${CURRENT_HOOK_MARKER}`;
@@ -1716,7 +1709,7 @@ function usage() {
     version: VERSION,
     usage: [
       "detect",
-      "prereqs [--features server,sync,chat] [--remote]",
+      "prereqs [--features server,sync,chat]",
       "prereqs install warp --team <name>",
       "server plan [--profile portable|personal]",
       "server prepare [--profile portable|personal] [--model <id>]",
@@ -1797,9 +1790,8 @@ async function serverShare(args) {
 }
 
 /**
- * `prereqs [--features server,sync,chat] [--remote]`: what this computer needs
- * before setup, for the features chosen on it. `--remote` (sync to a server on
- * another computer) is still accepted but no longer changes the result.
+ * `prereqs [--features server,sync,chat]`: what this computer needs before setup,
+ * for the features chosen on it.
  */
 async function prereqs(options = {}) {
   const value = options.features;
@@ -1808,9 +1800,8 @@ async function prereqs(options = {}) {
   }
   const { features, invalid } = parseFeatures(typeof value === "string" ? value : "");
   if (invalid.length) return { ok: false, error: `unknown feature: ${invalid.join(", ")} (expected ${FEATURES.join(", ")})` };
-  if (options.remote !== undefined && options.remote !== true) return { ok: false, error: "--remote takes no value" };
   const config = await loadConfig().catch(() => null);
-  return checkPrereqs({ features, remote: options.remote === true, serverDir: installedServerDir(config) });
+  return checkPrereqs({ features, serverDir: installedServerDir(config) });
 }
 
 /**

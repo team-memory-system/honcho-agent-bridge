@@ -197,21 +197,6 @@ export async function meshState(options = {}) {
   };
 }
 
-/**
- * This computer's Mesh address: `{ ok, ip, iface, connected, team }`, with
- * `error` when there is none.
- */
-export async function meshAddress(options = {}) {
-  const state = await meshState(options);
-  const base = { ip: state.ip, iface: state.iface, connected: state.warp.connected, team: state.warp.team };
-  if (state.ip) return { ok: true, ...base };
-  let error = "The WARP interface has no Mesh address (100.96.0.0/12)";
-  if (!state.warp.installed) error = "Cloudflare WARP is not installed";
-  else if (!state.warp.team) error = "WARP is not enrolled in a Cloudflare One team";
-  else if (!state.warp.connected) error = "WARP is not connected";
-  return { ok: false, ...base, error };
-}
-
 // ------------------------------------------------------------------ problems
 
 /**

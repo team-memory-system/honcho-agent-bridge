@@ -9,8 +9,7 @@
 // Everyone needs Node (this runs in it) and Git (the plugin marketplace install and
 // `server prepare` both clone with it). Every feature also needs Cloudflare WARP,
 // joined to the team and connected: the team's servers and shared bridges are
-// reached through it. `remote` is still accepted, for older callers, but no longer
-// changes what is needed.
+// reached through it.
 //
 // checkPrereqs installs and starts nothing: each check runs one short read-only
 // command through an injectable `run`, and a missing program is `ok: false`, never
@@ -391,13 +390,11 @@ async function warpItem({ needed, platform, env, run, which, fileExists, brew })
 
 /**
  * What this computer has and lacks for `features`. WARP is required for any
- * feature; `remote` (sync to a server on another computer) is accepted and echoed
- * back but changes nothing. The top-level `ok` is true when every `required` item
- * is ok; "app-installs" items are installed by server prepare when missing.
+ * feature. The top-level `ok` is true when every `required` item is ok;
+ * "app-installs" items are installed by server prepare when missing.
  */
 export async function checkPrereqs({
   features = [],
-  remote = false,
   platform = process.platform,
   arch = process.arch,
   run = defaultRun,
@@ -424,7 +421,6 @@ export async function checkPrereqs({
     platform,
     arch,
     features: parsed.features,
-    remote: remote === true,
     items,
   };
 }

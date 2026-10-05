@@ -279,7 +279,6 @@ test("the host buttons drive the host lifecycle, not the Docker stack", async ()
   const source = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
   const routes = source.match(/const HOST_ROUTES = \{([\s\S]*?)\n\};/)[1];
   assert.match(routes, /"host", "status"/);
-  assert.match(routes, /"host", "prepare"/);
   assert.match(routes, /"host", "start"/);
   assert.match(routes, /"host", "stop"/);
   assert.match(routes, /"gateway", "open"/);
@@ -465,7 +464,7 @@ test("the gate token is read with a same-origin POST only", async (t) => {
 });
 
 test("the prerequisite route validates its features before running the CLI", async () => {
-  for (const query of ["features=server,docker", "features=sync%20--remote", "features=sync&features=chat", "features=chat&remote=yes"]) {
+  for (const query of ["features=server,docker", "features=sync%20--force", "features=sync&features=chat"]) {
     const response = await send(`/api/app/prereqs?${query}`);
     assert.equal(response.status, 400, query);
     assert.equal(response.body.ok, false, query);

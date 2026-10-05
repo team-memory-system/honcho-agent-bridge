@@ -177,8 +177,7 @@ export default {
       const serverHere = features.includes("server");
 
       // Required software first: what the chosen features need, with how to get it.
-      const remote = features.includes("sync") && !serverHere;
-      const prereqs = await get(`/api/app/prereqs?${new URLSearchParams({ features: features.join(","), ...(remote ? { remote: "1" } : {}) })}`).catch((error) => ({ ok: false, error: error.message, items: [] }));
+      const prereqs = await get(`/api/app/prereqs?${new URLSearchParams({ features: features.join(",") })}`).catch((error) => ({ ok: false, error: error.message, items: [] }));
       const missing = (prereqs.items || []).filter((item) => item.needed === "required" && !item.ok);
       steps.push({
         title: "필요한 프로그램",
