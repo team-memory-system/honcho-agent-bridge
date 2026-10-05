@@ -376,19 +376,27 @@ test("plan: rows only the Mac DB holds keep their times and ids, the person's pe
   const rows = [
     { public_id: "row1", session_name: "local-notes-1", peer_name: "person_live", content: "remember the blue notebook", created_at: "2026-05-01T00:00:00+00:00", metadata: { source: "local_memory", note_kind: "seed" } },
     { public_id: "row2", session_name: "local-notes-1", peer_name: "assistant_codex", content: "noted", created_at: "2026-05-01T00:00:05+00:00", metadata: { source: "local_memory" } },
+    // Another source's row in the same live session keeps its own source.
+    { public_id: "row4", session_name: "local-notes-1", peer_name: "person_live", content: "and the red pen", created_at: "2026-05-02T00:00:00+00:00", metadata: { source: "hermes" } },
     { public_id: "row3", session_name: "local-notes-2", peer_name: "person_live", content: "written after the cut", created_at: "2026-10-05T11:00:00+00:00", metadata: { source: "local_memory" } },
   ];
   const file = await put(path.join(dir, "extract.jsonl"), rows.map(line).join(""));
   const { entries, exclusions, summary } = await plan({ tz: "Asia/Seoul", to: "2026-10-05 19:00", oldDb: [file], out: path.join(dir, "run", "manifest.jsonl"), userPeer: "me" }, { log: quiet });
-  assert.deepEqual(entries.map((entry) => [entry.kind, entry.session_id, entry.messages]), [["old-db", "local-notes-1", 2]]);
+  assert.deepEqual(entries.map((entry) => [entry.kind, entry.session_id, entry.messages]), [["old-db", "local-notes-1", 3]]);
   assert.deepEqual(exclusions.map((item) => [item.session_id, item.reason]), [["local-notes-2", "after-to"]]);
   const payload = JSON.parse(await fsp.readFile(entries[0].payload, "utf8"));
   assert.deepEqual(payload.messages.map((message) => [message.peer_id, message.created_at, message.metadata.source_turn_hash, message.metadata.original_public_id]), [
     ["me", "2026-05-01T00:00:00.000Z", "old-db:row1", "row1"],
     ["assistant_codex", "2026-05-01T00:00:05.000Z", "old-db:row2", "row2"],
+    ["me", "2026-05-02T00:00:00.000Z", "old-db:row4", "row4"],
+  ]);
+  assert.deepEqual(payload.messages.map((message) => [message.metadata.source, message.metadata.memory_origin]), [
+    ["local_memory", "local_memory_direct_user"],
+    ["local_memory", "local_memory_assistant"],
+    ["hermes", "hermes_direct_user"],
   ]);
   assert.equal(payload.messages[0].metadata.note_kind, "seed");
-  assert.deepEqual(summary.mac_db_only, { rows: 3, sessions: 1, by_source: { local_memory: 2 } });
+  assert.deepEqual(summary.mac_db_only, { rows: 4, sessions: 1, by_source: { local_memory: 2, hermes: 1 } });
 });
 
 test("a Grok index document splits into the log's number of prompts and one reply, without the trailing tool list", () => {

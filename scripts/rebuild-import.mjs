@@ -770,17 +770,19 @@ function directEntry(ctx, { kind, source, machine, sessionId, file, sessionMetad
     addTurnToCounts(counts, { role: turn.role, content: turn.content, peer: turn.peer, automated, charLimit: ctx.charLimit });
     peers.add(turn.peer);
     const chunks = splitContent(turn.content, ctx.charLimit);
+    // A session can hold turns from more than one source (Mac-DB rows); each keeps its own.
+    const turnSource = turn.source || source;
     chunks.forEach((chunk, index) => {
       const metadata = {
-        source,
-        agent_provider: source,
+        source: turnSource,
+        agent_provider: turnSource,
         memory_importer: "rebuild_direct",
         rebuild_kind: kind,
-        memory_origin: turn.role === "user" ? (turn.peer === ctx.userPeer ? `${source}_direct_user` : `${source}_automation`) : `${source}_assistant`,
+        memory_origin: turn.role === "user" ? (turn.peer === ctx.userPeer ? `${turnSource}_direct_user` : `${turnSource}_automation`) : `${turnSource}_assistant`,
         direct_user: turn.role === "user" && turn.peer === ctx.userPeer,
         source_turn_hash: turn.hash,
         created_at_source: turn.created_at_source,
-        [`${source}_role`]: turn.role,
+        [`${turnSource}_role`]: turn.role,
         ...(turn.automation_kind ? { automation_kind: turn.automation_kind } : {}),
         ...(turn.extra || {}),
       };
@@ -1504,7 +1506,7 @@ async function planOldDb(filePaths, ctx, knownSessions) {
       }
       extra.original_public_id = row.public_id;
       extra.original_peer = row.peer_name;
-      turns.push({ role, content, created_at: iso(timeMs), created_at_source: "original", peer, hash: `old-db:${row.public_id}`, extra });
+      turns.push({ role, content, created_at: iso(timeMs), created_at_source: "original", peer, hash: `old-db:${row.public_id}`, source: original.source || base.provider, extra });
     }
     if (!turns.length) {
       exclusions.push(exclusion(base, "no-turns"));
@@ -1518,7 +1520,7 @@ async function planOldDb(filePaths, ctx, knownSessions) {
     }
     const source = base.provider;
     report.sessions += 1;
-    report.by_source[source] = (report.by_source[source] || 0) + turns.length;
+    for (const turn of turns) report.by_source[turn.source] = (report.by_source[turn.source] || 0) + 1;
     knownSessions.add(sessionName);
     entries.push(directEntry(ctx, { kind: "old-db", source, machine: "mac-db", sessionId: sessionName, file, sessionMetadata: { original_session_id: sessionName, file_path: file }, turns }));
   }
