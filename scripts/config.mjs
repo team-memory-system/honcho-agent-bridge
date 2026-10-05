@@ -66,8 +66,9 @@ export function configEnvironment(config, provider = "") {
     HONCHO_USER_NAME: config.user?.peerId || "",
     HONCHO_AGENT_GATE_SPOOL: path.join(paths.dataDir, "spool"),
     HONCHO_AGENT_GATE_LOG: path.join(paths.dataDir, "logs", "gate.log"),
-    HONCHO_CODEX_INTERNAL_BATCH_SIZE: String(config.queue?.internalBatchSize ?? 1),
-    HONCHO_CODEX_EXTERNAL_BATCH_SIZE: String(config.queue?.externalBatchSize ?? 1),
+    // A configured install sends each finished turn on its own.
+    HONCHO_CODEX_INTERNAL_BATCH_SIZE: "1",
+    HONCHO_CODEX_EXTERNAL_BATCH_SIZE: "1",
   };
   if (config.honcho?.apiToken) env.HONCHO_API_BEARER_TOKEN = config.honcho.apiToken;
   // The memory server's Access service token, never the shared bridge's.

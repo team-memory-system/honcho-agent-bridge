@@ -15,7 +15,7 @@ const ACCESS = {
   llm: ["모델 사용", "accent"],
 };
 
-function toolRows(tools, onToggle, { locked = () => false } = {}) {
+function toolRows(tools, onToggle) {
   const byGroup = new Map(TOOL_GROUPS.map((group) => [group, []]));
   for (const tool of tools) {
     const info = TOOL_INFO[tool.name] || { group: "기타", access: tool.write ? "write" : "read", description: "" };
@@ -28,11 +28,11 @@ function toolRows(tools, onToggle, { locked = () => false } = {}) {
       const [label, kind] = ACCESS[tool.info.access] || ACCESS.read;
       return h("div", { class: "row" },
         h("div", {},
-          h("div", { class: "title" }, h("code", { class: "mono" }, tool.name), tag(label, kind), tool.pinned ? tag("설정 파일에서 꺼 둠") : null),
+          h("div", { class: "title" }, h("code", { class: "mono" }, tool.name), tag(label, kind)),
           h("div", { class: "sub", style: { fontSize: "13px", color: "var(--ink-2)" } }, tool.info.description),
           tool.info.offImpact ? h("div", { class: "sub" }, `끄면: ${tool.info.offImpact}`) : null,
         ),
-        h("div", { class: "end" }, toggle(tool.enabled, (next) => onToggle(tool.name, next), { label: `${tool.name} 켜기`, disabled: locked(tool) })),
+        h("div", { class: "end" }, toggle(tool.enabled, (next) => onToggle(tool.name, next), { label: `${tool.name} 켜기` })),
       );
     })),
   ));
@@ -67,7 +67,7 @@ export default {
           toolRows(tools, async (name, enabled) => {
             const next = await post("/api/app/mcp-tools", { name, enabled });
             tools = next.tools;
-          }, { locked: (tool) => tool.pinned }),
+          }),
         );
         redraw();
       } catch (error) {

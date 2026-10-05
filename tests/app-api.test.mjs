@@ -161,11 +161,11 @@ test("a conversation is named by what the person first said, not by a harness pr
   assert.deepEqual(listing.body, { filters: { metadata: { source: "codex" } } });
 });
 
-test("tool switches start at recall only, write only known names, and respect a pinned tool", async () => {
-  const config = { version: 1, paths: { dataDir: path.join(workdir, "data") }, mcp: { disabledTools: ["chat"] } };
+test("tool switches start at recall only and write only known names", async () => {
+  const config = { version: 1, paths: { dataDir: path.join(workdir, "data") } };
   const initial = await localTools({ config });
   assert.equal(initial.tools.length, ALL_TOOLS.length);
-  assert.deepEqual(initial.tools.filter((tool) => !tool.enabled).map((tool) => tool.name).sort(), [...WRITE_TOOLS, "chat"].sort());
+  assert.deepEqual(initial.tools.filter((tool) => !tool.enabled).map((tool) => tool.name).sort(), [...WRITE_TOOLS].sort());
 
   const changed = await setLocalTool({ name: "create_peer", enabled: true }, { config });
   assert.equal(changed.tools.find((tool) => tool.name === "create_peer").enabled, true);
@@ -173,9 +173,6 @@ test("tool switches start at recall only, write only known names, and respect a 
   assert.equal(written.disabled_tools.includes("create_peer"), false);
   assert.equal(written.disabled_tools.includes("delete_session"), true);
   if (process.platform !== "win32") assert.equal((await fsp.stat(path.join(workdir, "data", "mcp-tools.json"))).mode & 0o077, 0);
-
-  const pinned = await setLocalTool({ name: "chat", enabled: true }, { config });
-  assert.equal(pinned.tools.find((tool) => tool.name === "chat").enabled, false, "a tool the config turns off stays off");
 
   await assert.rejects(setLocalTool({ name: "rm_rf", enabled: true }, { config }), /Unknown MCP tool/);
   await assert.rejects(setLocalTool({ name: "chat", enabled: "yes" }, { config }), /true or false/);

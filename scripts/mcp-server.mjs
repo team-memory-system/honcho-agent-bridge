@@ -1,7 +1,7 @@
 import path from "node:path";
 import readline from "node:readline";
 
-import { installPaths, loadConfig, readJson, userHome } from "./config.mjs";
+import { installPaths, loadConfig, readJson } from "./config.mjs";
 import {
   accessRefusedMessage,
   configuredAccess,
@@ -102,8 +102,7 @@ async function runtimeContext() {
   const workspaceId = String(config.honcho?.workspaceId || "memory");
   const userName = String(config.user?.peerId || "").trim();
   if (!userName) throw new Error("Honcho Agent Bridge has no user peer ID. Run setup again.");
-  const configuredAssistant = config.peers?.assistants?.[PROVIDER] || config.peers?.assistant;
-  const assistantName = String(configuredAssistant || (PROVIDER === "agent" ? "assistant" : `assistant_${PROVIDER}`));
+  const assistantName = PROVIDER === "agent" ? "assistant" : `assistant_${PROVIDER}`;
   const token = String(config.honcho?.apiToken || process.env.HONCHO_API_BEARER_TOKEN || "").trim();
   // The memory server's own Access service token. The shared bridge's
   // (honcho.accessClientId/Secret, CF_ACCESS_CLIENT_*) belongs to another server.
@@ -112,14 +111,8 @@ async function runtimeContext() {
 }
 
 async function disabledToolNames(config) {
-  const paths = installPaths(config);
-  const names = new Set(Array.isArray(config.mcp?.disabledTools) ? config.mcp.disabledTools.map(String) : []);
-  const explicitPath = config.mcp?.toolConfigPath ? path.resolve(config.mcp.toolConfigPath) : null;
-  const currentPath = explicitPath || path.join(paths.dataDir, "mcp-tools.json");
-  let document = await readJson(currentPath, null);
-  if (!document && !explicitPath) {
-    document = await readJson(path.join(userHome(), ".hermes", "local-honcho-mcp", "tool-config.json"), null);
-  }
+  const names = new Set();
+  const document = await readJson(path.join(installPaths(config).dataDir, "mcp-tools.json"), null);
   const values = document?.disabled_tools || document?.disabledTools;
   if (Array.isArray(values)) values.forEach((name) => names.add(String(name)));
   // No tool file at all: an install from before setup wrote one. Default to recall only.
@@ -138,7 +131,7 @@ async function honchoRequest(context, method, apiPath, { body, params } = {}) {
     { Accept: "application/json", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
   );
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(context.config.honcho?.timeoutMs || 60_000));
+  const timeout = setTimeout(() => controller.abort(), 60_000);
   try {
     const response = await fetchHoncho(url, {
       method,
@@ -192,7 +185,7 @@ async function bridgeContext() {
     token: String(config.honcho?.mcpBridgeToken || config.honcho?.apiToken || process.env.HONCHO_MCP_BEARER_TOKEN || "").trim(),
     accessClientId: String(config.honcho?.accessClientId || process.env.CF_ACCESS_CLIENT_ID || "").trim(),
     accessClientSecret: String(config.honcho?.accessClientSecret || process.env.CF_ACCESS_CLIENT_SECRET || "").trim(),
-    timeoutMs: Number(config.honcho?.timeoutMs || 120_000),
+    timeoutMs: 120_000,
   };
 }
 

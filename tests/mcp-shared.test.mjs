@@ -132,10 +132,8 @@ function bothConfig(honchoPort, bridgeUrl) {
       workspaceId: "memory",
       mcpBridgeUrl: bridgeUrl,
       mcpBridgeToken: TOKEN,
-      timeoutMs: 20_000,
     },
     agents: { codex: false, claude: true },
-    peers: { assistants: { claude: "assistant_claude" } },
   };
 }
 
@@ -144,7 +142,7 @@ function bridgeOnlyConfig(bridgeUrl) {
   return {
     version: 1,
     agents: { codex: false, claude: false },
-    honcho: { mcpBridgeUrl: bridgeUrl, mcpBridgeToken: TOKEN, timeoutMs: 20_000 },
+    honcho: { mcpBridgeUrl: bridgeUrl, mcpBridgeToken: TOKEN },
   };
 }
 

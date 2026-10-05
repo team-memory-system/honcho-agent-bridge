@@ -273,7 +273,6 @@ export async function sessionsPage({ workspace, page = 1, size = 30, source = ""
 // to the next tool list an agent asks for.
 
 function toolsFile(config) {
-  if (config?.mcp?.toolConfigPath) return path.resolve(config.mcp.toolConfigPath);
   return path.join(installPaths(config).dataDir, "mcp-tools.json");
 }
 
@@ -285,13 +284,11 @@ export async function localTools({ config } = {}) {
   const listed = document?.disabled_tools || document?.disabledTools;
   // No file yet means the server's own default: recall only.
   const disabled = new Set(Array.isArray(listed) ? listed.map(String) : WRITE_TOOLS);
-  for (const name of loaded.mcp?.disabledTools || []) disabled.add(String(name));
-  const pinned = new Set((loaded.mcp?.disabledTools || []).map(String));
   return {
     ok: true,
     configured: true,
     path: file,
-    tools: ALL_TOOLS.map((name) => ({ name, enabled: !disabled.has(name), write: WRITE_TOOLS.includes(name), pinned: pinned.has(name) })),
+    tools: ALL_TOOLS.map((name) => ({ name, enabled: !disabled.has(name), write: WRITE_TOOLS.includes(name) })),
   };
 }
 

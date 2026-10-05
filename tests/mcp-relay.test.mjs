@@ -106,11 +106,9 @@ function relayConfig(port, extra = {}) {
       workspaceId: "memory",
       mcpBridgeUrl: `http://127.0.0.1:${port}/mcp`,
       mcpBridgeToken: TOKEN,
-      timeoutMs: 20_000,
       ...extra,
     },
     user: { peerId: "user_test" },
-    peers: { assistants: { claude: "assistant_claude" } },
   };
 }
 
@@ -175,12 +173,11 @@ test("an unreachable bridge is an error, not a silent fallback to the local tool
 test("without a bridge URL the local tools are served as before", async (t) => {
   const empty = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-tools-"));
   t.after(() => fsp.rm(empty, { recursive: true, force: true }));
-  const toolConfigPath = path.join(empty, "tool-config.json");
-  await fsp.writeFile(toolConfigPath, JSON.stringify({ version: 1, disabled_tools: [] }));
+  await fsp.writeFile(path.join(empty, "mcp-tools.json"), JSON.stringify({ disabled_tools: [] }));
 
   const config = relayConfig(1);
   delete config.honcho.mcpBridgeUrl;
-  config.mcp = { toolConfigPath };
+  config.paths = { dataDir: empty };
   const { send } = await client(t, config);
 
   const list = await send("tools/list", {});
