@@ -7,6 +7,7 @@ import { getProvider } from "./providers/index.mjs";
 import { codexSegmentId, segmentHashesFromStoredMessages, turnHashCandidates } from "./turn-identity.mjs";
 import { classifyAutomation as classifyCodexAutomation } from "./providers/codex.mjs";
 import { classifyAutomation as classifyClaudeAutomation } from "./providers/claude.mjs";
+import { classifyAutomation as classifyAgyAutomation } from "./providers/agy.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import {
   accessRefusedMessage,
@@ -39,9 +40,15 @@ const IMPORT_TRIGGER = process.env.HONCHO_AGENT_IMPORT_TRIGGER || process.env.HO
 const SUPPORTED_PROVIDERS = new Set(["codex", "claude", "agy", "chatgpt", "grok"]);
 const CODEX_AUTOMATION_PEER = process.env.HONCHO_CODEX_AUTOMATION_PEER || "automation_codex";
 const CLAUDE_AUTOMATION_PEER = process.env.HONCHO_CLAUDE_AUTOMATION_PEER || "automation_claude";
+const AGY_AUTOMATION_PEER = process.env.HONCHO_AGY_AUTOMATION_PEER || "automation_agy";
 // Providers whose user-role turns can be a program's prompts rather than the person's
-// words: [classifier, peer those turns go to]. Codex has its own path (buildCodexMessages).
-const AUTOMATION_CLASSIFIERS = { claude: [classifyClaudeAutomation, CLAUDE_AUTOMATION_PEER] };
+// words: [classifier, peer those turns go to]. A classifier is called with the turn's
+// text, the session metadata and the whole parsed session (agy decides per
+// conversation). Codex has its own path (buildCodexMessages).
+const AUTOMATION_CLASSIFIERS = {
+  claude: [classifyClaudeAutomation, CLAUDE_AUTOMATION_PEER],
+  agy: [classifyAgyAutomation, AGY_AUTOMATION_PEER],
+};
 // Set only when this run sends to another server (a target, see targets.mjs): the
 // folders whose conversations that server takes. Nothing outside them, and nothing
 // without a working directory, is sent - checked here, before any request, so no
@@ -212,6 +219,13 @@ async function saveState(provider, state) {
   await fsp.rename(tmp, target);
 }
 
+/** How many of `messages` go to each peer, e.g. { user: 1, assistant_agy: 1 }. */
+function countByPeer(messages) {
+  const counts = {};
+  for (const message of messages) counts[message.peer_id] = (counts[message.peer_id] || 0) + 1;
+  return counts;
+}
+
 function mergeStateHashes(...groups) {
   return [...new Set(groups.flat().filter(Boolean))];
 }
@@ -232,7 +246,7 @@ function buildMessages(provider, sessionId, parsed, sessionState) {
     let automationKind = null;
     if (turn.role === "user") {
       const [classify, automationPeer] = AUTOMATION_CLASSIFIERS[provider] || [];
-      const automation = classify ? classify(turn.content, parsed.metadata) : [false, null];
+      const automation = classify ? classify(turn.content, parsed.metadata, parsed) : [false, null];
       automationKind = automation[1];
       peerId = automation[0] ? automationPeer : DEFAULT_USER_PEER;
       directUser = !automation[0];
@@ -589,6 +603,7 @@ async function importParsedSession(args, parsed, transcriptPath, options = {}) {
       parsed_turns: parsed.turns.length,
       new_turns: pendingHashes.length,
       new_messages: messages.length,
+      new_messages_by_peer: countByPeer(messages),
       dry_run: Boolean(args.dryRun),
       state_synced_turns: syncedTurns,
       honcho_message_total: honchoMessageTotal,
