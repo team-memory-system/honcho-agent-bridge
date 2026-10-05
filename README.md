@@ -75,6 +75,16 @@ gets an answer, without reading the underlying messages.
    one is skipped. The CLI's probes pass `--only bridge` (`bridge connect`, `bridge
    test`, `doctor`'s `shared-bridge` check) or `--only local` (`doctor`'s `mcp`
    check), so a down bridge still fails its own check.
+6. **Recall at the start of work.** `scripts/recall.mjs` is meant for Claude Code's
+   SessionStart (`session-start`, on startup and `/clear`) and UserPromptSubmit
+   (`prompt`) hooks. At session start it adds the short summary of the last
+   conversation in the same folder and the judgment-like conclusions of the recent
+   ones. On the first real request it searches conclusions with the request, this
+   folder's sessions first, then the rest of memory. It never sends the peer card,
+   and it drops the boilerplate the deriver made out of stored compaction summaries.
+   It prints nothing when Honcho is slow or down. It is not yet in
+   `hooks/claude-hooks.json` or the installer; on a machine that runs this checkout
+   directly, add the two hooks to `~/.claude/settings.json` by hand.
 
 ### Things that will bite you
 
