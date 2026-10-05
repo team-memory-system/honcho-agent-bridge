@@ -36,7 +36,6 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const DRIVER_PATH = fileURLToPath(import.meta.url);
 export const DEFAULT_COLLECTOR = path.join(HERE, "collector.mjs");
 export const DEFAULT_TZ = "Asia/Seoul";
-export const DEFAULT_USER_PEER = "chenjing";
 export const DEFAULT_CHAR_LIMIT = 24000;
 export const DEFAULT_MAX_FAILURES = 3;
 export const BATCH_LIMIT = 100;
@@ -128,6 +127,16 @@ export function interpolateTimes(n, startMs, endMs = null) {
 // ---------------------------------------------------------------------------
 
 /** "claude:drive:/path" → { provider, machine, dir }. */
+/**
+ * The person's peer id on the target server. There is no default: it is
+ * install-specific, and every user turn of the plan and the run is stored under it.
+ */
+export function requireUserPeer(options, command) {
+  const peer = String(options?.userPeer || "").trim();
+  if (!peer) throw new Error(`${command} needs --user-peer <name>: the person's peer id on the target server (there is no default)`);
+  return peer;
+}
+
 export function parseRoot(value) {
   const match = /^([a-z]+):([A-Za-z0-9_.-]+):(.+)$/.exec(String(value || ""));
   if (!match || !ROOT_PROVIDERS.has(match[1])) throw new Error(`--root must be <claude|codex|agy|grok>:<machine>:<dir>, got: ${value}`);
@@ -1463,7 +1472,7 @@ async function planGrokIndex(indexPath, logPath, ctx, knownSessions) {
   return { entries, exclusions, report };
 }
 
-/** Rows that exist only in the old Mac DB (extract.jsonl): user_chen and user become the user peer. */
+/** Rows that exist only in the old Mac DB: any peer that is not assistant_* or automation_* is the person's and becomes --user-peer. */
 async function planOldDb(filePaths, ctx, knownSessions) {
   const entries = [];
   const exclusions = [];
@@ -1485,7 +1494,7 @@ async function planOldDb(filePaths, ctx, knownSessions) {
       const content = String(row.content || "").trim();
       if (!content || !Number.isFinite(timeMs)) continue;
       const original = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
-      const isUser = row.peer_name === "user_chen" || row.peer_name === "user" || row.peer_name === ctx.userPeer;
+      const isUser = !/^(?:assistant|automation)_/.test(String(row.peer_name || ""));
       const peer = isUser ? ctx.userPeer : row.peer_name;
       const role = isUser || String(row.peer_name).startsWith("automation_") ? "user" : "assistant";
       const extra = {};
@@ -1671,6 +1680,7 @@ function catchUpState(stateDir) {
 export async function plan(options, { log = console.log } = {}) {
   const timeZone = options.tz || DEFAULT_TZ;
   if (!options.out) throw new Error("plan needs --out <manifest.jsonl>");
+  const userPeer = requireUserPeer(options, options.catchUp ? "plan --catch-up" : "plan");
   const roots = (options.roots || []).map((root) => (typeof root === "string" ? parseRoot(root) : root));
   const catchUp = Boolean(options.catchUp);
   if (catchUp && !options.stateDir) throw new Error("plan --catch-up needs --state-dir (the run's state directory)");
@@ -1685,7 +1695,7 @@ export async function plan(options, { log = console.log } = {}) {
     toMs,
     catchUp,
     stageDir,
-    userPeer: options.userPeer || DEFAULT_USER_PEER,
+    userPeer,
     localMachine: options.localMachine || "local",
     charLimit: Number(options.charLimit || DEFAULT_CHAR_LIMIT),
     excludeIds: await readIdList(options.excludeIds),
@@ -1903,7 +1913,7 @@ export async function guardServer(request, { workspace, runId, summaryEnabled = 
 }
 
 /** The collector's environment for one entry of the rebuild. */
-export function collectorEnv(baseEnv, { provider, runDir, workspace, tag, baseUrl, userPeer = DEFAULT_USER_PEER, charLimit = DEFAULT_CHAR_LIMIT, agyHistory = null }) {
+export function collectorEnv(baseEnv, { provider, runDir, workspace, tag, baseUrl, userPeer, charLimit = DEFAULT_CHAR_LIMIT, agyHistory = null }) {
   const env = { ...baseEnv };
   for (const key of Object.keys(env)) {
     // A target run (targets.mjs) filters by folder and points at another server.
@@ -1917,7 +1927,7 @@ export function collectorEnv(baseEnv, { provider, runDir, workspace, tag, baseUr
   env.HONCHO_BASE_URL = baseUrl;
   env.HONCHO_WORKSPACE_ID = workspace;
   env.HONCHO_AGENT_PROVIDER = provider;
-  env.HONCHO_USER_NAME = userPeer;
+  env.HONCHO_USER_NAME = requireUserPeer({ userPeer }, "collectorEnv");
   env.HONCHO_AGENT_HOOK_STATE = path.join(runDir, "state", `${provider}.json`);
   env.HONCHO_AGENT_HOOK_LOG = path.join(runDir, "logs", `${provider}.log`);
   env.HONCHO_AGENT_IMPORT_TRIGGER = tag;
@@ -2052,6 +2062,7 @@ export async function run(options, { log = console.log, env = process.env, reque
   if (!options.runDir) throw new Error("run needs --run-dir");
   if (!options.baseUrl) throw new Error("run needs --base-url (the target server)");
   if (!options.runId) throw new Error("run needs --run-id (the workspace marker)");
+  const userPeer = requireUserPeer(options, "run");
   const workspace = String(options.workspace || "").trim();
   if (!workspace) throw new Error("run needs --workspace");
   const runDir = path.resolve(options.runDir);
@@ -2063,13 +2074,16 @@ export async function run(options, { log = console.log, env = process.env, reque
   const tag = options.tag || `rebuild-${options.runId}`;
   const collectorPath = options.collector || DEFAULT_COLLECTOR;
   const maxFailures = Number(options.maxFailures || DEFAULT_MAX_FAILURES);
-  const userPeer = options.userPeer || DEFAULT_USER_PEER;
   const manifest = await readJsonl(options.manifest);
   if (!manifest.length) throw new Error(`manifest is empty: ${options.manifest}`);
   let summary = {};
   try {
     summary = JSON.parse(await fsp.readFile(siblingPath(options.manifest, "summary.json"), "utf8"));
   } catch {}
+  // Direct payloads were written at plan time with the plan's user peer.
+  if (summary.user_peer && summary.user_peer !== userPeer) {
+    throw new Error(`refusing: --user-peer "${userPeer}" differs from the plan's "${summary.user_peer}" (its direct payloads already use that name)`);
+  }
   const charLimit = Number(summary.char_limit) || DEFAULT_CHAR_LIMIT;
   const agyHistory = summary.inputs?.agy_history || null;
   if (summary.gates?.length && !options.ignoreGates) throw new Error(`refusing: the plan has open gates: ${summary.gates.join("; ")}`);
@@ -2312,14 +2326,14 @@ export function parseCli(argv) {
 }
 
 const USAGE = `usage:
-  rebuild-import.mjs plan --out <manifest.jsonl> [--to <local time>] [--tz Asia/Seoul]
+  rebuild-import.mjs plan --out <manifest.jsonl> --user-peer <name> [--to <local time>] [--tz Asia/Seoul]
       [--root <claude|codex|agy|grok>:<machine>:<dir> ...] [--exclude-ids <file>]
       [--chatgpt-export <zip|dir|json>] [--hermes <dir>] [--cursor <dir>] [--cursor-vscdb <jsonl>]
       [--gemini <dir>] [--grok-index <sqlite>] [--grok-log <jsonl>] [--agy-history <jsonl>]
       [--agy-app-ids <file>] [--old-db <jsonl> ...] [--stage-dir <dir>]
       [--catch-up --state-dir <run>/state [--since <time>] [--mtime-before <time>]]
-  rebuild-import.mjs run --manifest <manifest.jsonl> --workspace <id> --run-id <id> --base-url URL
-      --run-dir <dir> [--tag <trigger>] [--summaries-from <date>] [--limit N] [--max-failures 3]
+  rebuild-import.mjs run --manifest <manifest.jsonl> --workspace <id> --run-id <id> --user-peer <name>
+      --base-url URL --run-dir <dir> [--tag <trigger>] [--summaries-from <date>] [--limit N] [--max-failures 3]
   rebuild-import.mjs verify --manifest <manifest.jsonl> [--manifest ...] --workspace <id> --base-url URL [--run-dir <dir>]`;
 
 async function main(argv) {

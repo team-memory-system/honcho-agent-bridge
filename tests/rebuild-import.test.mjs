@@ -160,6 +160,7 @@ function planOptions(f, extra = {}) {
     agyAppIds: f.agyAppIds,
     cursor: path.join(f.drive, "cursor"),
     out: f.out,
+    userPeer: "me",
     ...extra,
   };
 }
@@ -199,7 +200,7 @@ test("plan: Claude versions join their session in order, a repeated uuid counted
   assert.equal(claude.turns, 3);
   assert.equal(claude.user, 2);
   assert.equal(claude.start, "2026-09-02T00:59:00.000Z");
-  assert.deepEqual(claude.peers, { chenjing: 2, assistant_claude: 1 });
+  assert.deepEqual(claude.peers, { me: 2, assistant_claude: 1 });
   // Claude SDK sessions are no longer excluded; their prompts go to automation_claude.
   const sdk = entries.find((entry) => entry.session_id === `claude-${U.sdk}`);
   assert.deepEqual(sdk.peers, { automation_claude: 1, assistant_claude: 1 });
@@ -222,7 +223,7 @@ test("plan: Codex turns found only in a version become a codex-extra entry right
   assert.equal(extra.files, undefined, "an extra is a direct post, never a collector file");
   const payload = JSON.parse(await fsp.readFile(extra.payload, "utf8"));
   // "please  refactor" differs from the main file's only in spacing, so it is not an extra.
-  assert.deepEqual(payload.messages.map((message) => [message.peer_id, message.content]), [["chenjing", "a turn only the version has"]]);
+  assert.deepEqual(payload.messages.map((message) => [message.peer_id, message.content]), [["me", "a turn only the version has"]]);
   assert.match(payload.messages[0].metadata.source_turn_hash, /^codex-extra:/);
   assert.deepEqual(summary.codex_versions, { versions_compared: 1, version_only_ids: 0, mains_with_extras: 1, extra_turns: 1, extra_messages: 1 });
   // The main file keeps its original basename when staged.
@@ -241,7 +242,7 @@ test("plan: agy is staged as brain/<id>/.system_generated/logs so the provider r
   assert.match(agy[`agy-${U.agyApp}`].files[0].staged, new RegExp(`/antigravity/brain/${U.agyApp}/`));
   assert.deepEqual([cli.agy_origin, agy[`agy-${U.agyApp}`].agy_origin, agy[`agy-${U.agyScript}`].agy_origin], ["history_id", "app", "unlisted"]);
   assert.deepEqual(agy[`agy-${U.agyScript}`].peers, { automation_agy: 1, assistant_agy: 1 });
-  assert.deepEqual(cli.peers, { chenjing: 1, assistant_agy: 1 });
+  assert.deepEqual(cli.peers, { me: 1, assistant_agy: 1 });
   assert.deepEqual(summary.agy_origins, { history_id: 1, app: 1, unlisted: 1 });
 });
 
@@ -251,10 +252,10 @@ test("plan: Cursor turns without times are 1 s apart and marked interpolated; th
   const cursor = entries.find((entry) => entry.kind === "cursor");
   const payload = JSON.parse(await fsp.readFile(cursor.payload, "utf8"));
   assert.deepEqual(payload.messages.map((message) => [message.peer_id, message.created_at, message.metadata.created_at_source]), [
-    ["chenjing", "2025-08-20T06:24:00.000Z", "interpolated"],
+    ["me", "2025-08-20T06:24:00.000Z", "interpolated"],
     ["assistant_cursor", "2025-08-20T06:24:01.000Z", "interpolated"],
   ]);
-  assert.deepEqual(payload.session.peers, { assistant_cursor: { observe_me: false, observe_others: false }, chenjing: { observe_me: true, observe_others: false } });
+  assert.deepEqual(payload.session.peers, { assistant_cursor: { observe_me: false, observe_others: false }, me: { observe_me: true, observe_others: false } });
   assert.deepEqual(entries.map((entry) => entry.seq), entries.map((_, index) => index + 1));
   const starts = entries.map((entry) => Date.parse(entry.start));
   assert.deepEqual(starts, [...starts].sort((a, b) => a - b));
@@ -340,13 +341,13 @@ test("plan: Hermes keeps user and assistant rows, drops its own handoff text and
   // An older copy of the same session holding a message the main copy lost.
   await put(path.join(hermes, "2026", "06", "01", "_원본버전", "20260601_120000_dddddd", "77", "session_20260601_120000_dddddd.json"), JSON.stringify({ session_id: "20260601_120000_dddddd", platform: "discord", session_start: "2026-06-01T12:00:00.000000", last_updated: "2026-06-01T12:00:10.000000", messages: [{ role: "user", content: "a real question" }, { role: "user", content: "an aside only the copy kept" }] }));
   const out = path.join(dir, "run", "manifest.jsonl");
-  const { entries, summary } = await plan({ tz: "Asia/Seoul", hermes, out }, { log: quiet });
+  const { entries, summary } = await plan({ tz: "Asia/Seoul", hermes, out, userPeer: "me" }, { log: quiet });
   const byId = Object.fromEntries(entries.map((entry) => [entry.session_id, entry]));
   const messagesOf = async (id) => JSON.parse(await fsp.readFile(byId[id].payload, "utf8")).messages;
 
-  assert.deepEqual((await messagesOf("hermes-20260501_090000_aaaaaa")).map((m) => [m.peer_id, m.content]), [["chenjing", "find me a bike light"], ["assistant_hermes", "here are three"]]);
+  assert.deepEqual((await messagesOf("hermes-20260501_090000_aaaaaa")).map((m) => [m.peer_id, m.content]), [["me", "find me a bike light"], ["assistant_hermes", "here are three"]]);
   const child = await messagesOf("hermes-20260501_100000_bbbbbb");
-  assert.deepEqual(child.map((m) => [m.peer_id, m.content]), [["chenjing", "which one is brightest?"], ["assistant_hermes", "the second"]]);
+  assert.deepEqual(child.map((m) => [m.peer_id, m.content]), [["me", "which one is brightest?"], ["assistant_hermes", "the second"]]);
   assert.equal(child[0].created_at, "2026-05-01T01:00:03.000Z");
   assert.equal(child[0].metadata.created_at_source, "original");
   assert.deepEqual((await messagesOf("hermes-cron_abc_20260502_000000")).map((m) => [m.peer_id, m.metadata.automation_kind || null]), [["automation_hermes", "hermes_cron"], ["assistant_hermes", null]]);
@@ -354,7 +355,7 @@ test("plan: Hermes keeps user and assistant rows, drops its own handoff text and
   const persona = await messagesOf("hermes-20260413_120000_cccccc");
   assert.deepEqual(persona.map((m) => [m.peer_id, m.metadata.automation_kind || null]), [["automation_hermes", "hermes_persona_burst"], ["assistant_hermes", null]]);
   const sameDay = await messagesOf("hermes-20260413_130000_eeeeee");
-  assert.deepEqual(sameDay.map((m) => [m.peer_id, m.metadata.automation_kind || null]), [["chenjing", null], ["assistant_hermes", null]]);
+  assert.deepEqual(sameDay.map((m) => [m.peer_id, m.metadata.automation_kind || null]), [["me", null], ["assistant_hermes", null]]);
   const merged = await messagesOf("hermes-20260601_120000_dddddd");
   assert.deepEqual(merged.map((m) => m.content), ["a real question", "an aside only the copy kept", "a real answer", "and then?"]);
   // 4 turns over 30 s: 7.5 s apart, from session_start read as KST.
@@ -373,17 +374,17 @@ test("plan: Hermes keeps user and assistant rows, drops its own handoff text and
 test("plan: rows only the Mac DB holds keep their times and ids, the person's peer renamed, and stop at --to", async (t) => {
   const dir = await temporaryDirectory(t, "old-db");
   const rows = [
-    { public_id: "row1", session_name: "local-notes-1", peer_name: "user_chen", content: "remember the blue notebook", created_at: "2026-05-01T00:00:00+00:00", metadata: { source: "local_memory", note_kind: "seed" } },
+    { public_id: "row1", session_name: "local-notes-1", peer_name: "person_live", content: "remember the blue notebook", created_at: "2026-05-01T00:00:00+00:00", metadata: { source: "local_memory", note_kind: "seed" } },
     { public_id: "row2", session_name: "local-notes-1", peer_name: "assistant_codex", content: "noted", created_at: "2026-05-01T00:00:05+00:00", metadata: { source: "local_memory" } },
-    { public_id: "row3", session_name: "local-notes-2", peer_name: "user_chen", content: "written after the cut", created_at: "2026-10-05T11:00:00+00:00", metadata: { source: "local_memory" } },
+    { public_id: "row3", session_name: "local-notes-2", peer_name: "person_live", content: "written after the cut", created_at: "2026-10-05T11:00:00+00:00", metadata: { source: "local_memory" } },
   ];
   const file = await put(path.join(dir, "extract.jsonl"), rows.map(line).join(""));
-  const { entries, exclusions, summary } = await plan({ tz: "Asia/Seoul", to: "2026-10-05 19:00", oldDb: [file], out: path.join(dir, "run", "manifest.jsonl") }, { log: quiet });
+  const { entries, exclusions, summary } = await plan({ tz: "Asia/Seoul", to: "2026-10-05 19:00", oldDb: [file], out: path.join(dir, "run", "manifest.jsonl"), userPeer: "me" }, { log: quiet });
   assert.deepEqual(entries.map((entry) => [entry.kind, entry.session_id, entry.messages]), [["old-db", "local-notes-1", 2]]);
   assert.deepEqual(exclusions.map((item) => [item.session_id, item.reason]), [["local-notes-2", "after-to"]]);
   const payload = JSON.parse(await fsp.readFile(entries[0].payload, "utf8"));
   assert.deepEqual(payload.messages.map((message) => [message.peer_id, message.created_at, message.metadata.source_turn_hash, message.metadata.original_public_id]), [
-    ["chenjing", "2026-05-01T00:00:00.000Z", "old-db:row1", "row1"],
+    ["me", "2026-05-01T00:00:00.000Z", "old-db:row1", "row1"],
     ["assistant_codex", "2026-05-01T00:00:05.000Z", "old-db:row2", "row2"],
   ]);
   assert.equal(payload.messages[0].metadata.note_kind, "seed");
@@ -480,18 +481,18 @@ async function runFixture(t, { entries = 4, fail = "" } = {}) {
     const provider = index % 2 ? "claude" : "codex";
     const staged = path.join(dir, "stage", `${index}.jsonl`);
     await put(staged, "{}\n");
-    items.push({ seq: index, kind: provider, provider, machine: "drive", file: staged, files: [{ source: staged, staged, role: "main" }], session_id: `${provider}-${index}`, start: `2026-09-0${index}T00:00:00.000Z`, end: `2026-09-0${index}T00:01:00.000Z`, messages: 2, peers: { chenjing: 1, [`assistant_${provider}`]: 1 } });
+    items.push({ seq: index, kind: provider, provider, machine: "drive", file: staged, files: [{ source: staged, staged, role: "main" }], session_id: `${provider}-${index}`, start: `2026-09-0${index}T00:00:00.000Z`, end: `2026-09-0${index}T00:01:00.000Z`, messages: 2, peers: { me: 1, [`assistant_${provider}`]: 1 } });
   }
   const payload = path.join(dir, "stage", "direct", "hermes-x.json");
   await put(payload, JSON.stringify({
     kind: "hermes",
-    session: { id: "hermes-x", metadata: { source: "hermes" }, peers: { chenjing: { observe_me: true, observe_others: false }, assistant_hermes: { observe_me: false, observe_others: false } } },
+    session: { id: "hermes-x", metadata: { source: "hermes" }, peers: { me: { observe_me: true, observe_others: false }, assistant_hermes: { observe_me: false, observe_others: false } } },
     messages: [
-      { peer_id: "chenjing", content: "q", created_at: "2026-09-09T00:00:00.000Z", metadata: { source: "hermes", source_turn_hash: "hermes:x:1" } },
+      { peer_id: "me", content: "q", created_at: "2026-09-09T00:00:00.000Z", metadata: { source: "hermes", source_turn_hash: "hermes:x:1" } },
       { peer_id: "assistant_hermes", content: "a", created_at: "2026-09-09T00:00:01.000Z", metadata: { source: "hermes", source_turn_hash: "hermes:x:2" } },
     ],
   }));
-  items.push({ seq: entries + 1, kind: "hermes", provider: "hermes", machine: "state.db", file: "state.db", payload, session_id: "hermes-x", start: "2026-09-09T00:00:00.000Z", end: "2026-09-09T00:00:01.000Z", first_turn: "2026-09-09T00:00:00.000Z", messages: 2, peers: { chenjing: 1, assistant_hermes: 1 } });
+  items.push({ seq: entries + 1, kind: "hermes", provider: "hermes", machine: "state.db", file: "state.db", payload, session_id: "hermes-x", start: "2026-09-09T00:00:00.000Z", end: "2026-09-09T00:00:01.000Z", first_turn: "2026-09-09T00:00:00.000Z", messages: 2, peers: { me: 1, assistant_hermes: 1 } });
   await put(manifest, items.map(line).join(""));
   await put(manifest.replace(/\.jsonl$/, ".summary.json"), JSON.stringify({ char_limit: 24000, tz: "Asia/Seoul", gates: [], inputs: { agy_history: "/x/history.jsonl" } }));
   const record = path.join(dir, "collector-calls.jsonl");
@@ -516,14 +517,14 @@ if (failing.some((name) => transcript.endsWith("/" + name + ".jsonl"))) {
     HONCHO_AGENT_TARGET_FOLDERS: '["/somewhere"]',
     HONCHO_TARGET_API_TOKEN: "secret",
     HONCHO_AGENT_DRY_RUN: "1",
-    HONCHO_USER_NAME: "user_chen",
+    HONCHO_USER_NAME: "someone_live",
     HONCHO_ASSISTANT_NAME: "someone",
     HONCHO_CLAUDE_ASSISTANT_NAME: "someone_else",
     HONCHO_AGY_AUTOMATION_PEER: "elsewhere",
     HONCHO_API_BEARER_TOKEN: "kept",
   };
   const runDir = path.join(dir, "run");
-  const options = { manifest, workspace: "memory", runId: "full-test", baseUrl: "http://127.0.0.1:9", runDir, collector, tag: "rebuild-test", allowUnpinned: true };
+  const options = { manifest, workspace: "memory", runId: "full-test", userPeer: "me", baseUrl: "http://127.0.0.1:9", runDir, collector, tag: "rebuild-test", allowUnpinned: true };
   return { dir, manifest, record, collector, env, runDir, items, options };
 }
 
@@ -531,12 +532,18 @@ test("run refuses to start from an unpinned copy, against a crowded server, or w
   const r = await runFixture(t);
   const honcho = fakeHoncho();
   await assert.rejects(run({ ...r.options, allowUnpinned: false }, { log: quiet, env: r.env, request: honcho.request }), /pinned copy/);
+  // The person's peer has no default.
+  await assert.rejects(run({ ...r.options, userPeer: undefined }, { log: quiet, env: r.env, request: honcho.request }), /run needs --user-peer/);
+  assert.throws(() => collectorEnv({}, { provider: "claude", runDir: "/r", workspace: "w", tag: "t", baseUrl: "http://h" }), /needs --user-peer/);
   assert.deepEqual(honcho.calls, []);
   const crowded = fakeHoncho({ workspaces: { other: { metadata: {}, configuration: {} } } });
   await assert.rejects(run(r.options, { log: quiet, env: r.env, request: crowded.request }), /other workspaces/);
   await assert.rejects(fsp.access(r.record));
   await put(r.manifest.replace(/\.jsonl$/, ".summary.json"), JSON.stringify({ gates: ["no ChatGPT export"] }));
   await assert.rejects(run(r.options, { log: quiet, env: r.env, request: fakeHoncho().request }), /open gates/);
+  // A run under another name than the plan's would split the person across two peers.
+  await put(r.manifest.replace(/\.jsonl$/, ".summary.json"), JSON.stringify({ gates: [], user_peer: "someone_else" }));
+  await assert.rejects(run(r.options, { log: quiet, env: r.env, request: fakeHoncho().request }), /differs from the plan's "someone_else"/);
 
   const runDir = path.join(r.dir, "pinned");
   await put(path.join(runDir, "bridge-rev.txt"), "abc1234\n");
@@ -557,7 +564,7 @@ test("run gives the collector the rebuild environment and posts direct entries i
     HONCHO_BASE_URL: "http://127.0.0.1:9",
     HONCHO_WORKSPACE_ID: "memory",
     HONCHO_AGENT_PROVIDER: "claude",
-    HONCHO_USER_NAME: "chenjing",
+    HONCHO_USER_NAME: "me",
     HONCHO_AGENT_HOOK_STATE: path.join(r.runDir, "state", "claude.json"),
     HONCHO_AGENT_HOOK_LOG: path.join(r.runDir, "logs", "claude.log"),
     HONCHO_AGENT_IMPORT_TRIGGER: "rebuild-test",
@@ -567,10 +574,10 @@ test("run gives the collector the rebuild environment and posts direct entries i
     HONCHO_AGY_HISTORY: "/x/history.jsonl",
   });
   const posted = honcho.sessions["hermes-x"];
-  assert.deepEqual(posted.map((message) => [message.peer_id, message.metadata.memory_trigger]), [["chenjing", "rebuild-test"], ["assistant_hermes", "rebuild-test"]]);
+  assert.deepEqual(posted.map((message) => [message.peer_id, message.metadata.memory_trigger]), [["me", "rebuild-test"], ["assistant_hermes", "rebuild-test"]]);
   const sessionCreate = honcho.calls.find((call) => call.apiPath === "/v3/workspaces/memory/sessions");
   assert.deepEqual(sessionCreate.payload.peers.assistant_hermes, { observe_me: false, observe_others: false });
-  assert.equal(collectorEnv({ HONCHO_GROK_ASSISTANT_NAME: "x" }, { provider: "agy", runDir: "/r", workspace: "w", tag: "t", baseUrl: "http://h" }).HONCHO_AGY_HISTORY, path.join("/r", "state", "no-agy-history.jsonl"));
+  assert.equal(collectorEnv({ HONCHO_GROK_ASSISTANT_NAME: "x" }, { provider: "agy", runDir: "/r", workspace: "w", tag: "t", baseUrl: "http://h", userPeer: "me" }).HONCHO_AGY_HISTORY, path.join("/r", "state", "no-agy-history.jsonl"));
 });
 
 test("a Codex extra is posted directly after its main file, never through the collector", async (t) => {
@@ -581,7 +588,7 @@ test("a Codex extra is posted directly after its main file, never through the co
   const record = path.join(f.dir, "calls.jsonl");
   const collector = await put(path.join(f.dir, "collector.mjs"), `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(2)) + "\\n"); console.log(JSON.stringify({ ok: true, new_messages: 2 }));\n`);
   const honcho = fakeHoncho();
-  await run({ manifest: f.out, workspace: "memory", runId: "full-test", baseUrl: "http://h", runDir: path.join(f.dir, "run"), collector, allowUnpinned: true }, { log: quiet, env: { PATH: process.env.PATH }, request: honcho.request });
+  await run({ manifest: f.out, workspace: "memory", runId: "full-test", userPeer: "me", baseUrl: "http://h", runDir: path.join(f.dir, "run"), collector, allowUnpinned: true }, { log: quiet, env: { PATH: process.env.PATH }, request: honcho.request });
   const collectorCalls = await readLines(record);
   assert.equal(collectorCalls.length, 1);
   assert.match(collectorCalls[0][3], /rollout-2026-09-03T11-00-00-/);
@@ -663,20 +670,22 @@ test("catch-up plans only turns the run state lacks, sorted by the first new tur
   const formatted = formatInZone(past.getTime(), "Asia/Seoul").slice(0, 19);
   const none = await plan({ ...options, catchUp: true, stateDir, out: path.join(f.dir, "run", "catchup-b.jsonl"), mtimeBefore: formatted }, { log: quiet });
   assert.deepEqual(none.entries, []);
+  await assert.rejects(plan({ ...options, userPeer: undefined }, { log: quiet }), /^Error: plan needs --user-peer/);
+  await assert.rejects(plan({ ...options, userPeer: " ", catchUp: true, stateDir, out: path.join(f.dir, "run", "catchup-c.jsonl") }, { log: quiet }), /plan --catch-up needs --user-peer/);
   assert.throws(() => parseCli(["plan", "--nope"]), /unknown option/);
   assert.deepEqual(parseCli(["verify", "--manifest", "a.jsonl", "--manifest", "b.jsonl"]).options.manifest, ["a.jsonl", "b.jsonl"]);
 });
 
 test("verify adds up entries that share a session and compares counts, first and last times and peers", async (t) => {
   const entries = [
-    { seq: 1, session_id: "codex-a", provider: "codex", start: "2026-09-01T00:00:00.000Z", end: "2026-09-01T00:05:00.000Z", messages: 2, peers: { chenjing: 1, assistant_codex: 1 } },
-    { seq: 2, kind: "codex-extra", session_id: "codex-a", provider: "codex", start: "2026-09-01T00:00:00.000Z", first_turn: "2026-08-31T23:59:00.000Z", end: "2026-08-31T23:59:00.000Z", messages: 1, peers: { chenjing: 1 } },
+    { seq: 1, session_id: "codex-a", provider: "codex", start: "2026-09-01T00:00:00.000Z", end: "2026-09-01T00:05:00.000Z", messages: 2, peers: { me: 1, assistant_codex: 1 } },
+    { seq: 2, kind: "codex-extra", session_id: "codex-a", provider: "codex", start: "2026-09-01T00:00:00.000Z", first_turn: "2026-08-31T23:59:00.000Z", end: "2026-08-31T23:59:00.000Z", messages: 1, peers: { me: 1 } },
   ];
   const expected = expectedSessions(entries).get("codex-a");
   assert.deepEqual([expected.messages, new Date(expected.firstMs).toISOString(), new Date(expected.lastMs).toISOString()], [3, "2026-08-31T23:59:00.000Z", "2026-09-01T00:05:00.000Z"]);
   const stored = [
-    { peer_id: "chenjing", created_at: "2026-08-31T23:59:00+00:00", metadata: { source: "codex" } },
-    { peer_id: "chenjing", created_at: "2026-09-01T00:00:00Z", metadata: { source: "codex" } },
+    { peer_id: "me", created_at: "2026-08-31T23:59:00+00:00", metadata: { source: "codex" } },
+    { peer_id: "me", created_at: "2026-09-01T00:00:00Z", metadata: { source: "codex" } },
     { peer_id: "assistant_codex", created_at: "2026-09-01T00:05:00.000000Z", metadata: { source: "codex" } },
   ];
   assert.deepEqual(compareSession(expected, stored), []);
@@ -687,7 +696,7 @@ test("verify adds up entries that share a session and compares counts, first and
   const honcho = fakeHoncho({ sessions: { "codex-a": stored } });
   const report = await verify({ manifest: [manifest], workspace: "memory", baseUrl: "http://h" }, { log: quiet, request: honcho.request });
   assert.deepEqual([report.checked, report.matched, report.missing], [2, 1, 1]);
-  assert.deepEqual(report.by_source_peer["codex\tchenjing"], { expected: 2, actual: 2 });
+  assert.deepEqual(report.by_source_peer["codex\tme"], { expected: 2, actual: 2 });
   assert.equal(new Set(honcho.calls.map((call) => call.method)).size, 1, "list requests only");
 });
 
