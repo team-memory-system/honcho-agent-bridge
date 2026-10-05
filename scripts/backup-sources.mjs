@@ -11,22 +11,32 @@
 //   codex   ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl          main transcript
 //           ~/.codex/archived_sessions/rollout-*.jsonl            archived transcript
 //           ~/.codex/history.jsonl                                prompt history
+//   agy     ~/.gemini/<product>/brain/<conversation>/.system_generated/logs/
+//             transcript_full.jsonl, transcript.jsonl             main transcript
+//           (<product>: antigravity-cli, antigravity, antigravity-ide)
+//           ~/.gemini/antigravity-cli/history.jsonl               prompt history
+//   grok    ~/.grok/sessions/<encoded cwd>/<session>/
+//             chat_history.jsonl, updates.jsonl                   main transcript
 //
 // Left out, and only counted: Claude subagent transcripts and tool results (inside
 // <project>/<session>/), Codex subagent rollouts (session_meta.source.subagent),
-// and a stale copy in sessions/ of a session that is in archived_sessions/. Never
+// a stale copy in sessions/ of a session that is in archived_sessions/, everything
+// else in an agy conversation folder (artifacts, screenshots, recordings) and in a
+// Grok session folder (summary, prompts, events), and Grok's search index. Never
 // read: everything else the apps keep (runtime state, caches), and ~/.hermes, which
 // has no Hermes left in it (on one computer it is a link to Team Memory's own state).
 //
 // Destination, relative to 대화/ (the date is the day the conversation started, KST):
 //   <agent>/YYYY/MM/DD/<original file name>
+//   agy|grok/YYYY/MM/DD/<conversation id>/<original file name>   (their file names
+//                                    are the same in every conversation)
 //   codex/_아카이브/YYYY/MM/DD/<original file name>
 //   <agent>/_부속자료/<device>/history.jsonl
 //   claude/_부속자료/projects/<project>/memory/<name>.md
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-export const AGENTS = Object.freeze(["claude", "codex"]);
+export const AGENTS = Object.freeze(["claude", "codex", "agy", "grok"]);
 export const ARCHIVE_FOLDER = "_아카이브";
 export const SUPPORT_FOLDER = "_부속자료";
 
@@ -36,6 +46,12 @@ const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const CLAUDE_HEAD_BYTES = 16 * 1024 * 1024;
 // Codex's session_meta is one line that carries the base instructions.
 const CODEX_HEAD_BYTES = 8 * 1024 * 1024;
+// An agy transcript starts with the user's first input, which can be long.
+const AGY_HEAD_BYTES = 8 * 1024 * 1024;
+const AGY_PRODUCTS = Object.freeze(["antigravity-cli", "antigravity", "antigravity-ide"]);
+const AGY_TRANSCRIPTS = Object.freeze(["transcript_full.jsonl", "transcript.jsonl"]);
+const GROK_TRANSCRIPTS = Object.freeze(["chat_history.jsonl", "updates.jsonl"]);
+const UUID_V7 = /^([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const pad = (value) => String(value).padStart(2, "0");
 
@@ -113,6 +129,47 @@ export async function codexSessionMeta(filePath) {
   return { startedAt: null, subagent: false, basis: "unknown" };
 }
 
+/** When an agy conversation started: the created_at of the transcript's first record that has one. */
+export async function agySessionStart(filePath) {
+  for await (const line of headLines(filePath, AGY_HEAD_BYTES)) {
+    const record = parseLine(line);
+    if (record && typeof record.created_at === "string" && Number.isFinite(Date.parse(record.created_at))) {
+      return { startedAt: record.created_at, basis: "first-record" };
+    }
+  }
+  return { startedAt: null, basis: "unknown" };
+}
+
+/**
+ * When a Grok session started: summary.json's created_at beside the transcript,
+ * else the time in its UUIDv7 session id, else the first update's timestamp.
+ * chat_history.jsonl itself carries no times.
+ */
+export async function grokSessionStart(filePath) {
+  const sessionDir = path.dirname(filePath);
+  try {
+    const summary = JSON.parse(await fsp.readFile(path.join(sessionDir, "summary.json"), "utf8"));
+    if (typeof summary?.created_at === "string" && Number.isFinite(Date.parse(summary.created_at))) {
+      return { startedAt: summary.created_at, basis: "summary" };
+    }
+  } catch {}
+  const v7 = UUID_V7.exec(path.basename(sessionDir));
+  if (v7) {
+    const ms = Number.parseInt(`${v7[1]}${v7[2]}`, 16);
+    if (Number.isFinite(ms) && ms > 0) return { startedAt: new Date(ms).toISOString(), basis: "session-id" };
+  }
+  try {
+    for await (const line of headLines(path.join(sessionDir, "updates.jsonl"), AGY_HEAD_BYTES)) {
+      const record = parseLine(line);
+      if (record && Number.isFinite(record.timestamp)) {
+        const ms = record.timestamp > 1e12 ? record.timestamp : record.timestamp * 1000;
+        return { startedAt: new Date(ms).toISOString(), basis: "first-update" };
+      }
+    }
+  } catch {}
+  return { startedAt: null, basis: "unknown" };
+}
+
 async function readDirectory(directory) {
   try {
     return await fsp.readdir(directory, { withFileTypes: true });
@@ -139,6 +196,8 @@ export function sourceRoots(homeDir) {
   return {
     claude: path.join(homeDir, ".claude"),
     codex: path.join(homeDir, ".codex"),
+    agy: path.join(homeDir, ".gemini"),
+    grok: path.join(homeDir, ".grok"),
   };
 }
 
@@ -213,6 +272,52 @@ export async function discoverSources({ homeDir, agents = AGENTS } = {}) {
     if (await isFile(history)) items.push({ agent: "codex", kind: "history", localPath: history, name: "history.jsonl" });
   }
 
+  if (agents.includes("agy")) {
+    for (const product of AGY_PRODUCTS) {
+      const brain = path.join(roots.agy, product, "brain");
+      for (const conversation of await readDirectory(brain)) {
+        if (!conversation.isDirectory()) continue;
+        const conversationDir = path.join(brain, conversation.name);
+        const logs = path.join(conversationDir, ".system_generated", "logs");
+        let transcripts = 0;
+        for (const name of AGY_TRANSCRIPTS) {
+          const full = path.join(logs, name);
+          if (!(await isFile(full))) continue;
+          items.push({ agent: "agy", kind: "main", localPath: full, name, session: conversation.name });
+          transcripts += 1;
+        }
+        // Artifacts, screenshots, browser recordings and the rest of the conversation's folder.
+        exclude("agy/other", (await countFiles(conversationDir)) - transcripts);
+      }
+    }
+    const history = path.join(roots.agy, "antigravity-cli", "history.jsonl");
+    if (await isFile(history)) items.push({ agent: "agy", kind: "history", localPath: history, name: "history.jsonl" });
+  }
+
+  if (agents.includes("grok")) {
+    const sessions = path.join(roots.grok, "sessions");
+    for (const group of await readDirectory(sessions)) {
+      if (group.isFile() && group.name !== ".DS_Store") exclude(group.name.startsWith("session_search.") ? "grok/search-index" : "grok/other");
+      if (!group.isDirectory()) continue;
+      for (const session of await readDirectory(path.join(sessions, group.name))) {
+        const sessionDir = path.join(sessions, group.name, session.name);
+        if (!session.isDirectory()) {
+          if (session.isFile() && session.name !== ".DS_Store") exclude("grok/other");
+          continue;
+        }
+        let transcripts = 0;
+        for (const name of GROK_TRANSCRIPTS) {
+          const full = path.join(sessionDir, name);
+          if (!(await isFile(full))) continue;
+          items.push({ agent: "grok", kind: "main", localPath: full, name, session: session.name });
+          transcripts += 1;
+        }
+        // summary.json, system_prompt.txt, prompt_context.json, events.jsonl, locks and the like.
+        exclude("grok/other", (await countFiles(sessionDir)) - transcripts);
+      }
+    }
+  }
+
   return { items, excluded };
 }
 
@@ -240,6 +345,8 @@ export function taggedName(name, tag) {
  * path (then a different version is kept under a device-tagged name).
  */
 export function destinationFor(item, { date, device }) {
+  // agy and Grok name every conversation's transcript the same, so each conversation has its own folder.
+  if (item.kind === "main" && item.session) return { rel: `${item.agent}/${date}/${item.session}/${item.name}`, shared: true };
   if (item.kind === "main") return { rel: `${item.agent}/${date}/${item.name}`, shared: true };
   if (item.kind === "archived") return { rel: `${item.agent}/${ARCHIVE_FOLDER}/${date}/${item.name}`, shared: true };
   if (item.kind === "history") return { rel: `${item.agent}/${SUPPORT_FOLDER}/${device}/${item.name}`, shared: false };

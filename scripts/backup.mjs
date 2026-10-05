@@ -1,6 +1,8 @@
 // The conversation backup: byte-exact copies of the agents' own files, straight
 // from where the apps keep them to a folder or a cloud, laid out as
-// 대화/<agent>/YYYY/MM/DD/<original file name> (see backup-sources.mjs).
+// 대화/<agent>/YYYY/MM/DD/<original file name>, and for agy and Grok, whose file
+// names repeat, 대화/<agent>/YYYY/MM/DD/<conversation id>/<original file name>
+// (see backup-sources.mjs).
 //
 // It is not the input to Honcho (the collector and the Stop hook are) and nothing
 // here reads the backup back. It keeps no copy of the data on this computer: only
@@ -37,11 +39,13 @@ import { installPaths, loadConfig, userHome } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import {
   ARCHIVE_FOLDER,
+  agySessionStart,
   claudeSessionStart,
   codexSessionMeta,
   counterpartFor,
   destinationFor,
   discoverSources,
+  grokSessionStart,
   kstDateFolder,
   taggedName,
 } from "./backup-sources.mjs";
@@ -267,6 +271,11 @@ async function classify(item, stat, cached) {
   if (item.agent === "claude" && item.kind === "main") {
     if (cached?.date) return { date: cached.date };
     const start = await claudeSessionStart(item.localPath);
+    return { date: kstDateFolder(start.startedAt), basis: start.basis };
+  }
+  if ((item.agent === "agy" || item.agent === "grok") && item.kind === "main") {
+    if (cached?.date) return { date: cached.date };
+    const start = item.agent === "agy" ? await agySessionStart(item.localPath) : await grokSessionStart(item.localPath);
     return { date: kstDateFolder(start.startedAt), basis: start.basis };
   }
   return {};
