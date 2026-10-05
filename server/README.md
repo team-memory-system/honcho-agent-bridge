@@ -5,7 +5,7 @@ A release bundle ships it already prepared. A marketplace plugin downloads the
 separate repository named in `honcho-source.json` into a staging directory. For
 the `honcho-selfhost` wrapper it initializes the pinned official submodule, applies
 the local patches, and exports the runtime into `honcho/`; the upstream checkout
-itself stays unchanged. Earlier flat source repositories are accepted too.
+itself stays unchanged.
 `server plan` reports the download and never performs it. Both source pins use a
 full 40-character `commit` so a plugin version always installs the reviewed source.
 The prepared source records upstream and patch provenance in `.honcho-source.json`.

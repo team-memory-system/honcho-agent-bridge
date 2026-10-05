@@ -711,7 +711,7 @@ Codex loads `.mcp.json`; Claude Code loads `.mcp.claude.json`. Both start `scrip
 }
 ```
 
-The existing `~/.hermes/local-honcho-mcp/tool-config.json` format is also recognized for migration. Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability.
+Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability.
 
 ## Safety and rollback
 
