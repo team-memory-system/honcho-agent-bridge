@@ -41,11 +41,20 @@ import { hostPlan, hostPrepare, hostStart, hostStatus, hostStop } from "./host-m
 import {
   shareDisable,
   shareEnable,
+  shareJoin,
   shareRotate,
   shareStatus,
   shareToken,
   TUNNEL_TOKEN_ENV,
 } from "./share-manager.mjs";
+import {
+  API_TOKEN_ENV,
+  INVITE_ENV,
+  teammateAdd,
+  teammateRemove,
+  teammatesList,
+  teammateUnshare,
+} from "./team-access.mjs";
 import { gatewayDirectory, gatewayOpen } from "./gateway.mjs";
 import { getProvider } from "./providers/index.mjs";
 import {
@@ -1696,10 +1705,16 @@ function usage() {
       "server stop [--profile portable|personal]",
       "server verify [--profile personal] [--live-completion]",
       "server share status [--check]",
+      "server share enable --cloudflare [--name memory] [--zone <zone>] [--email <owner email>] [--idp <id|name>] (the Cloudflare API token in CLOUDFLARE_API_TOKEN, kept for later)",
       "server share enable --public-url <https://host> (the tunnel token in HONCHO_TUNNEL_TOKEN)",
+      "server share join --invite-file <file> (or the invite code in HONCHO_SHARE_INVITE)",
       "server share disable",
       "server share token",
       "server share rotate",
+      "teammates list",
+      "teammates add <email> [--share <name> --invite-out <file>] (the Cloudflare API token in CLOUDFLARE_API_TOKEN, else the saved one)",
+      "teammates remove <email>",
+      "teammates unshare <name>",
       "host plan [--profile personal]",
       "host prepare [--profile personal]",
       "host start [--profile personal]",
@@ -1731,27 +1746,83 @@ function usage() {
   };
 }
 
+// A command line is visible to every process here, so no secret travels on one: the
+// tunnel token, the Cloudflare API token and an invite code (which holds a tunnel
+// token) come from the environment or a file.
+function secretOnCommandLine(options) {
+  const keys = Object.keys(options).filter((key) => /token|secret/i.test(key) || key === "invite" || key === "inviteCode");
+  if (!keys.length) return null;
+  return {
+    ok: false,
+    error: `pass the tunnel token through ${TUNNEL_TOKEN_ENV}, not the command line (the Cloudflare API token through ${API_TOKEN_ENV}, an invite through --invite-file or ${INVITE_ENV})`,
+  };
+}
+
 /**
  * `server share <action>`: this server, reachable from the owner's other computers
- * through the gate, by a Cloudflare tunnel to a public hostname. The tunnel token is
- * read from HONCHO_TUNNEL_TOKEN only; a command line is visible to every process here.
+ * through the gate, and from teammates' agents over /mcp, by a Cloudflare tunnel to a
+ * public hostname.
  */
 async function serverShare(args) {
   const action = args[0] && !args[0].startsWith("--") ? args[0] : "status";
   const options = parseOptions(args[0] === action ? args.slice(1) : args);
-  const onCommandLine = Object.keys(options).filter((key) => /token|secret/i.test(key));
-  if (onCommandLine.length) {
-    return { ok: false, error: `pass the tunnel token through ${TUNNEL_TOKEN_ENV}, not the command line` };
-  }
+  const refused = secretOnCommandLine(options);
+  if (refused) return refused;
   if (action === "status") return shareStatus({ check: options.check === true });
-  if (action === "enable") return shareEnable({ publicUrl: optionString(options.publicUrl, "") });
+  if (action === "enable") {
+    if (options.cloudflare === undefined) return shareEnable({ publicUrl: optionString(options.publicUrl, "") });
+    if (options.cloudflare !== true) return { ok: false, error: "--cloudflare takes no value" };
+    for (const key of ["name", "zone", "email", "idp"]) {
+      if (options[key] !== undefined && typeof options[key] !== "string") return { ok: false, error: `--${key} takes a value` };
+    }
+    return shareEnable({
+      cloudflare: true,
+      publicUrl: optionString(options.publicUrl, ""),
+      name: optionString(options.name, ""),
+      zone: optionString(options.zone, ""),
+      email: optionString(options.email, ""),
+      idp: optionString(options.idp, ""),
+    });
+  }
+  if (action === "join") {
+    if (options.inviteFile !== undefined && typeof options.inviteFile !== "string") return { ok: false, error: "--invite-file takes a file" };
+    return shareJoin({ inviteFile: optionString(options.inviteFile, "") });
+  }
   if (action === "disable") return shareDisable();
   if (action === "rotate") return shareRotate();
   if (action === "token") {
     const result = await shareToken();
     return result.ok ? { ...result, [REVEALS_TOKEN]: true } : result;
   }
-  return { ok: false, error: `Unknown share action: ${action}. Expected status, enable, disable, token or rotate.` };
+  return { ok: false, error: `Unknown share action: ${action}. Expected status, enable, join, disable, token or rotate.` };
+}
+
+/**
+ * `teammates <action>`: the owner's list of who may log in to the team's servers, and
+ * the teammates' shared servers, through the owner's Cloudflare API token. An invite
+ * is only ever written to the --invite-out file, never printed.
+ */
+async function teammatesCommand(args) {
+  const action = args[0] && !args[0].startsWith("--") ? args.shift() : "list";
+  const positional = [];
+  while (args.length && !args[0].startsWith("--")) positional.push(args.shift());
+  const options = parseOptions(args);
+  const refused = secretOnCommandLine(options);
+  if (refused) return refused;
+  if (action === "list") return teammatesList();
+  if (action === "add") {
+    if (options.share !== undefined && typeof options.share !== "string") return { ok: false, error: "--share takes a short name for the teammate's server" };
+    if (options.inviteOut !== undefined && typeof options.inviteOut !== "string") return { ok: false, error: "--invite-out takes a file" };
+    if (options.inviteOut && options.share === undefined) return { ok: false, error: "--invite-out goes with --share <name>" };
+    return teammateAdd({
+      email: positional[0] || "",
+      share: optionString(options.share, ""),
+      inviteOut: optionString(options.inviteOut, ""),
+    });
+  }
+  if (action === "remove") return teammateRemove({ email: positional[0] || "" });
+  if (action === "unshare") return teammateUnshare({ name: positional[0] || "" });
+  return { ok: false, error: `Unknown teammates action: ${action}. Expected list, add, remove or unshare.` };
 }
 
 /**
@@ -1835,6 +1906,7 @@ async function main() {
     if (subcommand === "disconnect") return bridgeDisconnect();
   }
   if (command === "target") return targetCommand(args);
+  if (command === "teammates") return teammatesCommand(args);
   if (command === "backup") {
     const subcommand = args.shift() || "status";
     const positional = [];

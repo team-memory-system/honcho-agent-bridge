@@ -305,10 +305,13 @@ test("doctor verifies runtime version, host plugins, Honcho access, and MCP hand
 
 test("server share takes the tunnel token from its environment only, and prints the gate token for copying", async (t) => {
   const help = await runCli(["help"], {});
-  for (const line of ["server share status [--check]", "server share disable", "server share token", "server share rotate"]) {
+  for (const line of ["server share status [--check]", "server share disable", "server share token", "server share rotate", "teammates list", "teammates remove <email>", "teammates unshare <name>"]) {
     assert.ok(help.usage.includes(line), line);
   }
   assert.ok(help.usage.some((line) => line.startsWith("server share enable --public-url") && line.includes("HONCHO_TUNNEL_TOKEN")));
+  assert.ok(help.usage.some((line) => line.startsWith("server share enable --cloudflare") && line.includes("CLOUDFLARE_API_TOKEN")));
+  assert.ok(help.usage.some((line) => line.startsWith("server share join --invite-file <file>") && line.includes("HONCHO_SHARE_INVITE")));
+  assert.ok(help.usage.some((line) => line.startsWith("teammates add <email> [--share <name> --invite-out <file>]")));
 
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-cli-share-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
