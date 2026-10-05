@@ -17,6 +17,10 @@ import path from "node:path";
 export const ROOT_FOLDER = "대화";
 const RCLONE_REMOTE = /^[A-Za-z0-9_][A-Za-z0-9_ .+@-]{0,63}$/;
 const DEFAULT_TPS_LIMIT = 4;
+// Moves by Drive file id go to rclone in calls of at most this many pairs and this
+// long a command line, counted as Windows counts it (its limit is 32,767).
+export const MOVE_BATCH_PAIRS = 100;
+export const MOVE_BATCH_CHARS = 24_000;
 
 export class DestinationUnreachable extends Error {
   constructor(reason, detail = "") {
@@ -197,6 +201,41 @@ export function rcloneMessage(result, fallback = "rclone failed") {
   return text;
 }
 
+/**
+ * The length of the command line Windows gets for this argv: each argument quoted
+ * the way Node (libuv) quotes it, at most, and one space between them.
+ */
+export function windowsCommandLineLength(argv) {
+  return argv.reduce((total, arg) => {
+    const text = String(arg);
+    const quoted = text && !/[ \t"]/.test(text) ? text.length : text.length + 2 + (text.match(/["\\]/g) || []).length;
+    return total + quoted + 1;
+  }, -1);
+}
+
+/**
+ * Splits id/destination pairs into rclone calls of at most `maxPairs` pairs whose
+ * whole command line (`fixed` plus the pairs) stays within `maxChars`.
+ */
+export function chunkMovePairs(pairs, { fixed = [], maxPairs = MOVE_BATCH_PAIRS, maxChars = MOVE_BATCH_CHARS } = {}) {
+  const base = windowsCommandLineLength(fixed);
+  const batches = [];
+  let current = [];
+  let length = base;
+  for (const pair of pairs) {
+    const added = windowsCommandLineLength([pair.id, pair.dest]) + 1;
+    if (current.length && (current.length >= maxPairs || length + added > maxChars)) {
+      batches.push(current);
+      current = [];
+      length = base;
+    }
+    current.push(pair);
+    length += added;
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
 export function parseCloudDestination(value) {
   const text = String(value || "").trim();
   const colon = text.indexOf(":");
@@ -219,6 +258,7 @@ export function rcloneStore({ remote, path: folder = "", run, env = process.env,
   const binary = run ? "rclone" : locateRclone(env);
   const invoke = run || ((args, options) => runRclone(binary, args, { ...options, env }));
   const common = ["--tpslimit", String(tpsLimit), "--drive-stop-on-upload-limit"];
+  let driveCheck = null;
 
   async function must(args, what, options) {
     const result = await invoke([...args, ...common], options);
@@ -233,7 +273,7 @@ export function rcloneStore({ remote, path: folder = "", run, env = process.env,
       const rel = prefix ? `${prefix}/${row.Path}` : row.Path;
       if (row.IsDir) dirs.add(rel);
       else {
-        files.set(rel, { size: Number(row.Size), md5: row.Hashes?.md5 || row.Hashes?.MD5 || undefined });
+        files.set(rel, { size: Number(row.Size), md5: row.Hashes?.md5 || row.Hashes?.MD5 || undefined, ...(row.ID ? { id: row.ID } : {}) });
         const parent = rel.split("/").slice(0, -1).join("/");
         if (parent) dirs.add(parent);
       }
@@ -297,6 +337,84 @@ export function rcloneStore({ remote, path: folder = "", run, env = process.env,
     // recognised by content, not by its modification time.
     async move(fromRel, toRel) {
       await must(["moveto", at(fromRel), at(toRel), "--checksum"], `moving ${fromRel}`, { timeoutMs: 600_000 });
+    },
+    /** Whether this remote is Google Drive, whose files can be moved by id in batches. */
+    canMoveById() {
+      driveCheck ??= invoke(["listremotes", "--long"], { timeoutMs: 30_000 }).then((result) => result.code === 0
+        && result.stdout.split(/\r?\n/).some((line) => {
+          const match = /^([^:]+):\s+(\S+)/.exec(line.trim());
+          return match?.[1] === remote && match[2] === "drive";
+        }));
+      return driveCheck;
+    },
+    /**
+     * Server-side moves by Drive file id, many per rclone call. Each {id, from, to}
+     * moves the file with that id onto `to`, where nothing was when it was listed.
+     * A move counts only once a listing of its folder shows that id under its new
+     * name. Returns one {ok} per move, in order; one not confirmed has an `error`,
+     * and `retry` when moving it by name (moveto) may still work.
+     */
+    async moveByIds(moves, { log = () => {} } = {}) {
+      const outcomes = moves.map(() => ({ ok: false, retry: true, error: "not moved" }));
+      // rclone stops at the first pair that fails, with exit 1 and `failed moveid "<id>"`.
+      // No --drive-stop-on-upload-limit here (nothing is uploaded): a drive flag on the
+      // command line makes the destination a differently named config, and rclone then
+      // copies and trashes instead of moving; --server-side-across-configs keeps it a move
+      // even when the environment sets such a flag.
+      const head = ["backend", "moveid", `${remote}:`];
+      const tail = ["--tpslimit", String(tpsLimit), "--server-side-across-configs"];
+      let queue = moves.map((move, index) => ({ ...move, index, dest: at(move.to) }))
+        .sort((a, b) => (a.to < b.to ? -1 : a.to > b.to ? 1 : 0));
+      let done = 0;
+      while (queue.length) {
+        const [batch] = chunkMovePairs(queue, { fixed: [binary || "rclone", ...head, ...tail] });
+        queue = queue.slice(batch.length);
+        const started = Date.now();
+        const result = await invoke([...head, ...batch.flatMap((move) => [move.id, move.dest]), ...tail], { timeoutMs: 1_800_000 });
+        const failure = result.code === 0 ? null : rcloneMessage(result, "rclone backend moveid");
+        const unconfirmed = [];
+        const byDir = new Map();
+        for (const move of batch) {
+          const dir = move.to.split("/").slice(0, -1).join("/");
+          if (!byDir.has(dir)) byDir.set(dir, []);
+          byDir.get(dir).push(move);
+        }
+        for (const [dir, items] of byDir) {
+          const listed = await invoke(["lsjson", "--files-only", "--no-mimetype", at(dir), ...common], { timeoutMs: 600_000 });
+          let rows = null;
+          if (listed.code === 0) { try { rows = JSON.parse(listed.stdout || "[]"); } catch {} }
+          for (const move of items) {
+            const name = move.to.split("/").at(-1);
+            const named = (rows || []).filter((row) => !row.IsDir && row.Path === name);
+            if (named.some((row) => row.ID === move.id)) {
+              outcomes[move.index] = named.length === 1 ? { ok: true }
+                : { ok: false, retry: false, error: `moved ${move.from}, but ${named.length} files are now named ${move.to}` };
+            } else {
+              const why = failure || (rows ? `not at ${move.to} after the move` : `checking ${dir}: ${rcloneMessage(listed, "rclone lsjson")}`);
+              outcomes[move.index] = { ok: false, retry: true, error: `moving ${move.from}: ${why}` };
+              unconfirmed.push(move);
+            }
+          }
+        }
+        done += batch.length - unconfirmed.length;
+        log(`moved ${batch.length - unconfirmed.length}/${batch.length} by id in ${Math.round((Date.now() - started) / 1000)}s (${done}/${moves.length})${failure ? `: ${failure}` : ""}`);
+        if (!failure || !unconfirmed.length) continue;
+        // The pair rclone stopped at is left to be moved by name; the ones after it,
+        // which rclone never reached, go back to the front of the queue.
+        const stoppedAt = /failed (?:moveid|moving) "([^"]+)"/.exec(String(result.stderr || ""))?.[1];
+        const culprit = unconfirmed.find((move) => move.id === stoppedAt);
+        if (culprit) {
+          queue = [...unconfirmed.filter((move) => move !== culprit), ...queue];
+          continue;
+        }
+        if (unconfirmed.length === batch.length) {
+          // Nothing moved and no pair to blame (rclone could not start, or timed out):
+          // the rest is not tried this run.
+          for (const move of [...unconfirmed, ...queue]) outcomes[move.index] = { ok: false, retry: false, error: `moving ${move.from}: ${failure}` };
+          break;
+        }
+      }
+      return outcomes;
     },
   };
 }

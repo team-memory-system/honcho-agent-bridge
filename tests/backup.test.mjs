@@ -7,7 +7,16 @@ import test from "node:test";
 
 import { backupCommand, defaultDeviceId, hashLocal, runBackup, validDeviceId } from "../scripts/backup.mjs";
 import { claudeSessionStart, codexSessionMeta, discoverSources, kstDateFolder } from "../scripts/backup-sources.mjs";
-import { folderStore, parseCloudDestination, rcloneMessage, rcloneStore } from "../scripts/backup-store.mjs";
+import {
+  MOVE_BATCH_CHARS,
+  MOVE_BATCH_PAIRS,
+  chunkMovePairs,
+  folderStore,
+  parseCloudDestination,
+  rcloneMessage,
+  rcloneStore,
+  windowsCommandLineLength,
+} from "../scripts/backup-store.mjs";
 import {
   BACKUP_LAUNCHD_LABEL,
   backupScheduleSpec,
@@ -446,10 +455,27 @@ test("an empty folder left where a drive was mounted is not the drive", async (t
   assert.deepEqual(await listTree(mountPoint), []);
 });
 
-/** A stand-in for rclone over a local folder, recording every call. */
-function fakeRclone(remoteRoot, { reachable = true } = {}) {
+/**
+ * A stand-in for rclone over a local folder, recording every call. With `drive`, the
+ * remote says it is Google Drive and `backend moveid` works; with `ids`, listings give
+ * each file an id that moves with it. Moving a file in `failFiles` (local paths under
+ * remoteRoot) fails: moveid stops there with exit 1, as rclone does, and moveto fails
+ * too; moveid quietly leaves a file in `skipFiles` where it is and exits 0.
+ */
+function fakeRclone(remoteRoot, { reachable = true, drive = false, ids = drive, failFiles = new Set(), skipFiles = new Set() } = {}) {
   const calls = [];
   const local = (spec) => path.join(remoteRoot, ...spec.replace(/^fake:/, "").split("/").filter(Boolean));
+  const idByFile = new Map();
+  let lastId = 0;
+  const idOf = (file) => {
+    if (!idByFile.has(file)) idByFile.set(file, `1fakeid${String(++lastId).padStart(4, "0")}`);
+    return idByFile.get(file);
+  };
+  const relocate = async (from, to) => {
+    await fsp.mkdir(path.dirname(to), { recursive: true });
+    await fsp.rename(from, to);
+    if (idByFile.has(from)) { idByFile.set(to, idByFile.get(from)); idByFile.delete(from); }
+  };
   async function listing(dir, recursive) {
     const rows = [];
     async function walk(directory, prefix) {
@@ -459,7 +485,7 @@ function fakeRclone(remoteRoot, { reachable = true } = {}) {
           if (recursive) { rows.push({ Path: rel, Name: entry.name, Size: -1, IsDir: true }); await walk(path.join(directory, entry.name), rel); }
         } else {
           const bytes = await fsp.readFile(path.join(directory, entry.name));
-          rows.push({ Path: rel, Name: entry.name, Size: bytes.length, IsDir: false, Hashes: { md5: md5(bytes) } });
+          rows.push({ Path: rel, Name: entry.name, Size: bytes.length, IsDir: false, Hashes: { md5: md5(bytes) }, ...(ids ? { ID: idOf(path.join(directory, entry.name)) } : {}) });
         }
       }
     }
@@ -469,7 +495,22 @@ function fakeRclone(remoteRoot, { reachable = true } = {}) {
   const run = async (args) => {
     calls.push(args);
     const [command, ...rest] = args;
-    if (command === "listremotes") return { code: 0, stdout: "fake:\nother:\n", stderr: "" };
+    if (command === "listremotes") {
+      return { code: 0, stdout: rest.includes("--long") ? `fake:  ${drive ? "drive" : "s3"}\nother: drive\n` : "fake:\nother:\n", stderr: "" };
+    }
+    if (command === "backend" && rest[0] === "moveid") {
+      if (!drive) return { code: 1, stdout: "", stderr: "doesn't support backend commands" };
+      const pairs = rest.slice(2, rest.findIndex((arg) => arg.startsWith("--")));
+      for (let index = 0; index < pairs.length; index += 2) {
+        const [id, dest] = [pairs[index], pairs[index + 1]];
+        const from = [...idByFile].find(([, value]) => value === id)?.[0];
+        if (!from || failFiles.has(from)) {
+          return { code: 1, stdout: "", stderr: `2026/10/05 12:45:40 NOTICE: Failed to backend: command "moveid" failed: failed moveid "${id}" to "${dest}": couldn't find id: googleapi: Error 404: File not found: ${id}., notFound\n` };
+        }
+        if (!skipFiles.has(from)) await relocate(from, local(dest));
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    }
     if (command === "lsf") return reachable ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "2026/10/05 03:00:00 ERROR : couldn't fetch token: invalid_grant access_token=ya29.SECRET\n" };
     if (command === "lsjson") {
       const target = rest.find((arg) => arg.startsWith("fake:"));
@@ -483,8 +524,8 @@ function fakeRclone(remoteRoot, { reachable = true } = {}) {
       return { code: 0, stdout: "", stderr: "" };
     }
     if (command === "moveto") {
-      await fsp.mkdir(path.dirname(local(rest[1])), { recursive: true });
-      await fsp.rename(local(rest[0]), local(rest[1]));
+      if (failFiles.has(local(rest[0]))) return { code: 1, stdout: "", stderr: "2026/10/05 03:00:00 ERROR : Attempt 3/3 failed with 1 errors and: rate limited\n" };
+      await relocate(local(rest[0]), local(rest[1]));
       return { code: 0, stdout: "", stderr: "" };
     }
     return { code: 1, stdout: "", stderr: `unexpected ${command}` };
@@ -575,6 +616,158 @@ test("a _원본버전 copy that is the start of a session that grew moves onto i
   assert.equal(result.examples["version-moves"]["codex/main"][0].from, `codex/2026/09/02/_원본버전/01a0aaaa/1111111111111111/${CODEX_MAIN}`);
   assert.deepEqual(await fsp.readFile(path.join(remoteRoot, "대화", "codex", "2026", "09", "02", CODEX_MAIN)), local);
   assert.deepEqual(await fsp.readFile(path.join(versions, "2222222222222222", CODEX_MAIN)), local.subarray(0, 20));
+});
+
+// ------------------------------------------------------------- moves by Drive id
+
+/**
+ * A remote with one version-move (a _원본버전 copy of the Codex session) and one
+ * archive-move (a shorter copy of the archived session in its normal folder); with
+ * `archivedThere`, _아카이브 already holds the archived session, so that move goes
+ * onto a name that is taken.
+ */
+async function seedMoves(home, remoteRoot, { archivedThere = false } = {}) {
+  const main = await fsp.readFile(path.join(home, ".codex", "sessions", "2026", "09", "01", CODEX_MAIN));
+  const archived = await fsp.readFile(path.join(home, ".codex", "archived_sessions", CODEX_ARCHIVED));
+  const paths = {
+    version: path.join(remoteRoot, "대화", "codex", "2026", "09", "02", "_원본버전", "01a0aaaa", "0123456789abcdef", CODEX_MAIN),
+    main: path.join(remoteRoot, "대화", "codex", "2026", "09", "02", CODEX_MAIN),
+    normal: path.join(remoteRoot, "대화", "codex", "2026", "08", "10", CODEX_ARCHIVED),
+    archived: path.join(remoteRoot, "대화", "codex", "_아카이브", "2026", "08", "10", CODEX_ARCHIVED),
+  };
+  await put(paths.version, main);
+  await put(paths.normal, archivedThere ? archived : archived.subarray(0, 30));
+  if (archivedThere) await put(paths.archived, archived);
+  return { main, archived, paths };
+}
+
+const commandsOf = (fake) => fake.calls.map((args) => (args[0] === "backend" ? `backend ${args[1]}` : args[0]));
+
+test("moves by Drive file id go at most 100 to an rclone call, well under Windows' command-line limit", async () => {
+  const name = (index) => `rollout-2026-09-02T01-30-00-01a0aaaa-0000-7000-8000-${String(index).padStart(12, "0")}.jsonl`;
+  const typical = Array.from({ length: 250 }, (_, index) => ({ id: `1${"A".repeat(32)}`, dest: `gdrive_dev:대화/codex/2026/09/02/${name(index)}` }));
+  assert.deepEqual(chunkMovePairs(typical, { fixed: ["rclone", "backend", "moveid", "gdrive_dev:"] }).map((batch) => batch.length), [100, 100, 50]);
+
+  // Long folder and file names (with spaces, so quoted): fewer pairs per call.
+  const base = Array.from({ length: 40 }, () => "백업 폴더").join("/");
+  const calls = [];
+  const store = rcloneStore({ remote: "gdrive_dev", path: base, run: async (args) => { calls.push(args); return { code: 0, stdout: "[]", stderr: "" }; } });
+  const moves = Array.from({ length: 250 }, (_, index) => ({ id: `1${"B".repeat(32)}${index}`, from: `codex/2026/09/02/_원본버전/x/${name(index)}`, to: `codex/2026/09/02/${"긴 이름 ".repeat(40)}${name(index)}` }));
+  const outcomes = await store.moveByIds(moves);
+  const batches = calls.filter((args) => args[0] === "backend");
+  assert.ok(batches.length > 3, `${batches.length} calls`);
+  const windowsBinary = "C:\\Users\\a-rather-long-user-name\\AppData\\Local\\Microsoft\\WinGet\\Links\\rclone.exe";
+  let sent = 0;
+  for (const args of batches) {
+    assert.deepEqual(args.slice(0, 3), ["backend", "moveid", "gdrive_dev:"]);
+    const pairs = args.slice(3, args.indexOf("--tpslimit"));
+    sent += pairs.length / 2;
+    assert.ok(pairs.length / 2 <= MOVE_BATCH_PAIRS);
+    const length = windowsCommandLineLength([windowsBinary, ...args]);
+    assert.ok(length <= MOVE_BATCH_CHARS + windowsBinary.length && length < 32_767, `a call of ${length} characters`);
+  }
+  assert.equal(sent, 250);
+  // Nothing showed up where it should be, so nothing counts as moved; each may be tried by name.
+  assert.ok(outcomes.every((outcome) => !outcome.ok && outcome.retry));
+  assert.equal(windowsCommandLineLength(["rclone", "a b", "c\"d", ""]), "rclone".length + 1 + 5 + 1 + 6 + 1 + 2);
+});
+
+test("on Google Drive, moves go by file id in one call and each is checked; a move onto a taken name goes by name", async (t) => {
+  const home = await makeHome(t);
+  const remoteRoot = await temporaryDirectory(t, "remote");
+  const { main, archived, paths } = await seedMoves(home, remoteRoot);
+  const fake = fakeRclone(remoteRoot, { drive: true });
+  const destination = { kind: "cloud", remote: "fake", path: "" };
+  const result = await runBackup({ destination, rcloneRun: fake.run, homeDir: home, device: "studio" });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(result.counts["version-moves"], 1);
+  assert.equal(result.counts["archive-moves"], 1);
+  const commands = commandsOf(fake);
+  assert.equal(commands.filter((command) => command === "backend moveid").length, 1);
+  assert.equal(commands.filter((command) => command === "moveto").length, 0);
+  const moveid = fake.calls.find((args) => args[0] === "backend");
+  assert.equal(moveid.slice(3, moveid.indexOf("--tpslimit")).length, 4);
+  assert.deepEqual(moveid.slice(moveid.indexOf("--tpslimit")), ["--tpslimit", "4", "--server-side-across-configs"]);
+  assert.ok(commands.indexOf("backend moveid") < commands.indexOf("copyto"));
+  assert.deepEqual(await fsp.readFile(paths.main), main);
+  assert.deepEqual(await fsp.readFile(paths.archived), archived);
+  await assert.rejects(fsp.access(paths.version));
+  await assert.rejects(fsp.access(paths.normal));
+
+  // The archived session is already in _아카이브: its normal-folder copy goes onto that
+  // taken name by name (moveto), while the version still goes by id.
+  const home2 = await makeHome(t);
+  const remote2 = await temporaryDirectory(t, "remote");
+  const seeded = await seedMoves(home2, remote2, { archivedThere: true });
+  const fake2 = fakeRclone(remote2, { drive: true });
+  const second = await runBackup({ destination, rcloneRun: fake2.run, homeDir: home2, device: "studio" });
+  assert.equal(second.ok, true, JSON.stringify(second.errors));
+  assert.equal(second.counts["archive-moves"], 1);
+  const moveto = fake2.calls.filter((args) => args[0] === "moveto");
+  assert.deepEqual(moveto.map((args) => args[1]), [`fake:대화/codex/2026/08/10/${CODEX_ARCHIVED}`]);
+  assert.equal(fake2.calls.find((args) => args[0] === "backend").slice(3, -3).length, 2);
+  assert.deepEqual(await fsp.readFile(seeded.paths.archived), seeded.archived);
+  assert.deepEqual(await fsp.readFile(seeded.paths.main), seeded.main);
+});
+
+test("another cloud, or a Drive listing without file ids, moves one file at a time with moveto", async (t) => {
+  for (const options of [{ drive: false, ids: true }, { drive: true, ids: false }]) {
+    const home = await makeHome(t);
+    const remoteRoot = await temporaryDirectory(t, "remote");
+    const { main, archived, paths } = await seedMoves(home, remoteRoot);
+    const fake = fakeRclone(remoteRoot, options);
+    const result = await runBackup({ destination: { kind: "cloud", remote: "fake", path: "" }, rcloneRun: fake.run, homeDir: home, device: "studio" });
+    assert.equal(result.ok, true, JSON.stringify(result.errors));
+    const commands = commandsOf(fake);
+    assert.equal(commands.filter((command) => command.startsWith("backend")).length, 0, JSON.stringify(options));
+    assert.equal(commands.filter((command) => command === "moveto").length, 2, JSON.stringify(options));
+    assert.deepEqual(await fsp.readFile(paths.main), main);
+    assert.deepEqual(await fsp.readFile(paths.archived), archived);
+  }
+});
+
+test("a move by id that fails is an error and stays out of the ledger; the moves after it still go", async (t) => {
+  const home = await makeHome(t);
+  const remoteRoot = await temporaryDirectory(t, "remote");
+  const dataDir = await temporaryDirectory(t, "data");
+  const { archived, paths } = await seedMoves(home, remoteRoot);
+  // The version-move sorts first in the call, so rclone stops before the archive-move.
+  const fake = fakeRclone(remoteRoot, { drive: true, failFiles: new Set([paths.version]) });
+  const destination = { kind: "cloud", remote: "fake", path: "" };
+  const result = await runBackup({ destination, rcloneRun: fake.run, homeDir: home, device: "studio", dataDir });
+  assert.equal(result.ok, false);
+  assert.equal(result.counts.errors, 1);
+  const mainLocal = path.join(home, ".codex", "sessions", "2026", "09", "01", CODEX_MAIN);
+  const archivedLocal = path.join(home, ".codex", "archived_sessions", CODEX_ARCHIVED);
+  assert.equal(result.errors[0].path, mainLocal);
+  // Stopped at the failing pair, the rest sent again, then the failed one tried by name.
+  assert.deepEqual(commandsOf(fake).filter((command) => ["backend moveid", "moveto"].includes(command)), ["backend moveid", "backend moveid", "moveto"]);
+  assert.deepEqual(await fsp.readFile(paths.archived), archived);
+  await fsp.access(paths.version);
+  await assert.rejects(fsp.access(paths.main));
+  const [ledgerName] = (await fsp.readdir(path.join(dataDir, "backup"))).filter((file) => file.startsWith("ledger-"));
+  const ledger = JSON.parse(await fsp.readFile(path.join(dataDir, "backup", ledgerName), "utf8"));
+  assert.equal(Object.hasOwn(ledger.files, mainLocal), false, "the failed move is in the ledger");
+  assert.equal(ledger.files[archivedLocal].dest, `codex/_아카이브/2026/08/10/${CODEX_ARCHIVED}`);
+
+  // The next run moves it.
+  const again = await runBackup({ destination, rcloneRun: fakeRclone(remoteRoot, { drive: true }).run, homeDir: home, device: "studio", dataDir });
+  assert.equal(again.ok, true, JSON.stringify(again.errors));
+  assert.equal(again.counts["version-moves"], 1);
+  await assert.rejects(fsp.access(paths.version));
+});
+
+test("a move by id that rclone reports done but the listing does not show is tried again by name", async (t) => {
+  const home = await makeHome(t);
+  const remoteRoot = await temporaryDirectory(t, "remote");
+  const { main, paths } = await seedMoves(home, remoteRoot);
+  const fake = fakeRclone(remoteRoot, { drive: true, skipFiles: new Set([paths.version]) });
+  const result = await runBackup({ destination: { kind: "cloud", remote: "fake", path: "" }, rcloneRun: fake.run, homeDir: home, device: "studio" });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  const moveto = fake.calls.filter((args) => args[0] === "moveto");
+  assert.deepEqual(moveto.map((args) => args[2]), [`fake:대화/codex/2026/09/02/${CODEX_MAIN}`]);
+  assert.deepEqual(await fsp.readFile(paths.main), main);
+  await assert.rejects(fsp.access(paths.version));
 });
 
 test("what this computer last uploaded is updated in place; an edit by someone else there is kept", async (t) => {

@@ -213,6 +213,8 @@ class Plan {
     // name → paths kept under a date folder's _원본버전/<session>/<hash>/ by the
     // 2026-10-04 reorganisation.
     this.versions = new Map();
+    // Every file the destination listing showed.
+    this.listed = new Set();
   }
 
   /** md5 of what is at `rel` now, from the listing or read from a folder. */
@@ -241,9 +243,12 @@ class Plan {
 
   move(item, from, to, bucket = "archive-moves") {
     const entry = this.files.get(from);
+    // A file still where it was listed, going to a name no file had, can be moved by
+    // its Drive id together with others; any other move goes by name, in plan order.
+    const id = entry?.id && entry.origin === from && !this.files.has(to) && !this.listed.has(to) ? entry.id : null;
     this.files.delete(from);
     this.files.set(to, entry);
-    this.moves.push({ item, from, to, bucket });
+    this.moves.push({ item, from, to, bucket, id });
   }
 }
 
@@ -332,6 +337,7 @@ async function plan({ store, items, ledger, device, full, log, wholeTrees = fals
   const listing = await store.list([...dirs].sort(), { trees, recursive });
   for (const [rel, entry] of listing.files) {
     result.files.set(rel, { ...entry, origin: rel });
+    result.listed.add(rel);
     if (rel.includes(`/${ORIGINAL_VERSIONS}/`)) {
       const name = rel.split("/").at(-1);
       if (!result.versions.has(name)) result.versions.set(name, []);
@@ -545,6 +551,7 @@ export async function runBackup({
 
   const planned = await plan({ store, items, ledger, device, full, log, wholeTrees });
   const { plan: result, fresh } = planned;
+  if (result.moves.length) log(`${result.moves.length} moves planned, ${result.moves.filter((move) => move.id).length} with a file id`);
 
   if (!dryRun) {
     const saveLedger = async () => {
@@ -557,13 +564,40 @@ export async function runBackup({
       fresh[record.item.localPath] = ledgerEntry(record.local, record.to, record.entry.date, own);
     }
     const failed = new Set();
-    for (const move of result.moves) {
+    const moveFailed = (move, message) => {
+      result.errors.push({ item: move.item, error: message });
+      failed.add(move.item.localPath);
+      // Not in the ledger as done, not even in a save before the run ends.
+      delete fresh[move.item.localPath];
+    };
+    // On Google Drive, moves of files still where they were listed onto free names go
+    // many to one rclone call; what that does not confirm, and every other move
+    // (another cloud, a folder, a file without an id), goes by name one at a time.
+    let byName = result.moves;
+    const byId = result.moves.filter((move) => move.id);
+    if (byId.length && store.moveByIds && await store.canMoveById()) {
+      const started = Date.now();
+      log(`moving ${byId.length} of ${result.moves.length} by Drive file id`);
+      const outcomes = await store.moveByIds(byId.map(({ id, from, to }) => ({ id, from, to })), { log });
+      const retry = [];
+      byId.forEach((move, index) => {
+        const outcome = outcomes[index];
+        if (outcome.ok) return;
+        if (!outcome.retry) moveFailed(move, outcome.error);
+        else {
+          log(`${outcome.error}; trying it by name`);
+          retry.push(move);
+        }
+      });
+      log(`moves by id done in ${Math.round((Date.now() - started) / 1000)}s: ${outcomes.filter((outcome) => outcome.ok).length} confirmed, ${retry.length} to try by name`);
+      byName = [...retry, ...result.moves.filter((move) => !move.id)];
+    }
+    for (const move of byName) {
       try {
         log(`move ${move.from} -> ${move.to}`);
         await store.move(move.from, move.to);
       } catch (error) {
-        result.errors.push({ item: move.item, error: error.message });
-        failed.add(move.item.localPath);
+        moveFailed(move, error.message);
       }
     }
     // A cloud may make two folders of one name when two uploads create it at once,
