@@ -617,15 +617,23 @@ async function shareEnableManual(ctx, { publicUrl }) {
     return { ok: false, error: `The tunnel token is required the first time: put it in ${TUNNEL_TOKEN_ENV} (never on the command line)` };
   }
 
+  const host = new URL(address.url).hostname;
+  const previous = await readJson(ctx.paths.stateFile);
+  // The Access team domain and AUD tag of an earlier --cloudflare or join belong to
+  // that host's Access app; on another host they would let /mcp check the wrong one.
+  const otherHost = previous?.host !== host;
+  const staleAccess = otherHost
+    ? Object.fromEntries(["HONCHO_ACCESS_TEAM_DOMAIN", "HONCHO_ACCESS_AUD"].filter((key) => filled(server.environment, key)).map((key) => [key, ""]))
+    : {};
+
   const hostTunnel = await removeHostTunnel(ctx);
   const opened = await openShare(ctx, {
     ...(tunnelToken ? { [TUNNEL_TOKEN_ENV]: tunnelToken } : {}),
+    ...staleAccess,
     HONCHO_TEAM_WORKSPACE: identity.workspace,
     HONCHO_TEAM_PEER: identity.peer,
   });
   if (!opened.ok) return opened.failure;
-  const host = new URL(address.url).hostname;
-  const previous = await readJson(ctx.paths.stateFile);
   const keep = previous?.host === host ? Object.fromEntries(["teamDomain", "aud", "tunnelId"].filter((key) => previous[key]).map((key) => [key, previous[key]])) : {};
   const state = { publicUrl: address.url, enabledAt: new Date().toISOString(), host, ...keep, tunnel: true };
   await writeState(ctx, state);

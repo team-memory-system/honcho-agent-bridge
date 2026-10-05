@@ -5,8 +5,9 @@
 //                wscript .vbs at logon
 //   systemd      ~/.config/systemd/user/<unit>, enabled for default.target
 //
-// None needs admin rights. The callers are share-manager.mjs (the Cloudflare tunnel)
-// and host-manager.mjs (the host supervisor); each builds its own spec with the
+// None needs admin rights. The callers are share-manager.mjs, which now only finds
+// and removes the old host tunnel autostart of 0.3.28 and before (the tunnel runs in
+// Compose), and host-manager.mjs (the host supervisor); each builds its own spec with the
 // functions here and keeps what only it knows (how to find its processes).
 // backup-schedule.mjs uses the launchd half for a job that runs on a clock.
 //

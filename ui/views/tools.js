@@ -58,7 +58,7 @@ export default {
       try {
         const result = await get("/api/app/mcp-tools");
         if (!result.configured) {
-          clear(local, notice("", "이 컴퓨터는 아직 대화 수집을 설정하지 않아 플러그인 도구를 쓰지 않습니다.", app.context?.sharedBridge?.connected ? " 팀원 기억에 연결돼 있어 그 연결의 도구를 씁니다." : ""));
+          clear(local, notice("", "이 컴퓨터는 아직 대화 수집을 설정하지 않아 플러그인 도구를 쓰지 않습니다.", app.context?.teamMemory?.connected ? " 팀원 기억은 Claude Code와 Codex에 team-로 시작하는 MCP 서버로 따로 연결돼 있습니다." : ""));
           return;
         }
         let tools = result.tools;

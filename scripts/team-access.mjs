@@ -16,7 +16,14 @@
 // team:[{name, host}]}). It holds a tunnel token, so it is only ever written to an
 // owner-only file the user names, or handed to the app to show once; nothing here
 // prints it.
+//
+// The asking side (`teammates connect|disconnect|connected`) is at the end: Claude
+// Code and Codex reach a teammate's server themselves as a remote MCP server and log
+// in through Cloudflare Access with OAuth, so nothing here holds a token for it.
+import { execFile, spawn } from "node:child_process";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -269,12 +276,15 @@ export async function teammatesList(options = {}) {
   try {
     const policy = await ctx.client.get(`/accounts/${encodeURIComponent(ctx.state.accountId)}/access/policies/${encodeURIComponent(ctx.state.peoplePolicyId)}`);
     await afterFirstCall(ctx);
+    const servers = teamServers(ctx.state);
     return {
       ok: true,
       owner: ctx.state.ownerEmail || null,
       people: policyEmails(policy),
-      servers: teamServers(ctx.state),
+      servers,
       shared: sharerList(ctx.state),
+      // The 팀 주소 the owner hands to teammates who only ask; no secret in it.
+      addressText: teamAddressText(servers),
     };
   } catch (error) {
     return failure(error);
@@ -411,4 +421,384 @@ async function teammateUnshareUnlocked(options) {
 /** Removes a teammate's shared server from Cloudflare: its apps, hostname and tunnel. */
 export async function teammateUnshare(options = {}) {
   return withTeamLock(options, "teammates-unshare", () => teammateUnshareUnlocked(options));
+}
+
+// ------------------------------------------------- asking a teammate's memory
+//
+// A teammate's memory is a remote MCP server at https://<host>/mcp. Claude Code and
+// Codex each keep it as `team-<name>` and log in to it themselves (OAuth through
+// Cloudflare Access), so no token is written here or into either entry. Both are
+// changed with their own CLI, run with an argument array and no shell; a missing
+// one is reported and the other is still done.
+//
+// Which servers this computer knows is read from files only:
+//   <runtime>/share.json       the invite's team list, on a teammate's computer
+//   <runtime>/team-access.json the owner's server and the teammates' shared ones
+//   ~/.claude.json, ~/.codex/config.toml   what each client already has as team-*
+// This computer's own shared server is left out: its agents use it directly.
+
+export const TEAM_ENTRY_PREFIX = "team-";
+export const CLIENT_NAMES = Object.freeze({ claude: "Claude Code", codex: "Codex" });
+const CLIENTS = Object.keys(CLIENT_NAMES);
+const CLIENT_TIMEOUT_MS = 60_000;
+// What may go to a client CLI: names and https URLs only, so even cmd.exe (Windows
+// runs an npm .cmd shim through it) reads every argument as plain text.
+const SAFE_ARGUMENT = /^[A-Za-z0-9._:/@=-]+$/;
+const UNSAFE_PATH = /["%^&|<>!\r\n]/;
+const LOGIN_WAIT_MS = 8_000;
+const LOGIN_LIMIT_MS = 10 * 60_000;
+
+/** The short name in `team-<name>`: lower-case letters, digits and -, up to 32. */
+export function teamName(value) {
+  const name = String(value ?? "").trim().toLowerCase().replace(/^team-/, "");
+  return validName(name) ? name : null;
+}
+
+export function teamEntryName(name) {
+  return `${TEAM_ENTRY_PREFIX}${name}`;
+}
+
+/** A server's address as host, https://host or https://host/mcp; the URL is always https://host/mcp. */
+export function teamAddress(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return { ok: false, error: "The server address is missing: give its host, such as memory-bob.example.com" };
+  let url;
+  try { url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`); }
+  catch { return { ok: false, error: "The server address is not a host or a URL" }; }
+  if (url.protocol !== "https:") return { ok: false, error: "The server address must use https" };
+  if (url.username || url.password || url.port || url.search || url.hash || /[?#]/.test(raw)) {
+    return { ok: false, error: "The server address must be only the host, https://<host> or https://<host>/mcp" };
+  }
+  if (!["/", "/mcp", "/mcp/"].includes(url.pathname)) {
+    return { ok: false, error: "The server address must be only the host, https://<host> or https://<host>/mcp" };
+  }
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!validHostname(host)) return { ok: false, error: "The server address needs a full host name such as memory-bob.example.com" };
+  return { ok: true, host, url: `https://${host}/mcp` };
+}
+
+/** memory-bob.example.com is bob's; memory.example.com is memory. */
+export function nameFromHost(host) {
+  const label = String(host || "").split(".")[0].toLowerCase();
+  const short = label.startsWith("memory-") ? label.slice("memory-".length) : label;
+  return teamName(short) || teamName(label);
+}
+
+/** The 팀 주소 text: one `<name> https://<host>/mcp` line per server. */
+export function teamAddressText(servers) {
+  return (servers || []).map(({ name, host }) => `${name} https://${host}/mcp`).join("\n");
+}
+
+/** Lines of `<name> <address>` or just `<address>`, as the owner's 팀 주소 text has them. */
+export function parseTeamAddresses(text) {
+  const servers = [];
+  const errors = [];
+  String(text ?? "").split(/\r?\n/).forEach((line, index) => {
+    const words = line.trim().split(/\s+/).filter(Boolean);
+    if (!words.length || words[0].startsWith("#")) return;
+    const address = teamAddress(words.length > 1 ? words[1] : words[0]);
+    if (!address.ok || words.length > 2) { errors.push({ line: index + 1, error: address.error || "A line holds a name and an address only" }); return; }
+    const name = words.length > 1 ? teamName(words[0]) : nameFromHost(address.host);
+    if (!name) { errors.push({ line: index + 1, error: "The name takes lower-case letters, digits and -, up to 32 characters" }); return; }
+    if (!servers.some((item) => item.name === name)) servers.push({ name, host: address.host, url: address.url });
+  });
+  return { servers, errors };
+}
+
+function clientContext(options = {}) {
+  const env = options.env || process.env;
+  const home = path.resolve(options.homeDir || env.HONCHO_AGENT_BRIDGE_USER_HOME || os.homedir());
+  return {
+    env,
+    platform: options.platform || process.platform,
+    files: {
+      claude: path.join(env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : home, ".claude.json"),
+      codex: path.join(env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home, ".codex"), "config.toml"),
+    },
+    clientRunner: options.clientRunner || null,
+    loginSpawner: options.loginSpawner || null,
+    options,
+  };
+}
+
+async function claudeEntries(file) {
+  let document;
+  try { document = JSON.parse(await fsp.readFile(file, "utf8")); } catch { return {}; }
+  const servers = document?.mcpServers && typeof document.mcpServers === "object" ? document.mcpServers : {};
+  return Object.fromEntries(Object.entries(servers)
+    .filter(([name, entry]) => name.startsWith(TEAM_ENTRY_PREFIX) && entry && typeof entry === "object")
+    .map(([name, entry]) => [name, { url: typeof entry.url === "string" ? entry.url : null, type: entry.type || null }]));
+}
+
+/** `[mcp_servers.<name>]` tables and their `url`, read without a TOML parser. */
+async function codexEntries(file) {
+  const text = await fsp.readFile(file, "utf8").catch(() => "");
+  const entries = {};
+  let current = null;
+  for (const line of text.split(/\r?\n/)) {
+    const header = line.match(/^\s*\[\s*mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*\]\s*(?:#.*)?$/);
+    if (header) {
+      const name = header[1] || header[2];
+      current = name.startsWith(TEAM_ENTRY_PREFIX) ? name : null;
+      if (current) entries[current] = { url: null };
+      continue;
+    }
+    if (/^\s*\[/.test(line)) { current = null; continue; }
+    const url = current && line.match(/^\s*url\s*=\s*"([^"]*)"/);
+    if (url) entries[current].url = url[1];
+  }
+  return entries;
+}
+
+/** The team-* entries Claude Code and Codex have, by name, from their own files. */
+export async function registeredTeamServers(options = {}) {
+  const ctx = options.files ? options : clientContext(options);
+  const [claude, codex] = await Promise.all([claudeEntries(ctx.files.claude), codexEntries(ctx.files.codex)]);
+  return { claude, codex };
+}
+
+/** The client's executable on PATH, or null. On Windows an npm .cmd shim counts. */
+export function findClient(command, { env = process.env, platform = process.platform } = {}) {
+  const extensions = platform === "win32"
+    ? String(env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter((item) => /^\.(exe|cmd|bat|com)$/i.test(item))
+    : [""];
+  for (const directory of String(env.PATH || env.Path || "").split(path.delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${command}${extension}`);
+      try {
+        if (!fs.statSync(candidate).isFile()) continue;
+        if (platform !== "win32") fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {}
+    }
+  }
+  return null;
+}
+
+/** How to start a client: the binary itself, or cmd.exe for a .cmd shim, with plain-text arguments only. */
+function clientCommand(binary, args, platform, env) {
+  for (const arg of args) if (!SAFE_ARGUMENT.test(arg)) throw new Error("A client argument holds characters a name or an https address never has");
+  if (platform === "win32" && /\.(cmd|bat)$/i.test(binary)) {
+    if (UNSAFE_PATH.test(binary)) throw new Error(`The path of ${path.basename(binary)} holds characters cmd.exe would read as commands`);
+    return {
+      command: env.ComSpec || env.COMSPEC || "cmd.exe",
+      args: ["/d", "/s", "/c", `""${binary}" ${args.join(" ")}"`],
+      extra: { windowsVerbatimArguments: true },
+    };
+  }
+  return { command: binary, args, extra: {} };
+}
+
+function execClient(command, args, extra, env) {
+  return new Promise((resolve) => {
+    execFile(command, args, { env, timeout: CLIENT_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024, ...extra }, (error, stdout, stderr) => {
+      resolve({ code: error ? (typeof error.code === "number" ? error.code : -1) : 0, stdout: String(stdout || ""), stderr: String(stderr || "") });
+    });
+  });
+}
+
+/** One client CLI call: {missing} when the client is not installed, else {code, stdout, stderr}. */
+async function runClient(ctx, client, args) {
+  if (ctx.clientRunner) return ctx.clientRunner(client, args);
+  const binary = findClient(client, ctx);
+  if (!binary) return { missing: true };
+  const { command, args: list, extra } = clientCommand(binary, args, ctx.platform, ctx.env);
+  return execClient(command, list, extra, ctx.env);
+}
+
+function clientFailure(result) {
+  const text = `${result.stderr || ""}\n${result.stdout || ""}`.trim().split(/\r?\n/).find(Boolean) || `exit ${result.code}`;
+  return text.slice(0, 300);
+}
+
+function missingClient(client) {
+  return { ok: false, missing: true, error: `${CLIENT_NAMES[client]} (${client}) was not found on this computer` };
+}
+
+const ADD_ARGS = {
+  claude: (entry, url) => ["mcp", "add", "--transport", "http", "--scope", "user", entry, url],
+  codex: (entry, url) => ["mcp", "add", entry, "--url", url],
+};
+const REMOVE_ARGS = {
+  claude: (entry) => ["mcp", "remove", entry, "--scope", "user"],
+  codex: (entry) => ["mcp", "remove", entry],
+};
+
+async function connectClient(ctx, client, entry, url, current) {
+  if (current && current.url === url && (client !== "claude" || current.type === "http")) return { ok: true, action: "unchanged" };
+  if (current) {
+    const removed = await runClient(ctx, client, REMOVE_ARGS[client](entry));
+    if (removed.missing) return missingClient(client);
+    if (removed.code !== 0) return { ok: false, action: "failed", error: clientFailure(removed) };
+  }
+  const added = await runClient(ctx, client, ADD_ARGS[client](entry, url));
+  if (added.missing) return missingClient(client);
+  if (added.code !== 0) return { ok: false, action: "failed", error: clientFailure(added) };
+  return { ok: true, action: current ? "replaced" : "added" };
+}
+
+function loginSteps(entry) {
+  return {
+    claude: `In Claude Code, run /mcp, choose ${entry} and Authenticate`,
+    codex: `codex mcp login ${entry}`,
+  };
+}
+
+/**
+ * Registers a teammate's server in Claude Code and Codex as `team-<name>` at
+ * https://<host>/mcp. The same address again changes nothing; another address
+ * replaces the entry. Logging in is left to each client.
+ */
+export async function teammateConnect(options = {}) {
+  const name = teamName(options.name);
+  if (!name) return { ok: false, error: "teammates connect takes a short name first: lower-case letters, digits and -, up to 32 characters" };
+  const address = teamAddress(options.address);
+  if (!address.ok) return { ok: false, error: address.error };
+  const ctx = clientContext(options);
+  const entry = teamEntryName(name);
+  const registered = await registeredTeamServers(ctx);
+  const clients = {};
+  for (const client of CLIENTS) clients[client] = await connectClient(ctx, client, entry, address.url, registered[client][entry]);
+  const missing = CLIENTS.filter((client) => clients[client].missing);
+  const done = CLIENTS.filter((client) => clients[client].ok);
+  return {
+    ok: done.length > 0,
+    name,
+    entry,
+    host: address.host,
+    url: address.url,
+    clients,
+    ...(missing.length ? { missing } : {}),
+    ...(done.length ? {} : { error: missing.length === CLIENTS.length ? "Neither Claude Code (claude) nor Codex (codex) was found on this computer" : `${entry} was not added: ${CLIENTS.map((client) => clients[client].error).filter(Boolean).join("; ")}` }),
+    login: loginSteps(entry),
+    next: `Log in once in each client: ${loginSteps(entry).claude}; in a terminal, ${loginSteps(entry).codex}`,
+  };
+}
+
+/** Takes `team-<name>` out of Claude Code and Codex. */
+export async function teammateDisconnect(options = {}) {
+  const name = teamName(options.name);
+  if (!name) return { ok: false, error: "teammates disconnect takes the short name given to teammates connect" };
+  const ctx = clientContext(options);
+  const entry = teamEntryName(name);
+  const registered = await registeredTeamServers(ctx);
+  const clients = {};
+  for (const client of CLIENTS) {
+    if (!registered[client][entry]) { clients[client] = { ok: true, action: "absent" }; continue; }
+    const removed = await runClient(ctx, client, REMOVE_ARGS[client](entry));
+    clients[client] = removed.missing ? missingClient(client)
+      : removed.code === 0 ? { ok: true, action: "removed" } : { ok: false, action: "failed", error: clientFailure(removed) };
+  }
+  const failed = CLIENTS.filter((client) => !clients[client].ok);
+  return { ok: failed.length === 0, name, entry, clients, ...(failed.length ? { error: `${entry} is still in ${failed.map((client) => CLIENT_NAMES[client]).join(" and ")}` } : {}) };
+}
+
+async function readJsonFile(file) {
+  try { return JSON.parse(await fsp.readFile(file, "utf8")); } catch { return null; }
+}
+
+/** The team's servers this computer knows from its own files, its own server left out. */
+export async function knownTeamServers(options = {}) {
+  const paths = teamAccessPaths(options);
+  const [share, team] = await Promise.all([readJsonFile(path.join(paths.runtimeDir, "share.json")), readTeamState(paths)]);
+  const self = typeof share?.host === "string" ? share.host : null;
+  const known = new Map();
+  const add = (item, source) => {
+    const name = teamName(item?.name);
+    if (!name || !validHostname(item?.host) || item.host === self) return;
+    const current = known.get(name);
+    if (current) { if (!current.sources.includes(source)) current.sources.push(source); return; }
+    known.set(name, { name, host: item.host, url: `https://${item.host}/mcp`, sources: [source] });
+  };
+  for (const item of Array.isArray(share?.team) ? share.team : []) add(item, "invite");
+  if (team) for (const item of teamServers(team)) add(item, "team");
+  return [...known.values()];
+}
+
+/**
+ * What `teammates connected` reports: every team server this computer knows or has
+ * registered, with whether Claude Code and Codex have it, and whether each client is
+ * installed here at all.
+ */
+export async function teammatesConnected(options = {}) {
+  const ctx = clientContext(options);
+  const [known, registered] = await Promise.all([knownTeamServers(options), registeredTeamServers(ctx)]);
+  const servers = new Map(known.map((item) => [item.name, { ...item, claude: null, codex: null }]));
+  for (const client of CLIENTS) {
+    for (const [entry, value] of Object.entries(registered[client])) {
+      const name = teamName(entry.slice(TEAM_ENTRY_PREFIX.length));
+      if (!name) continue;
+      if (!servers.has(name)) {
+        const address = teamAddress(value.url);
+        servers.set(name, { name, host: address.ok ? address.host : null, url: value.url, sources: [], claude: null, codex: null });
+      }
+      const server = servers.get(name);
+      server[client] = { registered: true, url: value.url, same: value.url === server.url };
+    }
+  }
+  const list = [...servers.values()].map((server) => ({
+    ...server,
+    entry: teamEntryName(server.name),
+    claude: server.claude || { registered: false },
+    codex: server.codex || { registered: false },
+  }));
+  return {
+    ok: true,
+    servers: list,
+    clients: Object.fromEntries(CLIENTS.map((client) => [client, { name: CLIENT_NAMES[client], found: ctx.clientRunner ? true : Boolean(findClient(client, ctx)) }])),
+    connected: list.filter((server) => server.claude.registered || server.codex.registered).length,
+  };
+}
+
+function defaultLoginSpawner(ctx, args) {
+  const binary = findClient("codex", ctx);
+  if (!binary) return null;
+  const { command, args: list, extra } = clientCommand(binary, args, ctx.platform, ctx.env);
+  return spawn(command, list, { env: ctx.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...extra });
+}
+
+/**
+ * Starts `codex mcp login team-<name>`, which opens the browser for the OAuth login
+ * and waits for it. Answers when it ends, or after a few seconds with the address it
+ * printed, so the page can offer it if no browser opened; the login keeps waiting
+ * (at most ten minutes).
+ */
+export async function codexLogin(options = {}) {
+  const name = teamName(options.name);
+  if (!name) return { ok: false, error: "Codex login takes the short name of a connected teammate's server" };
+  const ctx = clientContext(options);
+  const entry = teamEntryName(name);
+  const registered = await registeredTeamServers(ctx);
+  if (!registered.codex[entry]) return { ok: false, error: `${entry} is not in Codex yet; connect it first` };
+  let child;
+  try { child = (ctx.loginSpawner || defaultLoginSpawner)(ctx, ["mcp", "login", entry]); }
+  catch (error) { return { ok: false, error: String(error?.message || error) }; }
+  if (!child) return missingClient("codex");
+  const waitMs = options.waitMs ?? LOGIN_WAIT_MS;
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(waiting);
+      resolve({ entry, ...result });
+    };
+    const loginUrl = () => output.match(/https:\/\/[^\s"'<>]+/)?.[0] || null;
+    const read = (chunk) => {
+      output = `${output}${chunk}`.slice(-16_384);
+      if (loginUrl()) finish({ ok: true, state: "waiting", loginUrl: loginUrl() });
+    };
+    child.stdout?.on("data", read);
+    child.stderr?.on("data", read);
+    child.on("error", (error) => finish({ ok: false, error: String(error?.message || error) }));
+    child.on("exit", (code) => finish(code === 0
+      ? { ok: true, state: "done" }
+      : { ok: false, state: "failed", error: output.trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, 300) || `exit ${code}` }));
+    const waiting = setTimeout(() => finish({ ok: true, state: "waiting", loginUrl: loginUrl() }), waitMs);
+    const limit = setTimeout(() => { try { child.kill(); } catch {} }, LOGIN_LIMIT_MS);
+    limit.unref?.();
+    child.on("exit", () => clearTimeout(limit));
+  });
 }

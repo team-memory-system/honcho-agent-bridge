@@ -22,13 +22,13 @@ const FEATURES = [
   {
     key: "chat",
     title: "팀원 기억에 묻기",
-    text: "에이전트가 팀원이 열어 준 기억에 질문하게 합니다. 원문은 보지 않고 답만 받습니다. 팀원에게 받은 주소와 토큰이 필요합니다.",
+    text: "에이전트가 팀원이 열어 준 기억에 질문하게 합니다. 원문은 보지 않고 답만 받습니다. 팀원에게 받은 팀 주소와, 팀에 등록된 내 Google 계정이 필요합니다.",
   },
 ];
 
 // Turned on after setup, from the screen that does it, never in the first question.
 const LATER = [
-  { feature: "server", title: "다른 컴퓨터에서 쓰기", text: "내 다른 컴퓨터가 이 서버로 대화를 보내고 기억을 꺼내 쓰게 엽니다.", screen: "server" },
+  { feature: "server", title: "공유", text: "내 다른 컴퓨터가 이 서버로 대화를 보내고, 팀원이 이 기억에 묻게 엽니다.", screen: "server" },
   { feature: "sync", title: "회사 서버에도 보내기", text: "정한 폴더의 대화만 다른 기억 서버에도 보냅니다.", screen: "connect/targets" },
   { feature: "sync", title: "ChatGPT 기록 가져오기", text: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다.", screen: "connect/import" },
 ];
@@ -135,7 +135,7 @@ export default {
         steps.push({
           title: "대화 보내기 설정",
           done: Boolean(context?.configured),
-          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "기억 서버로 이 컴퓨터 서버를 고르고, 보낼 에이전트와 내 이름을 정합니다." : "서버를 둔 컴퓨터의 서버 → 다른 컴퓨터에서 쓰기에서 주소와 서버 토큰을 받아 넣고, 모을 에이전트를 고릅니다. 서버가 Cloudflare Access 뒤에 있으면 Access 서비스 토큰도 받아 넣습니다.",
+          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "기억 서버로 이 컴퓨터 서버를 고르고, 보낼 에이전트와 내 이름을 정합니다." : "서버를 둔 컴퓨터의 서버 → 공유에서 주소와 서버 token을 받아 넣고, 모을 에이전트를 고릅니다. 서버가 Cloudflare Access 뒤에 있으면 Access 서비스 토큰도 받아 넣습니다.",
           action: ["연결 화면에서 설정", () => go("connect/collect")],
         });
         // Only a conversation from an agent this computer collects, after setup, proves it works.
@@ -156,10 +156,10 @@ export default {
         });
       }
       if (features.includes("chat")) {
-        const connected = Boolean(context?.sharedBridge?.connected);
+        const connected = Number(context?.teamMemory?.connected || 0);
         steps.push(
-          { title: "팀원 기억에 연결", done: connected, text: connected ? context.sharedBridge.url : "팀원에게 받은 주소와 토큰을 넣습니다.", action: ["연결 화면에서 넣기", () => go("connect/share")] },
-          { title: "에이전트 다시 시작", done: false, optional: true, text: features.includes("sync") ? "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 에이전트는 내 기억 도구를 그대로 쓰고, 팀원 기억에는 shared_chat 도구로 묻습니다." : "Claude Code는 /reload-plugins, Codex는 새 세션을 엽니다. 그러면 에이전트가 chat 도구로 팀원 기억에 물어볼 수 있습니다.", action: null },
+          { title: "팀원 기억 연결", done: connected > 0, text: connected ? `팀원 기억 ${connected}곳이 Claude Code·Codex에 연결돼 있습니다.` : "팀원에게 받은 팀 주소를 넣고 Claude Code와 Codex에 연결합니다.", action: ["연결 화면에서 하기", () => go("connect/share")] },
+          { title: "한 번 로그인", done: false, optional: true, text: "Claude Code는 /mcp 에서 team-로 시작하는 서버를 골라 Authenticate, Codex는 연결 화면의 Codex 로그인을 누릅니다. 팀에 등록된 Google 계정으로 로그인하면 에이전트가 그 기억의 chat 도구로 묻습니다.", action: null },
         );
       }
 

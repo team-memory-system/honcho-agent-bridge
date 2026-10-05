@@ -9,8 +9,7 @@ import path from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createUiServer, rejectUnsafeRequest, shareEnableInvocation } from "../scripts/ui.mjs";
-import { BRIDGE_TOKEN, startBridge } from "./fake-bridge.mjs";
+import { createUiServer, rejectUnsafeRequest, shareEnableInvocation, shareJoinInvocation, teammateInvocation } from "../scripts/ui.mjs";
 import { fixtureZip } from "./chatgpt-fixture.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -330,61 +329,6 @@ test("every server route the screens call exists", async () => {
   }
 });
 
-test("the connect form reaches the bridge, and saves only once the bridge has answered", async (t) => {
-  const bridge = await startBridge();
-  t.after(() => bridge.server.close());
-  const appHome = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-ui-connect-"));
-  t.after(() => fsp.rm(appHome, { recursive: true, force: true }));
-  const previous = {};
-  for (const name of ["HONCHO_AGENT_BRIDGE_HOME", "HONCHO_MCP_BEARER_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"]) {
-    previous[name] = process.env[name];
-  }
-  process.env.HONCHO_AGENT_BRIDGE_HOME = appHome;
-  // A stale value in the environment that started the UI must not stand in for a
-  // field the form left blank.
-  process.env.CF_ACCESS_CLIENT_ID = "inherited.access";
-  process.env.CF_ACCESS_CLIENT_SECRET = "inherited-secret";
-  t.after(() => {
-    for (const [name, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  });
-
-  const wrong = await send("/api/bridge/connect", { method: "POST", body: { url: bridge.url, token: "wrong" } });
-  assert.equal(wrong.body.ok, false);
-  await assert.rejects(fsp.access(path.join(appHome, "config.json")), "a refused token is not saved");
-
-  const right = await send("/api/bridge/connect", { method: "POST", body: { url: bridge.url, token: BRIDGE_TOKEN } });
-  assert.equal(right.body.ok, true, JSON.stringify(right.body));
-  assert.deepEqual(right.body.tools, ["chat"]);
-  assert.equal(right.text.includes(BRIDGE_TOKEN), false, "the token never comes back to the page");
-
-  const saved = JSON.parse(await fsp.readFile(path.join(appHome, "config.json"), "utf8"));
-  assert.equal(saved.honcho.mcpBridgeToken, BRIDGE_TOKEN);
-  assert.equal(saved.honcho.accessClientId, undefined, "the blank field stayed blank");
-
-  const status = await send("/api/bridge/status");
-  assert.equal(status.body.connected, true);
-  const disconnected = await send("/api/bridge/disconnect", { method: "POST", body: {} });
-  assert.equal(disconnected.body.connected, false);
-});
-
-test("the connect form's fields are the ones the server reads, and none rides the command line", async () => {
-  const markup = await fsp.readFile(path.join(ROOT, "ui", "index.html"), "utf8");
-  const form = markup.slice(markup.indexOf('<form id="bridge-form"'));
-  const fields = [...form.slice(0, form.indexOf("</form>")).matchAll(/<input[^>]*name="([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(fields, ["url", "token", "accessClientId", "accessClientSecret"]);
-
-  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
-  const secrets = server.match(/const BRIDGE_SECRET_FIELDS = Object\.freeze\(\{([\s\S]*?)\}\)/)[1]
-    .match(/(\w+):/g)
-    .map((key) => key.slice(0, -1));
-  assert.deepEqual(secrets, ["token", "accessClientId", "accessClientSecret"]);
-  assert.match(server, /runCli\(\["bridge", "connect", "--url", url\], \{ timeout: 90_000, env \}\)/,
-    "only the address is an argument; the secrets go through the environment");
-});
-
 test("the share form's tunnel token goes to the CLI through its environment, never its arguments", async (t) => {
   const secret = "eyJhIjoidHVubmVsLXRva2VuLWZyb20tdGhlLWZvcm0ifQ";
   const invocation = shareEnableInvocation({ publicUrl: " https://memory.example.com ", tunnelToken: ` ${secret} ` });
@@ -403,16 +347,76 @@ test("the share form's tunnel token goes to the CLI through its environment, nev
 
   const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
   const routes = server.match(/const SHARE_ROUTES = \{([\s\S]*?)\n\};/)[1];
-  for (const action of ["status", "enable", "disable", "token", "rotate"]) {
+  for (const action of ["status", "enable", "join", "disable", "token", "rotate"]) {
     assert.match(routes, new RegExp(`"/api/server/share/${action}"`), action);
   }
   assert.match(routes, /runCli\(args, \{ timeout: 900_000, env \}\)/);
 });
 
-test("sharing has one way in: the five share routes, and the screen closes it with a plain disable", async () => {
+test("the Cloudflare API token and the invite go to the CLI through its environment, never its arguments", async (t) => {
+  const apiToken = "cf-api-token-from-the-form-5b1d";
+  const cloudflare = shareEnableInvocation({ cloudflare: true, apiToken: ` ${apiToken} `, name: "memory", zone: "example.com", email: "owner@example.com" });
+  assert.deepEqual(cloudflare.args, ["server", "share", "enable", "--cloudflare", "--name=memory", "--zone=example.com", "--email=owner@example.com"]);
+  assert.equal(cloudflare.env.CLOUDFLARE_API_TOKEN, apiToken);
+  assert.equal(JSON.stringify(cloudflare.args).includes(apiToken), false);
+  // A value that looks like an option stays the value of its own option.
+  assert.deepEqual(shareEnableInvocation({ cloudflare: true, name: "--public-url" }).args, ["server", "share", "enable", "--cloudflare", "--name=--public-url"]);
+
+  const invite = "tm1.eyJob3N0IjoibWVtb3J5LWFsaWNlLmV4YW1wbGUuY29tIn0";
+  const join = shareJoinInvocation({ invite: ` ${invite} ` });
+  assert.deepEqual(join.args, ["server", "share", "join"]);
+  assert.equal(join.env.HONCHO_SHARE_INVITE, invite);
+
+  const saved = { api: process.env.CLOUDFLARE_API_TOKEN, invite: process.env.HONCHO_SHARE_INVITE };
+  process.env.CLOUDFLARE_API_TOKEN = "inherited-api-token";
+  process.env.HONCHO_SHARE_INVITE = "tm1.inherited";
+  t.after(() => {
+    if (saved.api === undefined) delete process.env.CLOUDFLARE_API_TOKEN; else process.env.CLOUDFLARE_API_TOKEN = saved.api;
+    if (saved.invite === undefined) delete process.env.HONCHO_SHARE_INVITE; else process.env.HONCHO_SHARE_INVITE = saved.invite;
+  });
+  assert.equal("CLOUDFLARE_API_TOKEN" in shareEnableInvocation({ cloudflare: true }).env, false, "a blank field keeps the saved token instead of an inherited one");
+  assert.equal("HONCHO_SHARE_INVITE" in shareJoinInvocation({}).env, false);
+});
+
+test("the team routes check every name, email and address before the CLI sees it", () => {
+  assert.deepEqual(teammateInvocation("list"), ["teammates", "list"]);
+  assert.deepEqual(teammateInvocation("connected"), ["teammates", "connected"]);
+  assert.deepEqual(teammateInvocation("remove", { email: " alice@example.com " }), ["teammates", "remove", "alice@example.com"]);
+  assert.equal(teammateInvocation("remove", { email: "--share=x" }), null);
+  assert.equal(teammateInvocation("remove", { email: "-a@example.com" }), null);
+  assert.deepEqual(teammateInvocation("unshare", { name: "Alice" }), ["teammates", "unshare", "alice"]);
+  assert.equal(teammateInvocation("unshare", { name: "--all" }), null);
+  assert.deepEqual(teammateInvocation("disconnect", { name: "team-alice" }), ["teammates", "disconnect", "alice"]);
+  for (const address of ["memory-alice.example.com", "https://memory-alice.example.com", "https://memory-alice.example.com/mcp"]) {
+    assert.deepEqual(teammateInvocation("connect", { name: "alice", address }), ["teammates", "connect", "alice", "memory-alice.example.com"], address);
+  }
+  for (const address of ["http://memory-alice.example.com/mcp", "https://memory-alice.example.com:8443/mcp", "https://memory-alice.example.com/other", "https://u:p@memory-alice.example.com/mcp", "--url=x", ""]) {
+    assert.equal(teammateInvocation("connect", { name: "alice", address }), null, address);
+  }
+  assert.equal(teammateInvocation("connect", { name: "a b", address: "memory-alice.example.com" }), null);
+  assert.equal(teammateInvocation("add", { email: "alice@example.com" }), null, "add is not a CLI route");
+});
+
+test("the team routes answer a same-origin POST only, and the shared-bridge routes are gone", async () => {
+  for (const route of ["/api/teammates", "/api/teammates/add", "/api/teammates/remove", "/api/teammates/unshare", "/api/teammates/connected", "/api/teammates/connect", "/api/teammates/disconnect", "/api/teammates/codex-login", "/api/bridge/disconnect", "/api/server/share/join"]) {
+    const read = await send(route);
+    assert.equal(read.status, 405, route);
+    const crossSite = await send(route, { method: "POST", body: {}, headers: { origin: "http://evil.example" } });
+    assert.equal(crossSite.status, 403, route);
+  }
+  const bad = await send("/api/teammates/connect", { method: "POST", body: { name: "alice", address: "http://memory-alice.example.com" } });
+  assert.equal(bad.body.ok, false);
+  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  for (const route of ["/api/bridge/status", "/api/bridge/connect", "/api/bridge/test"]) {
+    assert.equal(server.includes(`"${route}"`), false, route);
+    assert.equal((await send(route, { method: "POST", body: {} })).status, 404, route);
+  }
+});
+
+test("sharing has the six share routes, and the screen closes it with a plain disable", async () => {
   const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
   const routes = server.match(/const SHARE_ROUTES = \{([\s\S]*?)\n\};/)[1];
-  assert.deepEqual([...routes.matchAll(/"\/api\/server\/share\/([^"]+)"/g)].map((match) => match[1]), ["status", "enable", "disable", "token", "rotate"]);
+  assert.deepEqual([...routes.matchAll(/"\/api\/server\/share\/([^"]+)"/g)].map((match) => match[1]), ["status", "enable", "join", "disable", "token", "rotate"]);
   assert.match(routes, /"\/api\/server\/share\/disable": async \(\) => runCli\(\["server", "share", "disable"\]/);
   const screen = await fsp.readFile(path.join(ROOT, "ui", "views", "server.js"), "utf8");
   assert.match(screen, /cli\("\/api\/server\/share\/disable", \{\}\)/);

@@ -22,6 +22,7 @@ import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { publicUrl } from "./redact.mjs";
 import { installedServerModel, installedServerPorts } from "./server-manager.mjs";
 import { configuredTargets, targetSummary } from "./targets.mjs";
+import { registeredTeamServers } from "./team-access.mjs";
 import { VERSION } from "./version.mjs";
 
 const DEFAULT_HONCHO_URL = "http://127.0.0.1:8001";
@@ -76,7 +77,8 @@ export async function appContext(options = {}) {
   return {
     ok: true,
     version: VERSION,
-    configured: Boolean(config),
+    // Collecting conversations: a file left by 0.3.28's shared-bridge connection alone does not count.
+    configured: Boolean(config?.user?.peerId && config?.honcho?.baseUrl),
     installedAt: config?.installedAt || null,
     user: { peerId: config?.user?.peerId || "" },
     workspace: config?.honcho?.workspaceId || "memory",
@@ -85,14 +87,21 @@ export async function appContext(options = {}) {
     localServer: endpoints.localServer ? { ...endpoints.localServer, chatModel: await installedServerModel() } : null,
     dashboardUrl: endpoints.dashboardUrl,
     gatewayUiUrl: endpoints.gatewayUiUrl,
-    sharedBridge: {
-      connected: Boolean(config?.honcho?.mcpBridgeUrl),
-      url: config?.honcho?.mcpBridgeUrl ? publicUrl(config.honcho.mcpBridgeUrl) : null,
-    },
+    // Teammates' memory this computer's Claude Code and Codex reach as team-* remote
+    // MCP servers, read from those clients' own files; and whether the shared-bridge
+    // settings of 0.3.28 (no longer used) are still saved here.
+    teamMemory: await teamMemoryContext(options),
+    oldBridge: Boolean(config?.honcho?.mcpBridgeUrl || config?.honcho?.mcpBridgeToken),
     // Other servers that also receive the conversations from chosen folders. Read
     // from files on this computer only (config, spool, state): no request is made.
     targets: await targetsContext(config),
   };
+}
+
+async function teamMemoryContext(options = {}) {
+  const registered = await registeredTeamServers(options.teamOptions || {}).catch(() => ({ claude: {}, codex: {} }));
+  const names = new Set([...Object.keys(registered.claude), ...Object.keys(registered.codex)]);
+  return { connected: names.size, claude: Object.keys(registered.claude).length, codex: Object.keys(registered.codex).length };
 }
 
 async function targetsContext(config) {

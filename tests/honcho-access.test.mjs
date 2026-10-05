@@ -18,7 +18,6 @@ import test from "node:test";
 import { appContext, relayDashboard, relayGateway, relayHoncho, sessionsPage } from "../scripts/app-api.mjs";
 import { configEnvironment } from "../scripts/config.mjs";
 import { isCloudflareAccessBlock } from "../scripts/honcho-access.mjs";
-import { BRIDGE_TOKEN, startBridge } from "./fake-bridge.mjs";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -432,30 +431,28 @@ for (const refusal of ["403", "302"]) {
   });
 }
 
-test("bridge connect and disconnect leave the memory server's service token alone", async (t) => {
-  const bridge = await startBridge();
-  t.after(() => bridge.server.close());
+test("bridge disconnect removes the old shared-bridge settings and leaves the memory server's service token alone", async (t) => {
   const { configPath, env } = await sandbox(t);
   const applied = await cli(["setup", "apply", ...SETUP, "--honcho-url", "http://127.0.0.1:9"], { ...env, ...withAccess });
   assert.equal(applied.body.ok, true, applied.stdout);
-
-  const connected = await cli(["bridge", "connect", "--url", bridge.url], {
-    ...env,
-    HONCHO_MCP_BEARER_TOKEN: BRIDGE_TOKEN,
-    CF_ACCESS_CLIENT_ID: "bridge-id",
-    CF_ACCESS_CLIENT_SECRET: "bridge-secret",
-  });
-  assert.equal(connected.body.ok, true, connected.stdout);
+  // What `bridge connect` of 0.3.28 and before left in the file.
   let saved = JSON.parse(await fsp.readFile(configPath, "utf8"));
-  assert.deepEqual(saved.honcho.access, { clientId: ACCESS_ID, clientSecret: ACCESS_SECRET });
-  assert.equal(saved.honcho.accessClientId, "bridge-id");
+  saved.honcho = { ...saved.honcho, mcpBridgeUrl: "https://bridge.example.com/mcp", mcpBridgeToken: "old-bridge-token", accessClientId: "bridge-id", accessClientSecret: "bridge-secret" };
+  await fsp.writeFile(configPath, JSON.stringify(saved, null, 2));
 
   const disconnected = await cli(["bridge", "disconnect"], env);
   assert.equal(disconnected.body.ok, true, disconnected.stdout);
+  assert.equal(disconnected.body.changed, true);
   saved = JSON.parse(await fsp.readFile(configPath, "utf8"));
-  assert.equal(saved.honcho.accessClientId, undefined);
-  assert.equal(saved.honcho.mcpBridgeUrl, undefined);
+  for (const key of ["mcpBridgeUrl", "mcpBridgeToken", "accessClientId", "accessClientSecret"]) assert.equal(saved.honcho[key], undefined, key);
   assert.deepEqual(saved.honcho.access, { clientId: ACCESS_ID, clientSecret: ACCESS_SECRET });
+
+  const again = await cli(["bridge", "disconnect"], env);
+  assert.equal(again.body.ok, true, again.stdout);
+  assert.equal(again.body.changed, false);
+  const gone = await cli(["bridge", "connect", "--url", "https://bridge.example.com/mcp"], env);
+  assert.equal(gone.body.ok, false);
+  assert.match(gone.body.error || JSON.stringify(gone.body), /teammates connect/);
 });
 
 test("the setup form's service token reaches the CLI through its environment, never its command line", async (t) => {

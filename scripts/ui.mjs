@@ -1,12 +1,13 @@
 // The Team Memory app: one screen over the memory server, the collector and the
 // subscription gateway. `cli.mjs ui open` starts it.
 //
-// Setting things up - connect to someone else's shared bridge, install the hooks,
-// bring up Honcho and its host services, drop in a ChatGPT export - already exists
-// as `cli.mjs` subcommands, and runs the CLI as a subprocess rather than importing
-// it, so the app and a terminal take exactly the same path and there is one
-// implementation of each step. Reading memories, the gateway's accounts and the
-// server's tool switches are relayed to those programs' own APIs (app-api.mjs).
+// Setting things up - install the hooks, bring up Honcho and its host services,
+// share the server, connect a teammate's memory to Claude Code and Codex, drop in a
+// ChatGPT export - already exists as `cli.mjs` subcommands, and runs the CLI as a
+// subprocess rather than importing it, so the app and a terminal take exactly the
+// same path and there is one implementation of each step. The two exceptions are
+// marked where they are. Reading memories, the gateway's accounts and the server's
+// tool switches are relayed to those programs' own APIs (app-api.mjs).
 import { execFile } from "node:child_process";
 import { createReadStream, promises as fs, realpathSync } from "node:fs";
 import http from "node:http";
@@ -20,7 +21,9 @@ import { configEnvironment, loadConfig } from "./config.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
 import { FEATURES, parseFeatures } from "./prereqs.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
+import { redactSecrets } from "./redact.mjs";
 import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
+import { API_TOKEN_ENV, codexLogin, INVITE_ENV, teamAddress, teammateAdd, teamName } from "./team-access.mjs";
 
 const execFileAsync = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -176,34 +179,17 @@ async function spoolUpload(req) {
 }
 
 /**
- * The shared-bridge values are credentials for someone else's memory. They reach
- * the CLI through its environment, never its arguments, because a command line is
- * visible to every process on the machine. A value the form left blank is removed
- * rather than inherited from whatever environment started this UI.
- */
-const BRIDGE_SECRET_FIELDS = Object.freeze({
-  token: "HONCHO_MCP_BEARER_TOKEN",
-  accessClientId: "CF_ACCESS_CLIENT_ID",
-  accessClientSecret: "CF_ACCESS_CLIENT_SECRET",
-});
-
-function connectBridge(body) {
-  const env = { ...process.env };
-  for (const [field, name] of Object.entries(BRIDGE_SECRET_FIELDS)) {
-    delete env[name];
-    const value = typeof body?.[field] === "string" ? body[field].trim() : "";
-    if (value) env[name] = value;
-  }
-  const url = typeof body?.url === "string" ? body.url.trim() : "";
-  return runCli(["bridge", "connect", "--url", url], { timeout: 90_000, env });
-}
-
-/**
- * Sharing this server with the owner's other computers. The tunnel token, like
- * every other secret here, reaches the CLI through its environment and never its
- * arguments; left blank, the CLI keeps the token it saved before.
+ * Sharing this server: by hand with a tunnel token, through the Cloudflare API with
+ * the owner's API token, or on a teammate's computer with the owner's invite. Each
+ * of those is a secret, and like every other secret here it reaches the CLI through
+ * its environment and never its arguments, because a command line is visible to
+ * every process on the machine. A value the form left blank is removed rather than
+ * inherited from whatever environment started this UI; the CLI then uses the one it
+ * saved before, if any.
  */
 const SHARE_SECRET_FIELDS = Object.freeze({ tunnelToken: "HONCHO_TUNNEL_TOKEN" });
+const CLOUDFLARE_SECRET_FIELDS = Object.freeze({ apiToken: API_TOKEN_ENV });
+const INVITE_SECRET_FIELDS = Object.freeze({ invite: INVITE_ENV });
 
 function secretEnvironment(body, fields) {
   const env = { ...process.env };
@@ -215,13 +201,28 @@ function secretEnvironment(body, fields) {
   return env;
 }
 
-/** What `/api/server/share/enable` runs: only the address is an argument. */
+/**
+ * What `/api/server/share/enable` runs. With `cloudflare: true` the name, zone and
+ * owner's email are `--name=value` arguments and the API token is in the
+ * environment; by hand only the address is an argument.
+ */
 export function shareEnableInvocation(body) {
+  if (body?.cloudflare === true) {
+    return {
+      args: ["server", "share", "enable", "--cloudflare", ...inlineOption("name", body.name), ...inlineOption("zone", body.zone), ...inlineOption("email", body.email)],
+      env: secretEnvironment(body, CLOUDFLARE_SECRET_FIELDS),
+    };
+  }
   const publicUrl = typeof body?.publicUrl === "string" ? body.publicUrl.trim() : "";
   return {
     args: ["server", "share", "enable", "--public-url", publicUrl],
     env: secretEnvironment(body, SHARE_SECRET_FIELDS),
   };
+}
+
+/** What `/api/server/share/join` runs: no argument, the invite in the environment only. */
+export function shareJoinInvocation(body) {
+  return { args: ["server", "share", "join"], env: secretEnvironment(body, INVITE_SECRET_FIELDS) };
 }
 
 // POST only, so a cross-site GET can never read the gate token; the Host and
@@ -232,9 +233,79 @@ const SHARE_ROUTES = {
     const { args, env } = shareEnableInvocation(body);
     return runCli(args, { timeout: 900_000, env });
   },
+  "/api/server/share/join": async (body) => {
+    const { args, env } = shareJoinInvocation(body);
+    return runCli(args, { timeout: 900_000, env });
+  },
   "/api/server/share/disable": async () => runCli(["server", "share", "disable"], { timeout: 300_000 }),
   "/api/server/share/token": async () => runCli(["server", "share", "token"], { timeout: 30_000 }),
   "/api/server/share/rotate": async () => runCli(["server", "share", "rotate"], { timeout: 300_000 }),
+};
+
+/**
+ * The team, on the owner's computer (who may log in, and which teammates share a
+ * server), and on any computer, a teammate's memory in Claude Code and Codex
+ * (team-access.mjs). The owner's Cloudflare API token is the one saved by sharing,
+ * never one inherited from the environment that started this UI. Names and hosts
+ * are checked here and passed in their checked form, so none can read as an option.
+ */
+const EMAIL = /^[^\s@-][^\s@]*@[^\s@]+\.[^\s@]+$/;
+
+function teamEnvironment() {
+  return secretEnvironment({}, CLOUDFLARE_SECRET_FIELDS);
+}
+
+/** What `/api/teammates/<action>` runs, or null for a request without a valid name, email or address. */
+export function teammateInvocation(action, body = {}) {
+  const email = typeof body?.email === "string" ? body.email.trim() : "";
+  const name = teamName(body?.name);
+  if (action === "list") return ["teammates", "list"];
+  if (action === "connected") return ["teammates", "connected"];
+  if (action === "remove") return EMAIL.test(email) ? ["teammates", "remove", email] : null;
+  if (action === "unshare") return name ? ["teammates", "unshare", name] : null;
+  if (action === "disconnect") return name ? ["teammates", "disconnect", name] : null;
+  if (action === "connect") {
+    const address = teamAddress(body?.address);
+    return name && address.ok ? ["teammates", "connect", name, address.host] : null;
+  }
+  return null;
+}
+
+async function teammateRoute(action, body, timeout) {
+  const args = teammateInvocation(action, body);
+  if (!args) return { ok: false, error: "Give a valid email, a short name (lower-case letters, digits and -) or a server address." };
+  return runCli(args, { timeout, env: teamEnvironment() });
+}
+
+/**
+ * Adding a teammate who also shares a server returns the invite once, for the page
+ * to show. The CLI only ever writes an invite to a file, so this one route calls
+ * team-access.mjs itself instead of the CLI; everything but the invite is redacted
+ * as the CLI's output would be.
+ */
+async function addTeammate(body) {
+  const email = typeof body?.email === "string" ? body.email.trim() : "";
+  const sharing = body?.share === true;
+  const share = sharing ? teamName(body?.name) : null;
+  if (sharing && !share) return { ok: false, error: "Give the teammate's server a short name: lower-case letters, digits and -, up to 32 characters." };
+  const { invite, ...result } = await teammateAdd({ email, share, returnInvite: Boolean(share), env: teamEnvironment() });
+  return { ...redactSecrets(result), ...(typeof invite === "string" ? { invite } : {}) };
+}
+
+// POST only, like the share routes.
+const TEAM_ROUTES = {
+  "/api/teammates": async (body) => teammateRoute("list", body, 120_000),
+  "/api/teammates/add": async (body) => addTeammate(body),
+  "/api/teammates/remove": async (body) => teammateRoute("remove", body, 120_000),
+  "/api/teammates/unshare": async (body) => teammateRoute("unshare", body, 300_000),
+  "/api/teammates/connected": async (body) => teammateRoute("connected", body, 30_000),
+  "/api/teammates/connect": async (body) => teammateRoute("connect", body, 180_000),
+  "/api/teammates/disconnect": async (body) => teammateRoute("disconnect", body, 180_000),
+  // `codex mcp login` opens the browser and waits for it, so it is started here and
+  // answered as soon as it ends or shows its login address (team-access.mjs).
+  "/api/teammates/codex-login": async (body) => codexLogin({ name: body?.name }),
+  // Removes the shared-bridge settings 0.3.28 and before saved; nothing uses them now.
+  "/api/bridge/disconnect": async () => runCli(["bridge", "disconnect"], { timeout: 30_000 }),
 };
 
 /**
@@ -348,10 +419,7 @@ const BACKUP_ROUTES = {
 const ROUTES = {
   "/api/targets": async () => runCli(["target", "list"], { timeout: 30_000, env: secretEnvironment({}, TARGET_SECRET_FIELDS) }),
   ...TARGET_ROUTES,
-  "/api/bridge/status": async () => runCli(["bridge", "status"], { timeout: 30_000 }),
-  "/api/bridge/connect": async (body) => connectBridge(body),
-  "/api/bridge/test": async () => runCli(["bridge", "test"], { timeout: 90_000 }),
-  "/api/bridge/disconnect": async () => runCli(["bridge", "disconnect"], { timeout: 30_000 }),
+  ...TEAM_ROUTES,
   "/api/status": async () => ({
     detect: await runCli(["detect"], { timeout: 120_000 }),
     doctor: await runCli(["doctor"], { timeout: 120_000 }),
@@ -405,10 +473,9 @@ const SETUP_OPTIONS = new Set([
 ]);
 
 /**
- * A server's API token and its Cloudflare Access service token, like the
- * shared-bridge secrets, reach the CLI through its environment and never its
- * arguments. Left blank, the CLI keeps what it already saved for that same server.
- * These are the memory server's own names; the shared bridge's are above.
+ * A server's API token and its Cloudflare Access service token, like the share
+ * secrets, reach the CLI through its environment and never its arguments. Left
+ * blank, the CLI keeps what it already saved for that same server.
  */
 const SETUP_SECRET_FIELDS = Object.freeze({
   apiToken: "HONCHO_API_TOKEN",
@@ -571,7 +638,7 @@ export function createUiServer() {
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];
     if (!route && !hostRoute) return json(res, 404, { error: "Not found" });
-    if ((Object.hasOwn(SHARE_ROUTES, url.pathname) || Object.hasOwn(TARGET_ROUTES, url.pathname) || Object.hasOwn(BACKUP_ROUTES, url.pathname)) && req.method !== "POST") {
+    if ([SHARE_ROUTES, TARGET_ROUTES, BACKUP_ROUTES, TEAM_ROUTES].some((routes) => Object.hasOwn(routes, url.pathname)) && req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Method not allowed" });
     }
     let body = {};

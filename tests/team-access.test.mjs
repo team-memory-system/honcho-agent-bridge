@@ -11,11 +11,21 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { shareEnable } from "../scripts/share-manager.mjs";
+import { EventEmitter } from "node:events";
 import {
+  codexLogin,
   decodeInvite,
   encodeInvite,
+  knownTeamServers,
+  parseTeamAddresses,
+  registeredTeamServers,
+  teamAddress,
+  teamAddressText,
   teammateAdd,
+  teammateConnect,
+  teammateDisconnect,
   teammateRemove,
+  teammatesConnected,
   teammatesList,
   teammateUnshare,
   tunnelIdFromToken,
@@ -121,6 +131,7 @@ test("teammates add and remove edit the one email list; the owner's own email ca
     people: ["owner@example.com", "mate@example.com"],
     servers: [{ name: "memory", host: "memory.example.com" }],
     shared: [],
+    addressText: "memory https://memory.example.com/mcp",
   });
 
   const removed = await teammateRemove({ ...f.options, email: "mate@example.com" });
@@ -183,6 +194,8 @@ test("teammates add --share makes the teammate's server in Cloudflare and writes
 
   const listed = await teammatesList(f.options);
   assert.deepEqual(listed.shared, [{ name: "alice", host: "memory-alice.example.com", email: "alice@example.com" }]);
+  assert.equal(listed.addressText, "memory https://memory.example.com/mcp\nalice https://memory-alice.example.com/mcp");
+  assert.deepEqual(await knownTeamServers(f.options), [{ name: "alice", host: "memory-alice.example.com", url: "https://memory-alice.example.com/mcp", sources: ["team"] }], "the owner's own server is left out");
   const removed = await teammateRemove({ ...f.options, email: "alice@example.com" });
   assert.deepEqual(removed.stillShared, ["alice"], "taking the email off leaves the server to unshare");
 
@@ -266,4 +279,250 @@ test("the CLI never prints the API token, a tunnel token or an invite, and refus
       assert.equal(result.stderr.includes(secret), false, "stderr");
     }
   }
+});
+
+// ------------------------------------------------------- the asking side
+
+test("a team address is a host, https://host or https://host/mcp, and the 팀 주소 text reads back", () => {
+  for (const value of ["memory-alice.example.com", " https://Memory-Alice.example.com ", "https://memory-alice.example.com/", "https://memory-alice.example.com/mcp", "https://memory-alice.example.com/mcp/"]) {
+    assert.deepEqual(teamAddress(value), { ok: true, host: "memory-alice.example.com", url: "https://memory-alice.example.com/mcp" }, value);
+  }
+  for (const value of ["", "http://memory-alice.example.com/mcp", "https://memory-alice.example.com:8443/mcp", "https://memory-alice.example.com/mcp?x=1", "https://memory-alice.example.com/other", "https://user:pass@memory-alice.example.com/mcp", "localhost", "https://memory-alice.example.com/mcp#a"]) {
+    assert.equal(teamAddress(value).ok, false, value);
+  }
+
+  const text = teamAddressText([{ name: "memory", host: "memory.example.com" }, { name: "alice", host: "memory-alice.example.com" }]);
+  assert.equal(text, "memory https://memory.example.com/mcp\nalice https://memory-alice.example.com/mcp");
+  const parsed = parseTeamAddresses(`${text}\n\n# a comment\nmemory-bob.example.com\nnot a line at all\nBad_Name https://memory-carol.example.com/mcp\nalice https://memory-alice.example.com`);
+  assert.deepEqual(parsed.servers, [
+    { name: "memory", host: "memory.example.com", url: "https://memory.example.com/mcp" },
+    { name: "alice", host: "memory-alice.example.com", url: "https://memory-alice.example.com/mcp" },
+    { name: "bob", host: "memory-bob.example.com", url: "https://memory-bob.example.com/mcp" },
+  ]);
+  assert.deepEqual(parsed.errors.map((item) => item.line), [6, 7]);
+});
+
+// Claude Code and Codex as their CLIs would leave their files, without running either.
+async function clientFixture(t, { missing = [] } = {}) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-team-clients-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const home = path.join(root, "home");
+  await fsp.mkdir(path.join(home, ".codex"), { recursive: true });
+  const claudeFile = path.join(home, ".claude.json");
+  const codexFile = path.join(home, ".codex", "config.toml");
+  await fsp.writeFile(claudeFile, JSON.stringify({ numStartups: 3, mcpServers: { other: { type: "stdio", command: "other" } } }, null, 2));
+  await fsp.writeFile(codexFile, 'model = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other"\n');
+  const calls = [];
+  const clientRunner = async (client, args) => {
+    calls.push([client, ...args]);
+    if (missing.includes(client)) return { missing: true };
+    if (client === "claude") {
+      const document = JSON.parse(await fsp.readFile(claudeFile, "utf8"));
+      if (args[1] === "add") document.mcpServers[args[6]] = { type: args[3], url: args[7] };
+      if (args[1] === "remove") delete document.mcpServers[args[2]];
+      await fsp.writeFile(claudeFile, JSON.stringify(document, null, 2));
+    } else {
+      let text = await fsp.readFile(codexFile, "utf8");
+      const name = args[2];
+      text = text.replace(new RegExp(`\\n\\[mcp_servers\\.${name}\\]\\n[^\\[]*`), "\n");
+      if (args[1] === "add") text += `\n[mcp_servers.${name}]\nurl = "${args[4]}"\n`;
+      await fsp.writeFile(codexFile, text);
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const serverDirectory = path.join(root, "app", "server");
+  return { root, home, claudeFile, codexFile, calls, serverDirectory, options: { homeDir: home, env: {}, clientRunner, serverDirectory } };
+}
+
+test("teammates connect adds team-<name> to Claude Code and Codex with no token; the same address again changes nothing, another replaces it", async (t) => {
+  const f = await clientFixture(t);
+  const added = await teammateConnect({ ...f.options, name: "Alice", address: "memory-alice.example.com" });
+  assert.equal(added.ok, true, JSON.stringify(added));
+  assert.equal(added.entry, "team-alice");
+  assert.equal(added.url, "https://memory-alice.example.com/mcp");
+  assert.deepEqual(added.clients, { claude: { ok: true, action: "added" }, codex: { ok: true, action: "added" } });
+  assert.deepEqual(f.calls, [
+    ["claude", "mcp", "add", "--transport", "http", "--scope", "user", "team-alice", "https://memory-alice.example.com/mcp"],
+    ["codex", "mcp", "add", "team-alice", "--url", "https://memory-alice.example.com/mcp"],
+  ]);
+  assert.match(added.login.claude, /\/mcp/);
+  assert.equal(added.login.codex, "codex mcp login team-alice");
+  const claude = JSON.parse(await fsp.readFile(f.claudeFile, "utf8"));
+  assert.deepEqual(claude.mcpServers["team-alice"], { type: "http", url: "https://memory-alice.example.com/mcp" }, "no header, no token");
+  assert.deepEqual(claude.mcpServers.other, { type: "stdio", command: "other" });
+  assert.deepEqual(await registeredTeamServers({ homeDir: f.home, env: {} }), {
+    claude: { "team-alice": { url: "https://memory-alice.example.com/mcp", type: "http" } },
+    codex: { "team-alice": { url: "https://memory-alice.example.com/mcp" } },
+  });
+
+  f.calls.length = 0;
+  const again = await teammateConnect({ ...f.options, name: "alice", address: "https://memory-alice.example.com/mcp" });
+  assert.deepEqual(again.clients, { claude: { ok: true, action: "unchanged" }, codex: { ok: true, action: "unchanged" } });
+  assert.deepEqual(f.calls, [], "the same address runs neither CLI");
+
+  const moved = await teammateConnect({ ...f.options, name: "alice", address: "https://memory-alice2.example.com" });
+  assert.deepEqual(moved.clients, { claude: { ok: true, action: "replaced" }, codex: { ok: true, action: "replaced" } });
+  assert.deepEqual(f.calls.map((call) => `${call[0]} ${call[2]}`), ["claude remove", "claude add", "codex remove", "codex add"]);
+  assert.equal((await registeredTeamServers({ homeDir: f.home, env: {} })).codex["team-alice"].url, "https://memory-alice2.example.com/mcp");
+
+  for (const [name, address] of [["a b", "memory-alice.example.com"], ["alice", "http://memory-alice.example.com"], ["alice", "--url=x"]]) {
+    const refused = await teammateConnect({ ...f.options, name, address });
+    assert.equal(refused.ok, false, `${name} ${address}`);
+  }
+
+  f.calls.length = 0;
+  const gone = await teammateDisconnect({ ...f.options, name: "alice" });
+  assert.deepEqual(gone.clients, { claude: { ok: true, action: "removed" }, codex: { ok: true, action: "removed" } });
+  assert.deepEqual(f.calls, [["claude", "mcp", "remove", "team-alice", "--scope", "user"], ["codex", "mcp", "remove", "team-alice"]]);
+  const absent = await teammateDisconnect({ ...f.options, name: "alice" });
+  assert.deepEqual(absent.clients, { claude: { ok: true, action: "absent" }, codex: { ok: true, action: "absent" } });
+  assert.match(await fsp.readFile(f.codexFile, "utf8"), /\[mcp_servers\.other\]/, "other entries stay");
+});
+
+test("a missing client is named and the other is still connected; with neither, nothing is", async (t) => {
+  const one = await clientFixture(t, { missing: ["codex"] });
+  const result = await teammateConnect({ ...one.options, name: "alice", address: "memory-alice.example.com" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.missing, ["codex"]);
+  assert.equal(result.clients.claude.action, "added");
+  assert.match(result.clients.codex.error, /Codex \(codex\) was not found/);
+
+  const none = await clientFixture(t, { missing: ["claude", "codex"] });
+  const nothing = await teammateConnect({ ...none.options, name: "alice", address: "memory-alice.example.com" });
+  assert.equal(nothing.ok, false);
+  assert.deepEqual(nothing.missing, ["claude", "codex"]);
+  assert.match(nothing.error, /Neither Claude Code \(claude\) nor Codex \(codex\)/);
+});
+
+test("teammates connected lists the invite's team and the owner's, leaves this computer's own server out, and adds what the clients already have", async (t) => {
+  const f = await clientFixture(t);
+  const runtime = path.join(f.root, "app", "runtime");
+  await fsp.mkdir(runtime, { recursive: true });
+  await fsp.writeFile(path.join(runtime, "share.json"), JSON.stringify({
+    host: "memory-bob.example.com",
+    joined: true,
+    team: [{ name: "memory", host: "memory.example.com" }, { name: "bob", host: "memory-bob.example.com" }, { name: "alice", host: "memory-alice.example.com" }],
+  }));
+  assert.deepEqual((await knownTeamServers({ serverDirectory: f.serverDirectory })).map((item) => [item.name, item.sources]), [["memory", ["invite"]], ["alice", ["invite"]]]);
+
+  await teammateConnect({ ...f.options, name: "alice", address: "memory-alice.example.com" });
+  await teammateConnect({ ...f.options, name: "carol", address: "memory-carol.example.com", clientRunner: async (client, args) => (client === "codex" ? { missing: true } : f.options.clientRunner(client, args)) });
+  const listed = await teammatesConnected(f.options);
+  assert.equal(listed.ok, true);
+  assert.equal(listed.connected, 2);
+  const byName = Object.fromEntries(listed.servers.map((item) => [item.name, item]));
+  assert.deepEqual(Object.keys(byName), ["memory", "alice", "carol"]);
+  assert.deepEqual(byName.memory.claude, { registered: false });
+  assert.deepEqual(byName.alice.claude, { registered: true, url: "https://memory-alice.example.com/mcp", same: true });
+  assert.deepEqual(byName.alice.codex, { registered: true, url: "https://memory-alice.example.com/mcp", same: true });
+  assert.deepEqual(byName.carol.sources, []);
+  assert.deepEqual(byName.carol.codex, { registered: false });
+  assert.equal(byName.carol.entry, "team-carol");
+});
+
+function fakeChild() {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.killed = false;
+  child.kill = () => { child.killed = true; };
+  return child;
+}
+
+test("Codex login runs codex mcp login team-<name> and answers with the address it printed, or when it ends", async (t) => {
+  const f = await clientFixture(t);
+  assert.match((await codexLogin({ ...f.options, name: "alice" })).error, /not in Codex yet/);
+  await teammateConnect({ ...f.options, name: "alice", address: "memory-alice.example.com" });
+
+  const spawned = [];
+  const printing = fakeChild();
+  const waiting = await codexLogin({ ...f.options, name: "alice", waitMs: 5_000, loginSpawner: (_ctx, args) => {
+    spawned.push(args);
+    setImmediate(() => printing.stderr.emit("data", "Open this address to log in: https://login.example.com/authorize?client=team\n"));
+    return printing;
+  } });
+  assert.deepEqual(spawned, [["mcp", "login", "team-alice"]]);
+  assert.deepEqual(waiting, { entry: "team-alice", ok: true, state: "waiting", loginUrl: "https://login.example.com/authorize?client=team" });
+  printing.emit("exit", 0);
+
+  const quick = fakeChild();
+  const done = await codexLogin({ ...f.options, name: "alice", waitMs: 5_000, loginSpawner: () => { setImmediate(() => quick.emit("exit", 0)); return quick; } });
+  assert.deepEqual(done, { entry: "team-alice", ok: true, state: "done" });
+
+  const failing = fakeChild();
+  const failed = await codexLogin({ ...f.options, name: "alice", waitMs: 5_000, loginSpawner: () => {
+    setImmediate(() => { failing.stderr.emit("data", "Error: the server refused the login\n"); failing.emit("exit", 1); });
+    return failing;
+  } });
+  assert.deepEqual(failed, { entry: "team-alice", ok: false, state: "failed", error: "Error: the server refused the login" });
+
+  const silent = fakeChild();
+  const quiet = await codexLogin({ ...f.options, name: "alice", waitMs: 10, loginSpawner: () => silent });
+  assert.deepEqual(quiet, { entry: "team-alice", ok: true, state: "waiting", loginUrl: null });
+  silent.emit("exit", 0);
+  assert.equal((await codexLogin({ ...f.options, name: "alice", loginSpawner: () => null })).missing, true);
+});
+
+test("the CLI connects, lists and disconnects through the real client commands on PATH", { skip: process.platform === "win32" }, async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-team-cli-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const home = path.join(root, "home");
+  const bin = path.join(root, "bin");
+  await fsp.mkdir(path.join(home, ".codex"), { recursive: true });
+  await fsp.mkdir(bin);
+  const log = path.join(root, "calls.log");
+  // Stand-ins for claude and codex that record their arguments and edit the same files the real ones do.
+  const shim = (client) => `#!${process.execPath}
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify([${JSON.stringify(client)}, ...args]) + "\\n");
+const home = process.env.HOME;
+if (${JSON.stringify(client)} === "claude") {
+  const file = path.join(home, ".claude.json");
+  const doc = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+  doc.mcpServers = doc.mcpServers || {};
+  if (args[1] === "add") doc.mcpServers[args[6]] = { type: args[3], url: args[7] };
+  if (args[1] === "remove") delete doc.mcpServers[args[2]];
+  fs.writeFileSync(file, JSON.stringify(doc));
+} else {
+  const file = path.join(home, ".codex", "config.toml");
+  let text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  text = text.split("\\n[mcp_servers." + args[2] + "]")[0];
+  if (args[1] === "add") text += "\\n[mcp_servers." + args[2] + "]\\nurl = \\"" + args[4] + "\\"\\n";
+  fs.writeFileSync(file, text);
+}
+`;
+  for (const client of ["claude", "codex"]) await fsp.writeFile(path.join(bin, client), shim(client), { mode: 0o755 });
+  const env = {
+    PATH: bin,
+    HOME: home,
+    HONCHO_AGENT_BRIDGE_USER_HOME: home,
+    HONCHO_AGENT_BRIDGE_HOME: path.join(root, "app"),
+    HONCHO_AGENT_BRIDGE_SERVER_DIR: path.join(root, "app", "server"),
+    CLAUDE_CONFIG_DIR: "",
+    CODEX_HOME: "",
+  };
+  const connected = await cli(["teammates", "connect", "alice", "https://memory-alice.example.com/mcp"], env);
+  assert.equal(connected.code, 0, connected.stdout + connected.stderr);
+  assert.deepEqual(connected.json.clients, { claude: { ok: true, action: "added" }, codex: { ok: true, action: "added" } });
+  const calls = (await fsp.readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls, [
+    ["claude", "mcp", "add", "--transport", "http", "--scope", "user", "team-alice", "https://memory-alice.example.com/mcp"],
+    ["codex", "mcp", "add", "team-alice", "--url", "https://memory-alice.example.com/mcp"],
+  ]);
+  const listed = await cli(["teammates", "connected"], env);
+  assert.equal(listed.json.connected, 1);
+  assert.deepEqual(listed.json.clients, { claude: { name: "Claude Code", found: true }, codex: { name: "Codex", found: true } });
+  assert.equal((await cli(["teammates", "connect", "alice", "memory-alice.example.com"], env)).json.clients.codex.action, "unchanged");
+  const gone = await cli(["teammates", "disconnect", "alice"], env);
+  assert.deepEqual(gone.json.clients, { claude: { ok: true, action: "removed" }, codex: { ok: true, action: "removed" } });
+  const bad = await cli(["teammates", "connect", "alice", "http://memory-alice.example.com"], env);
+  assert.equal(bad.json.ok, false);
+  assert.match(bad.json.error, /https/);
+
+  await fsp.rm(path.join(bin, "codex"));
+  const half = await cli(["teammates", "connect", "bob", "memory-bob.example.com"], env);
+  assert.equal(half.json.ok, true);
+  assert.deepEqual(half.json.missing, ["codex"]);
 });

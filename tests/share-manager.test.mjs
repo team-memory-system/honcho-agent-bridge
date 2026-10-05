@@ -298,6 +298,28 @@ test("enable --cloudflare makes the Cloudflare half once, writes the .env and ke
   for (const request of cf.requests) assert.equal(request.authorization, `Bearer ${API_TOKEN}`);
 });
 
+test("enable by hand on another host clears the Access settings Cloudflare left, so /mcp does not check the old host's tag", async (t) => {
+  const cf = await cloudflareFake(t);
+  const f = await fixture(t, { env: { CLOUDFLARE_API_TOKEN: API_TOKEN }, cloudflare: cf });
+  const enabled = await shareEnable({ ...f.options, cloudflare: true, zone: "example.com", email: "owner@example.com" });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal((await f.readEnv()).HONCHO_ACCESS_TEAM_DOMAIN, TEAM_DOMAIN);
+
+  // The same host by hand keeps them: it is still behind the same Access application.
+  const same = await shareEnable({ ...f.options, env: {}, publicUrl: "https://memory.example.com" });
+  assert.equal(same.ok, true, JSON.stringify(same));
+  assert.deepEqual(same.mcp, { configured: true, missing: [] });
+
+  const moved = await shareEnable({ ...f.options, env: { HONCHO_TUNNEL_TOKEN: TUNNEL_TOKEN }, publicUrl: "https://memory2.example.com" });
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+  const environment = await f.readEnv();
+  assert.equal(environment.HONCHO_ACCESS_TEAM_DOMAIN || "", "");
+  assert.equal(environment.HONCHO_ACCESS_AUD || "", "");
+  assert.equal(environment.HONCHO_TUNNEL_TOKEN, TUNNEL_TOKEN);
+  assert.deepEqual(moved.mcp, { configured: false, missing: ["HONCHO_ACCESS_TEAM_DOMAIN", "HONCHO_ACCESS_AUD"] });
+  assert.equal(JSON.parse(await fsp.readFile(f.shareFile, "utf8")).host, "memory2.example.com");
+});
+
 test("enable --cloudflare asks for what it cannot know, and changes nothing until Cloudflare has answered", async (t) => {
   const cf = await cloudflareFake(t, {
     idps: [{ id: "g1", name: "Google", type: "google" }, { id: "g2", name: "Workspace", type: "google-apps" }],

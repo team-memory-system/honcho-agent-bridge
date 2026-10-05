@@ -32,7 +32,7 @@ import {
   hostStatus,
   hostStop,
 } from "./host-manager.mjs";
-import { securePrivateFile } from "./private-file-permissions.mjs";
+import { securePrivateFile, writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import {
   clearDockerFirstRun,
   DOCKER_LICENSE_WARNING,
@@ -1194,6 +1194,7 @@ async function serverPrepareUnlocked({
   ollamaLocator = null,
   runtimeInstaller = prepareRuntime,
   runtimeOptions = {},
+  shareOptions = {},
 } = {}) {
   requireServerProfile(profile);
   const installedDirectory = path.resolve(serverDirectory || installedServerDir());
@@ -1479,6 +1480,7 @@ async function serverPrepareUnlocked({
   }
 
   const committed = await transaction.commit();
+  const share = committed.ok ? await settleShareFor(profile, installed, shareOptions, privateFileOptions) : null;
   const result = {
     ok: committed.ok,
     ready: committed.ok,
@@ -1504,6 +1506,8 @@ async function serverPrepareUnlocked({
     host,
     hostStoppedForUpdate,
     ...(runtime ? { runtime } : {}),
+    ...(share ? { share } : {}),
+    ...(share?.warnings?.length ? { warnings: share.warnings } : {}),
   };
   return result;
 }
@@ -1517,6 +1521,68 @@ export async function serverPrepare(options = {}) {
     profile,
     serverDirectory: installed,
   }));
+}
+
+// ----------------------------------------------------- sharing from 0.3.28
+//
+// A server shared under 0.3.28 has COMPOSE_PROFILES=share in its .env but none of
+// the tunnel token, team MCP token or team peer the share services now need, and its
+// cloudflared still starts on the host at login. Started like that, tunnel and mcp
+// restart forever. Prepare and start therefore remove the old host tunnel (its token
+// moves into the .env when the .env has none) and, while any of the three is still
+// empty, take share out of COMPOSE_PROFILES and say how to turn it on again.
+
+export const SHARE_REQUIRED_SETTINGS = Object.freeze(["HONCHO_TUNNEL_TOKEN", "HONCHO_TEAM_MCP_TOKEN", "HONCHO_TEAM_PEER"]);
+const SHARE_PROFILE_NAME = "share";
+
+function profileList(environment) {
+  return String(environment.COMPOSE_PROFILES || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+/**
+ * Returns null when the .env never shared and no old host tunnel is left. `shareOptions`
+ * reach share-manager's removeHostTunnel (tests hand in their own runner and home).
+ */
+export async function settleShareProfile(directory, { shareOptions = {}, privateFileOptions = {} } = {}) {
+  const envFile = path.join(directory, ".env");
+  const before = await fsp.readFile(envFile, "utf8").catch(() => null);
+  if (before === null) return null;
+  const shared = profileList(parseEnvironment(before)).includes(SHARE_PROFILE_NAME);
+  if (!shared && !(await exists(path.join(runtimeRoot(directory), "cloudflared")))) return null;
+  const warnings = [];
+  let hostTunnelRemoved = null;
+  try {
+    // share-manager imports this module, hence the import at call time.
+    const { removeHostTunnel } = await import("./share-manager.mjs");
+    hostTunnelRemoved = (await removeHostTunnel({ serverDirectory: directory, ...shareOptions })).removed;
+  } catch (error) {
+    warnings.push(`The host tunnel of an older version could not be removed: ${String(error?.message || error).split(/\r?\n/)[0]}`);
+  }
+  // The old token may have just moved into the .env.
+  const text = await fsp.readFile(envFile, "utf8");
+  const environment = parseEnvironment(text);
+  const missing = SHARE_REQUIRED_SETTINGS.filter((key) => !String(environment[key] || "").trim());
+  if (!shared || !missing.length) return { profileDropped: false, hostTunnelRemoved, ...(warnings.length ? { warnings } : {}) };
+  const rest = profileList(environment).filter((item) => item !== SHARE_PROFILE_NAME);
+  const updated = rest.length
+    ? replaceEnvironment(text, { COMPOSE_PROFILES: rest.join(",") })
+    : `${text.split(/\r?\n/).filter((line) => !line.startsWith("COMPOSE_PROFILES=")).join("\n").replace(/\n+$/, "")}\n`;
+  await writePrivateFileAtomic(envFile, updated, privateFileOptions);
+  return {
+    profileDropped: true,
+    missing,
+    hostTunnelRemoved,
+    warnings: [
+      ...warnings,
+      `Sharing was turned off: it was set up by an older version and ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} empty. Turn it on again with server share enable (or server share join with the invite on a teammate's computer)`,
+    ],
+    next: "Turn sharing on again with server share enable, or server share join on a teammate's computer",
+  };
+}
+
+async function settleShareFor(profile, directory, shareOptions, privateFileOptions) {
+  if (profile !== "personal") return null;
+  return settleShareProfile(directory, { shareOptions, privateFileOptions });
 }
 
 async function waitForHealth(url, timeoutMs = 120_000) {
@@ -1546,6 +1612,7 @@ async function serverStartUnlocked({
   gatewaySourceFetcher,
   gatewayRunner,
   model,
+  shareOptions = {},
 } = {}) {
   requireServerProfile(profile);
   const installed = path.resolve(serverDirectory || installedServerDir());
@@ -1560,6 +1627,7 @@ async function serverStartUnlocked({
     gatewaySourceFetcher,
     gatewayRunner,
     model,
+    shareOptions,
   });
   if (!prepared.ok || !prepared.ready) return prepared;
   const host = profile === "personal"
@@ -1577,6 +1645,9 @@ async function serverStartUnlocked({
       next: "Resolve the reported host-service issue before starting Honcho containers",
     };
   }
+  // The prepare above settled the share profile; a start given a server prepared
+  // elsewhere settles it here, so share never comes up half set.
+  const share = preparedServer ? await settleShareFor(profile, installed, shareOptions) : prepared.share || null;
   const args = ["up", "-d", "--remove-orphans"];
   if (build) args.push("--build");
   const ports = await installedServerPorts(installed);
@@ -1609,6 +1680,8 @@ async function serverStartUnlocked({
     health,
     ...serverUrls(ports),
     compose: { stdout: composeResult.stdout.trim(), stderr: composeResult.stderr.trim() },
+    ...(share ? { share } : {}),
+    ...(share?.warnings?.length ? { warnings: share.warnings } : {}),
   };
   if (host) result.host = host;
   return result;

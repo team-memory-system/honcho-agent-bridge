@@ -82,8 +82,8 @@ export async function refreshStatus() {
   const collecting = ["claude", "codex"].filter((name) => agents[name]);
   app.status.collector = context?.configured
     ? { state: collecting.length ? "on" : "warn", text: collecting.length ? collecting.map((name) => (name === "claude" ? "Claude" : "Codex")).join("·") : "에이전트 없음" }
-    : context?.sharedBridge?.connected
-      ? { state: "on", text: "공유 창구만" }
+    : context?.teamMemory?.connected
+      ? { state: "on", text: "팀원 기억만" }
       : { state: "warn", text: "설정 전" };
   await Promise.allSettled(checks);
   emit();

@@ -12,7 +12,7 @@
   </script>
 </head>
 <body>
-  <div class="shell">
+  <div class="shell" id="team-memory-app">
     <aside class="rail" id="rail">
       <div class="mark"><span class="seal">기</span><strong>팀 메모리</strong></div>
       <nav class="nav" id="nav" aria-label="메뉴"></nav>
@@ -35,8 +35,8 @@
   </div>
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
-  <!-- The two forms that write this computer's setup. They are plain markup so the
-       fields the server accepts can be checked against what the page sends. -->
+  <!-- The form that writes this computer's setup. It is plain markup so the fields
+       the server accepts can be checked against what the page sends. -->
   <template id="tpl-setup-form">
     <!-- 대화 보내기 walks through this one form a step at a time (views/connect.js):
          each data-step group is one step, and the whole form is sent at the end. -->
@@ -47,12 +47,12 @@
           <label class="field wide">
             <span>서버 주소</span>
             <input class="input" name="honchoUrl" type="url" placeholder="https://…">
-            <small>서버를 둔 컴퓨터의 앱에서 서버 → 다른 컴퓨터에서 쓰기에 나오는 주소입니다.</small>
+            <small>서버를 둔 컴퓨터의 앱에서 서버 → 공유에 나오는 주소입니다.</small>
           </label>
           <label class="field wide">
             <span>서버 토큰</span>
             <input class="input" name="apiToken" type="password" placeholder="서버를 둔 컴퓨터에서 복사한 토큰">
-            <small>같은 곳의 서버 토큰 복사로 받습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요.</small>
+            <small>같은 곳의 서버 token 복사로 받습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요.</small>
           </label>
           <details class="field wide access-fields">
             <summary>Cloudflare Access 서비스 토큰</summary>
@@ -93,33 +93,6 @@
           </details>
         </div>
       </div>
-    </form>
-  </template>
-
-  <template id="tpl-bridge-form">
-    <form id="bridge-form" class="form-grid" autocomplete="off">
-      <label class="field wide">
-        <span>주소</span>
-        <input class="input" name="url" type="url" required placeholder="https://…">
-      </label>
-      <label class="field wide">
-        <span>토큰</span>
-        <input class="input" name="token" type="password" required>
-      </label>
-      <details class="field wide access-fields">
-        <summary>Cloudflare Access 서비스 토큰</summary>
-        <p class="muted">팀원 기억이 Cloudflare Access 뒤에 있으면 넣습니다. 팀원에게 받은 서비스 토큰입니다.</p>
-        <div class="form-grid">
-          <label class="field">
-            <span>서비스 토큰 ID</span>
-            <input class="input" name="accessClientId" type="password">
-          </label>
-          <label class="field">
-            <span>서비스 토큰 비밀</span>
-            <input class="input" name="accessClientSecret" type="password">
-          </label>
-        </div>
-      </details>
     </form>
   </template>
 

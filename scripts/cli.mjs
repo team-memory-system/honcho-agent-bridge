@@ -51,7 +51,10 @@ import {
   API_TOKEN_ENV,
   INVITE_ENV,
   teammateAdd,
+  teammateConnect,
+  teammateDisconnect,
   teammateRemove,
+  teammatesConnected,
   teammatesList,
   teammateUnshare,
 } from "./team-access.mjs";
@@ -79,28 +82,15 @@ const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
 const CURRENT_HOOK_MARKER = "--managed-by honcho-agent-bridge";
 const LEGACY_HOOK_MARKERS = ["codex-honcho-sync", "honcho-turn-gate"];
 
-// The config fields that point this machine's MCP server at someone else's shared
-// bridge. `setup` owns the rest of config.json and must carry these through.
-// `accessClientId/Secret` here are the bridge's Cloudflare service token; the
-// memory server's own is `honcho.access`, which setup owns and the bridge commands
-// never touch.
-const RELAY_FIELDS = ["mcpBridgeUrl", "mcpBridgeToken", "accessClientId", "accessClientSecret"];
-
-// Where `bridge connect` reads its secrets. A command line is visible to every
-// process on the machine, so they never travel there. These are the same names
-// mcp-server.mjs falls back to.
-const BRIDGE_SECRET_ENV = Object.freeze({
-  mcpBridgeToken: "HONCHO_MCP_BEARER_TOKEN",
-  accessClientId: "CF_ACCESS_CLIENT_ID",
-  accessClientSecret: "CF_ACCESS_CLIENT_SECRET",
-});
+// The config fields 0.3.28 and before wrote for relaying someone else's shared
+// bridge through this plugin's MCP server: its address, its token and its Cloudflare
+// service token. Nothing reads them any more (a teammate's memory is now a remote MCP
+// server in Claude Code and Codex, `teammates connect`). Setup no longer carries them
+// over, and `bridge disconnect` removes them on a computer that never runs setup.
+const OLD_RELAY_FIELDS = ["mcpBridgeUrl", "mcpBridgeToken", "accessClientId", "accessClientSecret"];
 
 // Where setup reads the token for a Honcho server that requires one.
 const HONCHO_API_TOKEN_ENV = "HONCHO_API_TOKEN";
-
-// A shared bridge sits behind Cloudflare, so its first answer can take far longer
-// than a local MCP server's.
-const BRIDGE_PROBE_TIMEOUT_MS = 30_000;
 
 function parseOptions(items) {
   const options = {};
@@ -231,29 +221,12 @@ async function inspectConfiguration() {
       config: null,
     };
   }
-  // Someone who only asks another person's memory has no collection settings at
-  // all; the bridge address is the whole of their configuration.
-  const valid = collectsConversations(document) || relaysToBridge(document);
+  const valid = collectsConversations(document);
   return { ok: valid, state: valid ? "valid" : "invalid-schema", path: configPath, config: valid ? document : null };
 }
 
 function collectsConversations(config) {
   return Boolean(config?.user?.peerId && config?.honcho?.baseUrl && config?.honcho?.workspaceId && config?.agents);
-}
-
-function relaysToBridge(config) {
-  return Boolean(config?.honcho?.mcpBridgeUrl);
-}
-
-/** Only relays: no hooks, no local Honcho, no installed runtime to check. */
-function relayOnly(config) {
-  return relaysToBridge(config) && !Object.values(config?.agents || {}).some(Boolean);
-}
-
-function relayFields(config) {
-  return Object.fromEntries(
-    RELAY_FIELDS.filter((key) => config?.honcho?.[key]).map((key) => [key, config.honcho[key]]),
-  );
 }
 
 async function claudePluginStatus() {
@@ -404,9 +377,6 @@ async function setupPlan(options = {}) {
       workspaceId: optionString(options.workspace, existing?.honcho?.workspaceId || "memory"),
       ...(apiToken ? { apiToken } : {}),
       ...(access ? { access } : {}),
-      // Written by `bridge connect`, not by this plan. Rebuilding the config without
-      // them would silently disconnect a shared bridge on every setup run.
-      ...relayFields(existing),
     },
     agents,
     // Written by `target add|set|remove`. Setup rebuilds the rest of the file and
@@ -840,12 +810,9 @@ async function installedRuntimeVersion(runtimeDir) {
   }
 }
 
-// `only` is mcp-server.mjs's `--only bridge|local`. On a computer with its own
-// memory and a shared bridge the server lists both, and keeps listing its own tools
-// when the bridge is down, so a plain probe would not prove the bridge answers.
-async function probeMcpServer(serverPath, timeoutMs = 2500, env = process.env, { only = "" } = {}) {
+async function probeMcpServer(serverPath, timeoutMs = 2500, env = process.env) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [serverPath, "--provider", "doctor", ...(only ? ["--only", only] : [])], {
+    const child = spawn(process.execPath, [serverPath, "--provider", "doctor"], {
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -914,20 +881,12 @@ async function doctor() {
   const paths = installPaths(config);
   const checks = [];
   checks.push({ name: "configuration", ...configuration, config: undefined });
-  if (relayOnly(config)) {
-    // Nothing is collected here: the plugin's own MCP server relays to the bridge,
-    // so there is no runtime to install and no local Honcho to reach.
-    const probe = await probeBridge();
-    checks.push({ name: "shared-bridge", ...probe, url: publicUrl(config.honcho.mcpBridgeUrl) });
-    return { ok: checks.every((check) => check.ok), version: VERSION, checks };
-  }
   const requiredRuntimeFiles = [
     "main.mjs",
     "cli.mjs",
     "queue.mjs",
     "collector.mjs",
     "mcp-server.mjs",
-    "mcp-shared-tools.mjs",
     "ui.mjs",
     "file-lock.mjs",
     "version.mjs",
@@ -955,12 +914,7 @@ async function doctor() {
     checks.push({ name: "honcho-health", ...health, url: publicUrl(config.honcho.baseUrl) });
     checks.push({ name: "honcho-workspaces", ...(await probeWorkspaceAccess(config)), url: publicUrl(config.honcho.baseUrl) });
     const mcpPath = path.join(paths.runtimeDir, "mcp-server.mjs");
-    // Own memory and a shared bridge: the agent gets both, so both are checked.
-    checks.push({ name: "mcp", ...(await probeMcpServer(mcpPath, undefined, undefined, { only: "local" })), path: mcpPath });
-    if (relaysToBridge(config)) {
-      const probe = await probeMcpServer(mcpPath, BRIDGE_PROBE_TIMEOUT_MS, bridgeProbeEnvironment(), { only: "bridge" });
-      checks.push({ name: "shared-bridge", ...probe, path: mcpPath, url: publicUrl(config.honcho.mcpBridgeUrl) });
-    }
+    checks.push({ name: "mcp", ...(await probeMcpServer(mcpPath)), path: mcpPath });
     for (const [provider, enabled] of Object.entries(config.agents || {})) {
       if (!enabled) continue;
       const plugin = provider === "claude" ? await claudePluginStatus() : await codexPluginStatus();
@@ -989,133 +943,61 @@ async function doctor() {
   return { ok: checks.every((check) => check.ok), version: VERSION, checks };
 }
 
-// ------------------------------------------------------------- shared bridge
+// ------------------------------------------------------- the old shared bridge
 //
-// Asking someone else's memory needs four values in config.json and nothing else:
-// no hooks, no local Honcho. `bridge connect` writes them, checks that the plugin's
-// own MCP server really reaches the bridge with them, and puts the file back if it
-// does not.
+// Until 0.3.28 `bridge connect` saved a teammate's bridge address, its token and a
+// Cloudflare service token in config.json, and the plugin's MCP server relayed it.
+// That relay is gone; `bridge disconnect` takes the saved values out, and deletes a
+// file that held nothing else.
 
 function isLoopbackHostname(hostname) {
   const value = String(hostname).toLowerCase().replace(/^\[|\]$/g, "");
   return value === "localhost" || value === "::1" || /^127(\.\d{1,3}){3}$/.test(value);
 }
 
-function bridgeUrlIssues(value) {
+function serverUrlIssues(value) {
   let url;
   try {
     url = new URL(value);
   } catch {
-    return ["the bridge address is not a valid URL"];
+    return ["the server address is not a valid URL"];
   }
   const issues = [];
-  if (!["http:", "https:"].includes(url.protocol)) issues.push("the bridge address must use https");
+  if (!["http:", "https:"].includes(url.protocol)) issues.push("the server address must use https");
   else if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
-    issues.push("the bridge address must use https unless it is on this machine, or its token travels in the clear");
+    issues.push("the server address must use https unless it is on this machine, or its token travels in the clear");
   }
   if (url.username || url.password || url.search || url.hash) {
-    issues.push("the bridge address must not contain credentials, query parameters, or a fragment");
+    issues.push("the server address must not contain credentials, query parameters, or a fragment");
   }
   return issues;
 }
 
-/** What a caller may see about the connection: never a secret, only whether one is set. */
-function bridgeState(config) {
-  const honcho = config?.honcho || {};
-  return {
-    connected: Boolean(honcho.mcpBridgeUrl),
-    url: honcho.mcpBridgeUrl ? publicUrl(honcho.mcpBridgeUrl) : null,
-    hasBridgeCredential: Boolean(honcho.mcpBridgeToken),
-    hasAccessCredential: Boolean(honcho.accessClientId && honcho.accessClientSecret),
-  };
-}
-
-/** The probe must prove the saved file works, not that this process's environment does. */
-function bridgeProbeEnvironment() {
-  const env = { ...process.env };
-  for (const name of Object.values(BRIDGE_SECRET_ENV)) delete env[name];
-  return env;
-}
-
-function probeBridge() {
-  return probeMcpServer(path.join(SCRIPT_DIR, "mcp-server.mjs"), BRIDGE_PROBE_TIMEOUT_MS, bridgeProbeEnvironment(), { only: "bridge" });
-}
-
-async function bridgeStatus() {
-  const configuration = await inspectConfiguration();
-  return { ok: true, ...bridgeState(configuration.config) };
-}
-
-async function bridgeConnect(options = {}) {
-  const issues = [];
-  const onCommandLine = Object.keys(options).filter((key) => /token|secret|clientid/i.test(key));
-  if (onCommandLine.length) {
-    issues.push(`pass ${onCommandLine.join(", ")} through ${Object.values(BRIDGE_SECRET_ENV).join(", ")}, not the command line`);
+async function oldBridgeRemove() {
+  const configPath = installPaths().configPath;
+  if (!(await pathExists(configPath))) return { ok: true, changed: false };
+  let document;
+  try {
+    document = JSON.parse(await fsp.readFile(configPath, "utf8"));
+  } catch (error) {
+    return { ok: false, issues: [`refusing to rewrite ${configPath}: it is not valid JSON (${error?.message || error})`] };
   }
-  const url = optionString(options.url, "");
-  if (url) issues.push(...bridgeUrlIssues(url));
-  else issues.push("--url is required");
-  const secrets = Object.fromEntries(
-    Object.entries(BRIDGE_SECRET_ENV).map(([field, name]) => [field, String(process.env[name] || "").trim()]),
-  );
-  if (!secrets.mcpBridgeToken) issues.push(`the bridge token is required in ${BRIDGE_SECRET_ENV.mcpBridgeToken}`);
-  if (Boolean(secrets.accessClientId) !== Boolean(secrets.accessClientSecret)) {
-    issues.push("the Cloudflare service token needs both its ID and its secret");
+  if (!document || typeof document !== "object" || Array.isArray(document) || document.version !== CONFIG_VERSION) {
+    return { ok: false, issues: [`refusing to rewrite ${configPath}: it is not this version's configuration`] };
   }
-  const configuration = await inspectConfiguration();
-  if (configuration.state !== "missing" && configuration.state !== "valid") {
-    issues.push(`refusing to rewrite ${configuration.path}: it is ${configuration.state}`);
-  }
-  if (issues.length) return { ok: false, saved: false, issues, ...bridgeState(configuration.config) };
-
-  const paths = installPaths(configuration.config);
+  if (!OLD_RELAY_FIELDS.some((key) => key in (document.honcho || {}))) return { ok: true, changed: false };
+  const paths = installPaths(document);
   return withSetupLock(paths.appHome, async () => {
-    const snapshot = await fileSnapshot(paths.configPath);
-    const base = configuration.config || { version: CONFIG_VERSION, agents: { codex: false, claude: false } };
-    const honcho = { ...(base.honcho || {}) };
-    for (const key of RELAY_FIELDS) delete honcho[key];
-    honcho.mcpBridgeUrl = url;
-    for (const [field, value] of Object.entries(secrets)) if (value) honcho[field] = value;
-    const next = { ...base, honcho };
-    await writeJsonAtomic(paths.configPath, next, { backup: snapshot.existed, privateFile: true });
-
-    const probe = await probeBridge();
-    if (!probe.ok) {
-      await restoreFileSnapshot(paths.configPath, snapshot, { privateFile: true });
-      return { ok: false, saved: false, error: probe.error || "the bridge did not answer", ...bridgeState(base) };
-    }
-    return { ok: true, saved: true, tools: probe.toolNames, ...bridgeState(next), restartRequired: true };
-  });
-}
-
-async function bridgeTest() {
-  const configuration = await inspectConfiguration();
-  const state = bridgeState(configuration.config);
-  if (!state.connected) return { ok: false, ...state, error: "no shared bridge is configured" };
-  const probe = await probeBridge();
-  return { ok: probe.ok, ...state, tools: probe.toolNames || [], ...(probe.ok ? {} : { error: probe.error }) };
-}
-
-async function bridgeDisconnect() {
-  const configuration = await inspectConfiguration();
-  if (configuration.state === "missing") return { ok: true, changed: false, ...bridgeState(null) };
-  if (configuration.state !== "valid") {
-    return { ok: false, issues: [`refusing to rewrite ${configuration.path}: it is ${configuration.state}`] };
-  }
-  if (!relaysToBridge(configuration.config)) return { ok: true, changed: false, ...bridgeState(configuration.config) };
-  const paths = installPaths(configuration.config);
-  return withSetupLock(paths.appHome, async () => {
-    const honcho = { ...configuration.config.honcho };
-    for (const key of RELAY_FIELDS) delete honcho[key];
-    const next = { ...configuration.config, honcho };
-    // A file that only ever held the bridge would be left with nothing valid in it,
-    // and the next connect would then refuse to touch it.
+    const honcho = { ...document.honcho };
+    for (const key of OLD_RELAY_FIELDS) delete honcho[key];
+    const next = { ...document, honcho };
+    // A file that only ever held the bridge has nothing left worth keeping.
     if (!collectsConversations(next)) {
-      await fsp.rm(paths.configPath, { force: true });
-      return { ok: true, changed: true, removedConfig: true, ...bridgeState(null), restartRequired: true };
+      await fsp.rm(configPath, { force: true });
+      return { ok: true, changed: true, removedConfig: true, restartRequired: true };
     }
-    await writeJsonAtomic(paths.configPath, next, { backup: true, privateFile: true });
-    return { ok: true, changed: true, ...bridgeState(next), restartRequired: true };
+    await writeJsonAtomic(configPath, next, { backup: true, privateFile: true });
+    return { ok: true, changed: true, restartRequired: true };
   });
 }
 
@@ -1187,7 +1069,7 @@ function targetSecretsOnCommandLine(options) {
 }
 
 function targetUrlIssues(value) {
-  return bridgeUrlIssues(value).map((issue) => issue.replace("the bridge address", "the server address"));
+  return serverUrlIssues(value);
 }
 
 /** `--folders a,b`: absolute folders (or `~/...`), resolved, one spelling each. */
@@ -1605,9 +1487,10 @@ async function targetCommand(args) {
 // ---------------------------------------------------------------- setup screen
 
 const UI_HOST = "127.0.0.1";
-// Present only in a page that has the shared-bridge section, so an older setup
-// screen still running from a previous install is not mistaken for this one.
-const UI_MARKER = 'id="bridge-form"';
+// Present only in a page that connects teammates' memory as remote MCP servers, so
+// an older setup screen still running from a previous install is not mistaken for
+// this one.
+const UI_MARKER = 'id="team-memory-app"';
 
 async function uiState(url) {
   const controller = new AbortController();
@@ -1715,6 +1598,9 @@ function usage() {
       "teammates add <email> [--share <name> --invite-out <file>] (the Cloudflare API token in CLOUDFLARE_API_TOKEN, else the saved one)",
       "teammates remove <email>",
       "teammates unshare <name>",
+      "teammates connect <name> <host|https://host/mcp> (adds team-<name> to Claude Code and Codex as a remote MCP server; no token is stored)",
+      "teammates disconnect <name>",
+      "teammates connected",
       "host plan [--profile personal]",
       "host prepare [--profile personal]",
       "host start [--profile personal]",
@@ -1722,10 +1608,7 @@ function usage() {
       "host stop [--profile personal]",
       "gateway open",
       "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN; its Cloudflare Access service token in HONCHO_CF_ACCESS_CLIENT_ID, HONCHO_CF_ACCESS_CLIENT_SECRET)",
-      "bridge status",
-      "bridge connect --url <address> (secrets in HONCHO_MCP_BEARER_TOKEN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)",
-      "bridge test",
-      "bridge disconnect",
+      "bridge disconnect (removes the shared-bridge settings 0.3.28 and before saved)",
       "target list",
       "target add <id> --url <https://host> --folders <dir,dir> [--label <text>] [--workspace <id>] [--user-peer <id>] [--agents claude,codex] (its API token in HONCHO_TARGET_API_TOKEN; its Cloudflare Access service token in HONCHO_TARGET_CF_ACCESS_CLIENT_ID, HONCHO_TARGET_CF_ACCESS_CLIENT_SECRET)",
       "target set <id> [--folders <dir,dir>] [--enabled true|false] [--label <text>] [--workspace <id>] [--user-peer <id>] [--agents claude,codex]",
@@ -1822,7 +1705,11 @@ async function teammatesCommand(args) {
   }
   if (action === "remove") return teammateRemove({ email: positional[0] || "" });
   if (action === "unshare") return teammateUnshare({ name: positional[0] || "" });
-  return { ok: false, error: `Unknown teammates action: ${action}. Expected list, add, remove or unshare.` };
+  // The asking side: a teammate's server in Claude Code and Codex. No Cloudflare token.
+  if (action === "connect") return teammateConnect({ name: positional[0] || "", address: positional[1] || "" });
+  if (action === "disconnect") return teammateDisconnect({ name: positional[0] || "" });
+  if (action === "connected") return teammatesConnected();
+  return { ok: false, error: `Unknown teammates action: ${action}. Expected list, add, remove, unshare, connect, disconnect or connected.` };
 }
 
 /**
@@ -1898,12 +1785,9 @@ async function main() {
     if (subcommand === "apply") return setupApply(options);
   }
   if (command === "bridge") {
-    const subcommand = args.shift() || "status";
-    const options = parseOptions(args);
-    if (subcommand === "status") return bridgeStatus();
-    if (subcommand === "connect") return bridgeConnect(options);
-    if (subcommand === "test") return bridgeTest();
-    if (subcommand === "disconnect") return bridgeDisconnect();
+    const subcommand = args.shift() || "";
+    if (subcommand === "disconnect") return oldBridgeRemove();
+    return { ok: false, error: "The shared-bridge relay was removed: connect a teammate's memory with teammates connect <name> <host>; bridge disconnect removes the old settings" };
   }
   if (command === "target") return targetCommand(args);
   if (command === "teammates") return teammatesCommand(args);

@@ -58,9 +58,14 @@ function memoryAnswers() {
   return app.status.honcho.state === "on";
 }
 
+/** Claude Code or Codex here has a teammate's memory as a team-* MCP server. */
+function teamConnected() {
+  return Boolean(app.context?.teamMemory?.connected);
+}
+
 function setupDone() {
   const context = app.context;
-  return Boolean(context?.configured || context?.sharedBridge?.connected || context?.localServer || memoryAnswers());
+  return Boolean(context?.configured || teamConnected() || context?.localServer || memoryAnswers());
 }
 
 /** A server here, one about to be installed here, or a gateway answering here. */
@@ -104,7 +109,7 @@ function gate(name) {
       fix: ["게이트웨이로", "models"],
     };
   }
-  if (!context.localServer && context.sharedBridge?.connected && !context.configured && !memoryAnswers()) {
+  if (!context.localServer && teamConnected() && !context.configured && !memoryAnswers()) {
     return {
       reason: "대화 보내기를 켜면 열립니다",
       detail: "이 컴퓨터는 팀원 기억에만 연결돼 있습니다. 기억과 묻기는 내 기억 서버를 봅니다.",
@@ -154,11 +159,11 @@ function renderMachine() {
       lines.push(h("a", { href: here ? "#/server" : "#/connect/collect" }, light(honcho.state), h("span", {}, "기억 서버"), h("small", {}, honcho.text)));
     }
     if (here) lines.push(h("a", { href: "#/models" }, light(gateway.state), h("span", {}, "구독 게이트웨이"), h("small", {}, gateway.text)));
-    if (context.configured || !context.sharedBridge?.connected) {
+    if (context.configured || !teamConnected()) {
       lines.push(h("a", { href: "#/connect/collect" }, light(collector.state), h("span", {}, "대화 보내기"), h("small", {}, collector.text)));
     }
-    if (context.sharedBridge?.connected) {
-      lines.push(h("a", { href: "#/connect/share" }, light("on"), h("span", {}, "팀원 기억"), h("small", {}, "연결됨")));
+    if (teamConnected()) {
+      lines.push(h("a", { href: "#/connect/share" }, light("on"), h("span", {}, "팀원 기억"), h("small", {}, `${context.teamMemory.connected}곳 연결`)));
     }
   }
   clear($("#machine"), lines);
@@ -274,7 +279,8 @@ function palette() {
     { label: "구독 계정 추가", hint: "게이트웨이", screen: "models", run: () => go("models") },
     { label: "대화 보내기 설정", hint: "연결", screen: "connect", run: () => go("connect/collect") },
     { label: "회사 서버에도 보내기", hint: "연결", screen: "connect", run: () => go("connect/targets") },
-    { label: "팀원 기억에 연결", hint: "연결", screen: "connect", run: () => go("connect/share") },
+    { label: "팀원 기억 연결", hint: "연결", screen: "connect", run: () => go("connect/share") },
+    { label: "팀원과 공유", hint: "서버", screen: "server", run: () => go("server") },
     { label: "ChatGPT 기록 가져오기", hint: "연결", screen: "connect", run: () => go("connect/import") },
     { label: "서버 점검", hint: "서버", screen: "server", run: () => go("server") },
     { label: "MCP 도구 켜고 끄기", hint: "도구", screen: "tools", run: () => go("tools") },

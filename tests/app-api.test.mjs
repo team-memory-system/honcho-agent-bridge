@@ -176,6 +176,26 @@ test("the page's context says where things are, and never carries the token", as
   assert.equal(JSON.stringify(context).includes("server-side-token"), false);
 });
 
+test("the context counts the teammates' memory Claude Code and Codex reach, and says when the old bridge settings are still saved", async (t) => {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-team-context-"));
+  t.after(() => fsp.rm(home, { recursive: true, force: true }));
+  await fsp.mkdir(path.join(home, ".codex"), { recursive: true });
+  await fsp.writeFile(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { "team-alice": { type: "http", url: "https://memory-alice.example.com/mcp" }, other: { command: "x" } } }));
+  await fsp.writeFile(path.join(home, ".codex", "config.toml"), '[mcp_servers.team-alice]\nurl = "https://memory-alice.example.com/mcp"\n\n[mcp_servers.team-bob]\nurl = "https://memory-bob.example.com/mcp"\n');
+  const teamOptions = { homeDir: home, env: {} };
+  const config = { version: 1, user: { peerId: "user_t" }, honcho: { baseUrl: "http://127.0.0.1:1", workspaceId: "ws" }, agents: { codex: true } };
+  const context = await appContext({ config, ports: { installed: false }, teamOptions });
+  assert.deepEqual(context.teamMemory, { connected: 2, claude: 1, codex: 2 });
+  assert.equal(context.oldBridge, false);
+  assert.equal("sharedBridge" in context, false);
+
+  const leftover = await appContext({ config: { version: 1, honcho: { mcpBridgeUrl: "https://bridge.example.com/mcp", mcpBridgeToken: "old-token" }, agents: { codex: false, claude: false } }, ports: { installed: false }, teamOptions: { homeDir: path.join(home, "none"), env: {} } });
+  assert.equal(leftover.oldBridge, true);
+  assert.equal(leftover.configured, false, "a file only the old bridge wrote does not count as set up");
+  assert.deepEqual(leftover.teamMemory, { connected: 0, claude: 0, codex: 0 });
+  assert.equal(JSON.stringify(leftover).includes("old-token"), false);
+});
+
 test("a conversation is named by what the person first said, not by a harness preamble", async () => {
   const page = await sessionsPage({ workspace: "memory", source: "codex" }, { config: null, ports: { installed: false } });
   assert.equal(page.total, 1);

@@ -16,7 +16,10 @@ import {
   serverStatus,
   serverStop,
   serverVerify,
+  settleShareProfile,
+  SHARE_REQUIRED_SETTINGS,
 } from "../scripts/server-manager.mjs";
+import { LAUNCHD_LABEL } from "../scripts/share-manager.mjs";
 
 // Nothing in this file may reach the network. Every call that could fetch the
 // Honcho source is given its own runner or a stub.
@@ -974,6 +977,114 @@ test("personal start never invokes Compose when the host runtime is unhealthy", 
   assert.equal(result.ok, false);
   assert.equal(composeCalled, false);
   assert.equal(result.host.issues[0], "router unavailable");
+});
+
+// 0.3.28 and before ran the tunnel on the host and had no /mcp; after the update the
+// share profile also starts mcp and the tunnel in Compose, which need these settings.
+async function oldSharedServer(t, { profiles = "debug,share", values = {} } = {}) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-old-share-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, "app", "server");
+  const home = path.join(root, "home");
+  const oldDir = path.join(root, "app", "runtime", "cloudflared");
+  await fsp.mkdir(directory, { recursive: true });
+  await fsp.mkdir(oldDir, { recursive: true });
+  const lines = ["POSTGRES_PASSWORD=db-secret", "HONCHO_GATE_TOKEN=gate-token-value", "HONCHO_TUNNEL_TOKEN=", "HONCHO_TEAM_MCP_TOKEN=", "HONCHO_TEAM_PEER="];
+  for (const [key, value] of Object.entries(values)) {
+    const index = lines.findIndex((line) => line.startsWith(`${key}=`));
+    lines[index] = `${key}=${value}`;
+  }
+  if (profiles) lines.push(`COMPOSE_PROFILES=${profiles}`);
+  await fsp.writeFile(path.join(directory, ".env"), `${lines.join("\n")}\n`, { mode: 0o600 });
+  await fsp.writeFile(path.join(oldDir, "tunnel-token"), "eyJhIjoiYWNjb3VudCIsInQiOiJ0dW5uZWwiLCJzIjoic2VjcmV0In0=", { mode: 0o600 });
+  await fsp.writeFile(path.join(oldDir, "cloudflared"), "binary", { mode: 0o755 });
+  const plist = path.join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+  await fsp.mkdir(path.dirname(plist), { recursive: true });
+  await fsp.writeFile(plist, "<plist/>");
+  const calls = [];
+  let loaded = true;
+  const run = async (command, args) => {
+    calls.push([command, ...args]);
+    if (command === "/bin/launchctl" && args[0] === "print") return loaded ? { code: 0, stdout: "state = running\n", stderr: "" } : { code: 113, stdout: "", stderr: "not found" };
+    if (command === "/bin/launchctl" && args[0] === "bootout") loaded = false;
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  return { directory, home, oldDir, plist, calls, shareOptions: { homeDir: home, platform: "darwin", uid: 501, run, env: {} }, readEnv: async () => parseEnv(await fsp.readFile(path.join(directory, ".env"), "utf8")) };
+}
+
+test("after an update, a share profile without its tunnel, mcp and peer settings is dropped and the old host tunnel removed", async (t) => {
+  assert.deepEqual(SHARE_REQUIRED_SETTINGS, ["HONCHO_TUNNEL_TOKEN", "HONCHO_TEAM_MCP_TOKEN", "HONCHO_TEAM_PEER"]);
+  const f = await oldSharedServer(t);
+  const settled = await settleShareProfile(f.directory, { shareOptions: f.shareOptions });
+  assert.equal(settled.profileDropped, true);
+  assert.deepEqual(settled.missing, ["HONCHO_TEAM_MCP_TOKEN", "HONCHO_TEAM_PEER"], "the old tunnel token moved into the .env first");
+  assert.equal(settled.hostTunnelRemoved, "launchd");
+  assert.match(settled.warnings.at(-1), /server share enable \(or server share join/);
+  const environment = await f.readEnv();
+  assert.equal(environment.COMPOSE_PROFILES, "debug");
+  assert.equal(environment.HONCHO_GATE_TOKEN, "gate-token-value", "nothing else changes");
+  await assert.rejects(fsp.access(f.plist));
+  await assert.rejects(fsp.access(f.oldDir));
+  assert.ok(f.calls.some((call) => call[0] === "/bin/launchctl" && call[1] === "bootout"));
+  if (process.platform !== "win32") assert.equal((await fsp.stat(path.join(f.directory, ".env"))).mode & 0o777, 0o600);
+
+  // Run again, nothing more happens.
+  assert.equal(await settleShareProfile(f.directory, { shareOptions: f.shareOptions }), null);
+
+  const only = await oldSharedServer(t, { profiles: "share" });
+  assert.equal((await settleShareProfile(only.directory, { shareOptions: only.shareOptions })).profileDropped, true);
+  assert.equal("COMPOSE_PROFILES" in (await only.readEnv()), false, "an empty profile list is removed, not left blank");
+});
+
+test("prepare drops a half-set share profile once the update is in place", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-prepare-share-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const source = await personalBundle(root);
+  const destination = path.join(root, "app", "server");
+  await fsp.mkdir(destination, { recursive: true });
+  await fsp.writeFile(path.join(destination, ".env"), "POSTGRES_PASSWORD=private-existing-password\nHONCHO_GATE_TOKEN=gate-token-value\nCOMPOSE_PROFILES=share\n", { mode: 0o600 });
+  const result = await serverPrepare({
+    profile: "personal",
+    hostRuntime: { status: async () => ({ running: false }), prepare: async () => ({ ok: true, ready: true }) },
+    preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
+    honchoSourceFetcher: noFetch,
+    ...gatewayStub(),
+    serverDirectory: destination,
+    shareOptions: { homeDir: path.join(root, "home"), platform: "darwin", uid: 501, env: {}, run: async () => ({ code: 113, stdout: "", stderr: "not found" }) },
+  });
+  assert.equal(result.ok, true, result.issues?.join(", "));
+  assert.equal(result.share.profileDropped, true);
+  assert.deepEqual(result.share.missing, SHARE_REQUIRED_SETTINGS);
+  assert.match(result.warnings.join("\n"), /server share enable/);
+  const environment = parseEnv(await fsp.readFile(path.join(destination, ".env"), "utf8"));
+  assert.equal("COMPOSE_PROFILES" in environment, false);
+  assert.equal(environment.HONCHO_GATE_TOKEN, "gate-token-value");
+});
+
+test("a share profile with every setting filled is kept, and start says when it dropped one", async (t) => {
+  const full = await oldSharedServer(t, { values: { HONCHO_TUNNEL_TOKEN: "eyJhIjoiYSIsInQiOiJ0IiwicyI6InMifQ==", HONCHO_TEAM_MCP_TOKEN: "mcp-token-value", HONCHO_TEAM_PEER: "owner_peer" } });
+  const kept = await settleShareProfile(full.directory, { shareOptions: full.shareOptions });
+  assert.equal(kept.profileDropped, false);
+  assert.equal(kept.hostTunnelRemoved, "launchd", "the old host tunnel goes either way");
+  assert.equal((await full.readEnv()).COMPOSE_PROFILES, "debug,share");
+  assert.equal((await full.readEnv()).HONCHO_TUNNEL_TOKEN, "eyJhIjoiYSIsInQiOiJ0IiwicyI6InMifQ==", "a token already in the .env is not replaced");
+
+  const old = await oldSharedServer(t);
+  const composeCalls = [];
+  const started = await serverStart({
+    profile: "personal",
+    hostRuntime: { start: async () => ({ ok: true, running: true }), stop: async () => ({ ok: true }) },
+    preparedServer: { ok: true, ready: true, installation: {}, environment: {} },
+    serverDirectory: old.directory,
+    composeRunner: async (_directory, args) => { composeCalls.push(args.join(" ")); return { stdout: "", stderr: "" }; },
+    healthWaiter: async () => ({ ok: true, status: 200 }),
+    shareOptions: old.shareOptions,
+  });
+  assert.equal(started.ok, true, JSON.stringify(started));
+  assert.equal(started.share.profileDropped, true);
+  assert.match(started.warnings.join("\n"), /Sharing was turned off/);
+  assert.equal((await old.readEnv()).COMPOSE_PROFILES, "debug", "dropped before Compose came up");
+  assert.deepEqual(composeCalls, ["up -d --remove-orphans --build"]);
 });
 
 test("personal status combines Docker and host health", async (t) => {

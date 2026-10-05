@@ -1,8 +1,10 @@
 // 연결: what this computer is connected to, as four tasks. #/connect lists them
 // with where each stands; each opens its own page (#/connect/<task>). 대화 보내기
 // is a few steps over the one setup form in index.html, sent whole at the end, so
-// the fields the CLI reads stay the ones the tests check. Each action is the same
-// CLI command a terminal would run.
+// the fields the CLI reads stay the ones the tests check. 팀원 기억 연결 puts a
+// teammate's server into Claude Code and Codex as a remote MCP server (team-<name>);
+// each client then logs in by itself, so no token passes through this page. Each
+// action is the same CLI command a terminal would run.
 import { cli, get, post } from "../lib/api.js";
 import { h, clear, $ } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
@@ -71,7 +73,7 @@ function sameServer(a, b) {
 const TASKS = [
   { key: "collect", title: "대화 보내기", why: "이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 모으고, 에이전트가 내 기억을 꺼내 쓰게 합니다." },
   { key: "targets", title: "회사 서버에도 보내기", why: "정한 폴더에서 한 대화만 회사 서버 같은 다른 기억 서버에도 보냅니다. 내 서버에는 그대로 모두 갑니다." },
-  { key: "share", title: "팀원 기억에 묻기", why: "팀원이 열어 준 기억에 에이전트가 질문합니다. 원문은 보지 않고 답만 받습니다." },
+  { key: "share", title: "팀원 기억 연결", why: "팀원이 공유한 기억을 Claude Code와 Codex에 원격 MCP 서버로 연결합니다. 에이전트는 원문을 보지 않고 chat으로 답만 받습니다." },
   { key: "import", title: "ChatGPT 기록 가져오기", why: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다. 한 번 해 두면 됩니다." },
 ];
 
@@ -99,9 +101,10 @@ function taskState(key) {
     };
   }
   if (key === "share") {
-    return context.sharedBridge?.connected
-      ? { label: "연결됨", kind: "ok", detail: context.sharedBridge.url || "" }
-      : { label: "안 됨", detail: "" };
+    const connected = Number(context.teamMemory?.connected || 0);
+    return connected
+      ? { label: `${connected}곳`, kind: "ok", detail: "Claude Code·Codex에 연결됨" }
+      : { label: "안 됨", detail: context.oldBridge ? "예전 방식 연결이 남아 있습니다" : "" };
   }
   const last = app.prefs.chatgptImport;
   return last?.at
@@ -162,7 +165,6 @@ function checkText(check) {
   if (check.name === "honcho-health") return "기억 서버가 답하지 않습니다.";
   if (check.name === "honcho-workspaces") return "기억 서버에 닿았지만 workspace를 읽지 못했습니다. 토큰이 맞는지 확인하세요.";
   if (check.name === "mcp") return "에이전트용 기억 도구(MCP)가 시작되지 않습니다.";
-  if (check.name === "shared-bridge") return "팀원 기억이 답하지 않습니다.";
   return `${check.name}: ${check.error || check.state || "문제 있음"}`;
 }
 
@@ -296,7 +298,7 @@ function collectFlow(body) {
   setMode(mode);
   STEP_INFO.server.note = localUrl
     ? "이 컴퓨터에 기억 서버가 있습니다. 내 서버가 다른 컴퓨터에 있으면 그쪽을 고릅니다."
-    : "다른 컴퓨터에 둔 내 기억 서버로 보냅니다. 그 컴퓨터의 앱에서 서버 → 다른 컴퓨터에서 쓰기를 열면 주소와 서버 토큰이 있습니다. 서버가 Cloudflare Access 뒤에 있으면 Access 서비스 토큰도 넣습니다.";
+    : "다른 컴퓨터에 둔 내 기억 서버로 보냅니다. 그 컴퓨터의 앱에서 서버 → 공유를 열면 주소와 서버 token이 있습니다. 서버가 Cloudflare Access 뒤에 있으면 Access 서비스 토큰도 넣습니다.";
 
   // Which agents this computer has; until known the boxes keep their values.
   let touched = false;
@@ -581,61 +583,186 @@ function targetsPage(container) {
   return drawTargets();
 }
 
-// ── 팀원 기억에 묻기 ─────────────────────────────────────
+// ── 팀원 기억 연결 ───────────────────────────────────────
+
+const CLIENTS = { claude: "Claude Code", codex: "Codex" };
+const CLIENT_ACTIONS = {
+  added: "넣었습니다",
+  replaced: "새 주소로 바꿔 넣었습니다",
+  unchanged: "이미 들어 있습니다",
+  removed: "뺐습니다",
+  absent: "들어 있지 않았습니다",
+};
+const SOURCES = { invite: "초대 코드의 팀 목록", team: "내가 연 팀", pasted: "붙여 넣은 주소" };
+const NAME = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+
+/** The 팀 주소 text: `<name> <address>` or just `<address>` per line. The server checks each again. */
+function parseTeamAddresses(text) {
+  const found = [];
+  const bad = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const words = line.trim().split(/\s+/).filter(Boolean);
+    if (!words.length || words[0].startsWith("#")) continue;
+    const raw = words.length > 1 ? words[1] : words[0];
+    let host = "";
+    try {
+      const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+      if (url.protocol === "https:" && ["/", "/mcp", "/mcp/"].includes(url.pathname) && !url.search && !url.hash && !url.port && !url.username) host = url.hostname.toLowerCase();
+    } catch {}
+    const label = host.split(".")[0] || "";
+    const name = (words.length > 1 ? words[0] : label.replace(/^memory-(?=.)/, "")).toLowerCase().replace(/^team-/, "");
+    if (!host.includes(".") || !NAME.test(name) || words.length > 2) { bad.push(line.trim()); continue; }
+    if (!found.some((item) => item.name === name)) found.push({ name, host, url: `https://${host}/mcp`, sources: ["pasted"] });
+  }
+  return { found, bad };
+}
+
+function clientLines(result) {
+  return Object.entries(CLIENTS).map(([key, label]) => {
+    const item = result?.clients?.[key];
+    if (!item) return null;
+    const text = item.ok ? CLIENT_ACTIONS[item.action] || "됐습니다"
+      : item.missing ? "이 컴퓨터에 없어 건너뛰었습니다"
+        : `하지 못했습니다: ${item.error || "알 수 없는 오류"}`;
+    return h("li", {}, `${label}: ${text}`);
+  });
+}
+
+function loginNotes(entry) {
+  return h("ul", {},
+    h("li", {}, "Claude Code: 세션에서 ", h("code", { class: "mono" }, "/mcp"), " 를 열고 ", h("code", { class: "mono" }, entry), " 를 골라 Authenticate를 누릅니다."),
+    h("li", {}, "Codex: 아래 목록에서 그 서버의 Codex 로그인을 누릅니다."),
+    h("li", {}, "브라우저가 열리면 팀에 등록된 Google 계정으로 로그인합니다. Cloudflare Access를 거친 OAuth라서 이 앱은 token을 받지도 저장하지도 않습니다."),
+  );
+}
 
 function sharePage(share) {
-  async function drawShare() {
-    let status;
-    try { status = await post("/api/bridge/status", {}); } catch (error) { clear(share, errorNotice(error)); return; }
-    const result = h("div", {});
-    if (status.connected) {
-      clear(share,
-        h("div", { class: "rows" }, h("div", { class: "row" },
-          h("div", {}, h("div", { class: "title" }, tag("연결됨", "ok"), h("code", { class: "mono" }, status.url || "")),
-            h("div", { class: "sub" }, app.context?.configured
-              ? "에이전트는 내 기억 도구를 그대로 쓰고, 이 기억에는 shared_chat 도구로 묻습니다."
-              : "이 컴퓨터의 에이전트는 이 연결의 chat 도구로 묻습니다.")),
-          h("div", { class: "end" },
-            button("시험", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
-              const tested = await post("/api/bridge/test", {});
-              clear(result, tested.ok
-                ? notice("ok", h("b", {}, "연결이 답했습니다."), tested.tools ? ` 쓸 수 있는 도구: ${tested.tools.join(", ")}` : "")
-                : notice("bad", h("b", {}, "연결이 답하지 않았습니다."), tested.error ? ` ${tested.error}` : ""));
-            }) }),
-            button("끊기", { kind: "small danger", onClick: async (event) => {
-              const ok = await confirmSheet({ title: "팀원 기억 연결을 끊을까요?", text: "저장한 토큰을 이 컴퓨터에서 지웁니다. 다시 붙으려면 토큰을 다시 받아야 합니다.", confirm: "끊기", danger: true });
-              if (!ok) return;
-              await busy(event.currentTarget, async () => { await cli("/api/bridge/disconnect", {}); await loadContext(); drawShare(); refreshStatus(); }, { done: "연결을 끊었습니다" });
-            } }),
-          ),
-        )),
-        result,
-      );
-      return;
-    }
-    const template = $("#tpl-bridge-form").content.cloneNode(true);
-    const form = template.querySelector("form");
-    clear(share,
-      h("div", { class: "panel" },
-        h("p", { class: "muted", style: { margin: "0 0 12px", fontSize: "13px" } }, "팀원에게 받은 주소와 토큰을 넣습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요."),
-        template,
-        h("div", { class: "form-actions" }, button("연결", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
-          if (!form.reportValidity()) return;
-          const data = Object.fromEntries(new FormData(form).entries());
-          const connected = await post("/api/bridge/connect", data);
-          if (!connected.ok) {
-            clear(result, notice("bad", h("b", {}, "연결하지 못했습니다."), h("ul", {}, (connected.issues || [connected.error || "연결이 답하지 않았습니다."]).map((issue) => h("li", {}, issue)))));
-            return;
-          }
-          toast("팀원 기억에 연결했습니다");
+  // Pasted addresses stay listed until this page is left; connected ones come back from the clients' own files.
+  const pasted = new Map();
+  const pasteBox = h("textarea", { class: "input mono", rows: "3", spellcheck: "false", placeholder: "memory https://memory.example.com/mcp\nalice https://memory-alice.example.com/mcp" });
+
+  async function connectOne(server) {
+    const result = await post("/api/teammates/connect", { name: server.name, address: server.host || server.url });
+    return { server, result };
+  }
+
+  function outcome(results) {
+    const good = results.filter(({ result }) => result.ok);
+    return h("div", {}, ...results.map(({ server, result }) => notice(result.ok ? "ok" : "bad",
+      h("b", {}, result.ok ? `${server.name} 연결` : `${server.name} 연결 못 함`),
+      result.ok || result.clients ? h("ul", {}, clientLines(result)) : ` ${result.error || ""}`,
+    )), good.length ? notice("", h("b", {}, "이제 한 번 로그인합니다."), loginNotes(good[0].result.entry)) : null);
+  }
+
+  function serverRow(server, clients) {
+    const registered = ["claude", "codex"].filter((key) => server[key]?.registered);
+    const moved = registered.some((key) => server[key].same === false);
+    const complete = registered.length === Object.keys(CLIENTS).filter((key) => clients[key]?.found !== false).length && !moved;
+    const sources = (server.sources || []).map((key) => SOURCES[key]).filter(Boolean).join(" · ");
+    return h("div", { class: "row", style: { alignItems: "flex-start" } },
+      h("div", { style: { minWidth: "0" } },
+        h("div", { class: "title" },
+          server.name,
+          registered.length ? registered.map((key) => tag(`${CLIENTS[key]} 연결됨`, "ok")) : tag("연결 안 됨"),
+          moved ? tag("주소가 바뀜", "warn") : null),
+        h("div", { class: "sub mono" }, server.url || server.host || ""),
+        sources ? h("div", { class: "sub" }, sources) : null,
+      ),
+      h("div", { class: "end", style: { flexWrap: "wrap", justifyContent: "flex-end" } },
+        !complete ? button("연결", { kind: "small primary", onClick: (event) => busy(event.currentTarget, async () => {
+          const done = await connectOne(server);
           await loadContext();
-          drawShare();
           refreshStatus();
-        }) })),
-        result,
+          await drawShare(outcome([done]));
+        }) }) : null,
+        server.codex?.registered ? button("Codex 로그인", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+          const login = await post("/api/teammates/codex-login", { name: server.name });
+          if (!login.ok) throw new Error(login.error || "Codex 로그인을 시작하지 못했습니다.");
+          if (login.state === "done") { toast(`Codex에서 ${login.entry} 로그인을 마쳤습니다`); return; }
+          await drawShare(notice("", h("b", {}, "브라우저에서 Codex 로그인을 마치세요."),
+            h("div", {}, "창이 열리지 않았으면 이 주소를 여세요. 10분 안에 마치지 않으면 다시 누릅니다."),
+            login.loginUrl ? h("div", {}, h("a", { href: login.loginUrl, target: "_blank", rel: "noreferrer" }, "로그인 주소 열기")) : null));
+        }) }) : null,
+        registered.length ? button("끊기", { kind: "small quiet danger", onClick: async (event) => {
+          const ok = await confirmSheet({ title: `${server.name} 연결을 끊을까요?`, text: `Claude Code와 Codex에서 ${server.entry || `team-${server.name}`} 를 뺍니다. 그 기억 서버는 그대로이고, 다시 연결하면 또 로그인합니다.`, confirm: "끊기", danger: true });
+          if (!ok) return;
+          await busy(event.currentTarget, async () => {
+            const result = await post("/api/teammates/disconnect", { name: server.name });
+            await loadContext();
+            refreshStatus();
+            await drawShare(notice(result.ok ? "ok" : "bad", h("b", {}, result.ok ? `${server.name} 연결을 끊었습니다.` : `${server.name} 연결을 다 끊지 못했습니다.`), h("ul", {}, clientLines(result))));
+          });
+        } }) : null,
       ),
     );
   }
+
+  function oldBridgeNotice() {
+    if (!app.context?.oldBridge) return null;
+    return notice("warn",
+      h("b", {}, "예전 방식의 팀원 기억 연결이 남아 있습니다."),
+      h("div", {}, "공유 창구 주소와 token을 저장해 두던 방식은 이제 쓰지 않습니다. 저장된 token을 이 컴퓨터에서 지우세요."),
+      h("div", { class: "form-actions", style: { marginTop: "8px" } }, button("예전 연결 지우기", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+        await cli("/api/bridge/disconnect", {});
+        await loadContext();
+        refreshStatus();
+        await drawShare();
+      }, { done: "예전 연결을 지웠습니다" }) })),
+    );
+  }
+
+  async function drawShare(banner = null) {
+    let status;
+    try { status = await cli("/api/teammates/connected", {}); } catch (error) { clear(share, errorNotice(error)); return; }
+    const clients = status.clients || {};
+    const servers = [...(status.servers || [])];
+    for (const item of pasted.values()) {
+      if (!servers.some((server) => server.name === item.name)) servers.push({ ...item, entry: `team-${item.name}`, claude: { registered: false }, codex: { registered: false } });
+    }
+    const missing = Object.entries(CLIENTS).filter(([key]) => clients[key]?.found === false).map(([, label]) => label);
+    const anyConnected = servers.some((server) => server.claude?.registered || server.codex?.registered);
+    const pasteResult = h("div", {});
+    clear(share,
+      oldBridgeNotice(),
+      banner,
+      missing.length ? notice("warn", `${missing.join(", ")}가 이 컴퓨터에 없어 그쪽에는 넣지 않습니다.`) : null,
+      servers.length
+        ? h("div", { class: "rows" }, servers.map((server) => serverRow(server, clients)))
+        : notice("", "이 컴퓨터가 아는 팀원 기억이 아직 없습니다. 팀원에게 받은 팀 주소를 아래에 붙여 넣으세요."),
+      h("h2", { class: "sub-title" }, "팀 주소 붙여 넣기"),
+      h("div", { class: "panel" },
+        h("label", { class: "field wide" },
+          h("span", {}, "팀 주소"),
+          pasteBox,
+          h("small", {}, "팀을 연 사람의 앱에서 서버 → 공유 → 팀 주소를 복사해 받습니다. 주소 하나(memory-alice.example.com)만 넣어도 됩니다. 비밀이 아닌 주소라서 token은 없습니다."),
+        ),
+        h("div", { class: "form-actions" }, button("Claude Code·Codex에 연결", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
+          const { found, bad } = parseTeamAddresses(pasteBox.value);
+          if (!found.length) { clear(pasteResult, notice("warn", "알아볼 수 있는 주소가 없습니다. https://로 시작하는 주소나 memory-이름.도메인 형태로 넣으세요.")); return; }
+          for (const item of found) pasted.set(item.name, item);
+          const results = [];
+          for (const item of found) results.push(await connectOne(item));
+          pasteBox.value = "";
+          await loadContext();
+          refreshStatus();
+          await drawShare(h("div", {}, outcome(results), bad.length ? notice("warn", h("b", {}, "알아보지 못한 줄"), h("ul", {}, bad.map((line) => h("li", { class: "mono" }, line)))) : null));
+        }) })),
+        pasteResult,
+      ),
+      anyConnected ? h("h2", { class: "sub-title" }, "로그인") : null,
+      anyConnected ? h("div", { class: "panel" }, loginNotes("team-<이름>"), h("p", { class: "muted", style: { margin: "8px 0 0", fontSize: "13px" } }, "로그인한 뒤에는 에이전트가 그 기억의 chat 도구로 묻습니다. 팀을 연 사람이 내 이메일을 팀원으로 넣어 두어야 로그인이 됩니다.")) : null,
+      h("details", { class: "raw", style: { marginTop: "16px" } },
+        h("summary", { class: "muted" }, "어떻게 연결되나요"),
+        h("ul", { class: "muted", style: { fontSize: "13px" } },
+          h("li", {}, "팀원 서버 하나는 Claude Code와 Codex에 team-<이름> 이라는 원격 MCP 서버(https://<서버>/mcp)로 들어갑니다. Claude Code는 user 범위에 넣습니다."),
+          h("li", {}, "같은 이름이 같은 주소로 있으면 그대로 두고, 다른 주소로 있으면 새 주소로 바꿉니다."),
+          h("li", {}, "로그인은 Cloudflare Access를 거친 OAuth입니다. token은 이 앱을 거치지 않고 각 프로그램이 따로 보관합니다."),
+          h("li", {}, "지금은 연결한 기억 전체에 chat으로 묻습니다. 프로젝트별로 나누는 기능은 아직 없습니다."),
+        ),
+      ),
+    );
+  }
+
   clear(share, h("div", { class: "empty" }, spinner()));
   return drawShare();
 }
