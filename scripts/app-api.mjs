@@ -281,7 +281,7 @@ export async function localTools({ config } = {}) {
   if (!loaded) return { ok: true, configured: false, tools: [] };
   const file = toolsFile(loaded);
   const document = await readJson(file, null);
-  const listed = document?.disabled_tools || document?.disabledTools;
+  const listed = document?.disabled_tools;
   // No file yet means the server's own default: recall only.
   const disabled = new Set(Array.isArray(listed) ? listed.map(String) : WRITE_TOOLS);
   return {

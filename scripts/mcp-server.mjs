@@ -113,7 +113,7 @@ async function runtimeContext() {
 async function disabledToolNames(config) {
   const names = new Set();
   const document = await readJson(path.join(installPaths(config).dataDir, "mcp-tools.json"), null);
-  const values = document?.disabled_tools || document?.disabledTools;
+  const values = document?.disabled_tools;
   if (Array.isArray(values)) values.forEach((name) => names.add(String(name)));
   // No tool file at all: an install from before setup wrote one. Default to recall only.
   else if (!document) WRITE_TOOLS.forEach((name) => names.add(name));
