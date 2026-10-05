@@ -77,7 +77,6 @@ export function configEnvironment(config, provider = "") {
     env[ACCESS_ENV.clientId] = access.clientId;
     env[ACCESS_ENV.clientSecret] = access.clientSecret;
   }
-  if (config.sources?.codex?.root) env.CODEX_SESSION_ROOT = config.sources.codex.root;
   if (provider) {
     env.HONCHO_AGENT_HOOK_STATE = path.join(paths.dataDir, "state", `${provider}.json`);
     env.HONCHO_AGENT_HOOK_LOG = path.join(paths.dataDir, "logs", `${provider}.log`);

@@ -267,7 +267,6 @@ test("Codex subagent prompts are stored as automation rather than direct user me
     HONCHO_USER_NAME: "user_test",
     HONCHO_AGENT_HOOK_STATE: path.join(directory, "state.json"),
     HONCHO_AGENT_HOOK_LOG: path.join(directory, "collector.log"),
-    HONCHO_CODEX_DREAM_EVERY_MESSAGES: "0",
   };
 
   const result = JSON.parse(

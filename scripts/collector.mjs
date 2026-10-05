@@ -37,9 +37,6 @@ const STATE_LOCK_STALE_MS = Number(process.env.HONCHO_AGENT_STATE_LOCK_STALE_MS 
 const IMPORT_TRIGGER = process.env.HONCHO_AGENT_IMPORT_TRIGGER || process.env.HONCHO_CODEX_IMPORT_TRIGGER || "manual";
 
 const SUPPORTED_PROVIDERS = new Set(["codex", "claude", "agy", "chatgpt", "grok"]);
-const CODEX_SESSION_ROOT = expandHome(process.env.CODEX_SESSION_ROOT || "~/.codex/sessions");
-const CODEX_MAX_AGE_SECONDS = Number(process.env.HONCHO_CODEX_IMPORT_MAX_AGE_SECONDS || "180");
-const CODEX_DREAM_EVERY_MESSAGES = Number(process.env.HONCHO_CODEX_DREAM_EVERY_MESSAGES || "20");
 const CODEX_AUTOMATION_PEER = process.env.HONCHO_CODEX_AUTOMATION_PEER || "automation_codex";
 const CLAUDE_AUTOMATION_PEER = process.env.HONCHO_CLAUDE_AUTOMATION_PEER || "automation_claude";
 // Providers whose user-role turns can be a program's prompts rather than the person's
@@ -92,7 +89,6 @@ function parseArgs() {
     provider: process.env.HONCHO_AGENT_PROVIDER || "codex",
     transcript: "",
     workspace: DEFAULT_WORKSPACE,
-    maxAgeSeconds: CODEX_MAX_AGE_SECONDS,
     dryRun: process.env.HONCHO_AGENT_DRY_RUN === "1" || process.env.HONCHO_CODEX_DRY_RUN === "1",
     hookInputFile: "",
     // A ChatGPT export holds every conversation in one file, so it imports as a
@@ -106,14 +102,12 @@ function parseArgs() {
     else if (item === "--transcript" || item === "--transcript-path" || item === "--rollout") {
       args.transcript = argv[++index] || "";
     } else if (item === "--workspace") args.workspace = argv[++index] || DEFAULT_WORKSPACE;
-    else if (item === "--max-age-seconds") args.maxAgeSeconds = Number(argv[++index] || CODEX_MAX_AGE_SECONDS);
     else if (item === "--dry-run") args.dryRun = true;
     else if (item === "--hook-input-file") args.hookInputFile = argv[++index] || "";
     else if (item === "--export") args.exportPath = argv[++index] || "";
   }
   args.provider = args.provider.trim().toLowerCase();
   if (!SUPPORTED_PROVIDERS.has(args.provider)) throw new Error(`unsupported provider: ${args.provider}`);
-  if (args.provider === "codex" && !args.transcript) args.transcript = process.env.CODEX_ROLLOUT_PATH || "";
   return args;
 }
 
@@ -136,38 +130,6 @@ async function readHookInput(filePath) {
   } catch {
     return {};
   }
-}
-
-async function latestCodexRolloutPath(maxAgeSeconds) {
-  const roots = [];
-  try {
-    for (const year of await fsp.readdir(CODEX_SESSION_ROOT, { withFileTypes: true })) {
-      if (year.isDirectory()) roots.push(path.join(CODEX_SESSION_ROOT, year.name));
-    }
-  } catch {
-    return null;
-  }
-  let latest = null;
-  const stack = roots.length ? roots : [CODEX_SESSION_ROOT];
-  while (stack.length) {
-    const dir = stack.pop();
-    let entries;
-    try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) stack.push(full);
-      if (!entry.isFile() || !entry.name.startsWith("rollout-") || !entry.name.endsWith(".jsonl")) continue;
-      const stat = await fsp.stat(full);
-      if (!latest || stat.mtimeMs > latest.mtimeMs) latest = { full, mtimeMs: stat.mtimeMs };
-    }
-  }
-  if (!latest) return null;
-  if (maxAgeSeconds > 0 && Date.now() - latest.mtimeMs > maxAgeSeconds * 1000) return null;
-  return latest.full;
 }
 
 function statePath(provider) {
@@ -248,10 +210,6 @@ async function saveState(provider, state) {
   const tmp = `${target}.tmp`;
   await fsp.writeFile(tmp, JSON.stringify(state, null, 2), "utf8");
   await fsp.rename(tmp, target);
-}
-
-function primaryTurnHash(sessionId, turn) {
-  return turnHashCandidates(sessionId, turn)[0];
 }
 
 function mergeStateHashes(...groups) {
@@ -516,20 +474,6 @@ async function reconcileCodexSegment(workspace, sessionId, segmentId, sessionSta
   return true;
 }
 
-async function scheduleCodexDreamIfDue(workspace, sessionId, sessionState) {
-  if (CODEX_DREAM_EVERY_MESSAGES <= 0) return false;
-  if (Number(sessionState.messages_since_dream || 0) < CODEX_DREAM_EVERY_MESSAGES) return false;
-  await jsonRequest("POST", `/v3/workspaces/${quote(workspace)}/schedule_dream`, {
-    observer: assistantPeer("codex"),
-    observed: DEFAULT_USER_PEER,
-    dream_type: "omni",
-    session_id: sessionId,
-  });
-  sessionState.messages_since_dream = 0;
-  sessionState.last_dream_at = utcNow();
-  return true;
-}
-
 async function withStateLock(provider, fn) {
   const lockPath = `${statePath(provider)}.lock`;
   const lock = await acquireFileLock(lockPath, { attempts: 50, delayMs: 100, staleMs: STATE_LOCK_STALE_MS });
@@ -545,8 +489,8 @@ async function importCodex(args, hookInput) {
   if (!args.transcript) {
     args.transcript = hookInput.transcript_path || hookInput.transcriptPath || "";
   }
-  const rolloutPath = args.transcript || (await latestCodexRolloutPath(args.maxAgeSeconds));
-  if (!rolloutPath) return { ok: true, provider: "codex", skipped: "no recent rollout file" };
+  const rolloutPath = args.transcript;
+  if (!rolloutPath) return { ok: true, provider: "codex", skipped: "no transcript path" };
   if (!fs.existsSync(rolloutPath)) return { ok: false, provider: "codex", error: `rollout not found: ${rolloutPath}` };
 
   const parsed = await getProvider("codex").parseTranscript(rolloutPath, hookInput);
@@ -557,7 +501,7 @@ async function importCodex(args, hookInput) {
   return withStateLock("codex", async () => {
     const state = await loadState("codex");
     const sessions = (state.sessions ||= {});
-    const sessionState = (sessions[sessionId] ||= { imported_hashes: [], messages_since_dream: 0 });
+    const sessionState = (sessions[sessionId] ||= { imported_hashes: [] });
     sessionState.rollout_path = rolloutPath;
     const basePeers = new Set([DEFAULT_USER_PEER, assistantPeer("codex")]);
     if (!args.dryRun) await ensureSession(args.workspace, "codex", sessionId, parsed, basePeers);
@@ -578,7 +522,6 @@ async function importCodex(args, hookInput) {
       parsed_turns: parsed.turns.length,
       new_turns: pendingHashes.length,
       new_messages: messages.length,
-      dream_scheduled: false,
       dry_run: Boolean(args.dryRun),
       state_synced_turns: syncedTurns,
       honcho_message_total: honchoMessageTotal,
@@ -599,8 +542,6 @@ async function importCodex(args, hookInput) {
     await addMessages(args.workspace, sessionId, messages);
     sessionState.imported_hashes = mergeStateHashes(sessionState.imported_hashes || [], pendingHashes);
     sessionState.last_imported_at = utcNow();
-    sessionState.messages_since_dream = Number(sessionState.messages_since_dream || 0) + messages.length;
-    result.dream_scheduled = await scheduleCodexDreamIfDue(args.workspace, sessionId, sessionState);
     delete sessionState.write_in_progress;
     state.version = 2;
     await saveState("codex", state);

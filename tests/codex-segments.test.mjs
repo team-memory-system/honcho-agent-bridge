@@ -98,7 +98,6 @@ function collect(honcho, files, transcript) {
     HONCHO_USER_NAME: "user_test",
     HONCHO_AGENT_HOOK_STATE: files.state,
     HONCHO_AGENT_HOOK_LOG: path.join(files.directory, "collector.log"),
-    HONCHO_CODEX_DREAM_EVERY_MESSAGES: "0",
   };
   return execFileAsync(process.execPath, [COLLECTOR, "--provider", "codex", "--transcript", transcript], { env })
     .then((result) => JSON.parse(result.stdout));
@@ -162,7 +161,6 @@ test("segment turns an earlier collector sent under the line identity are not se
         sessions: {
           [SESSION]: {
             imported_hashes: [bareLineHash(2, "user"), bareLineHash(3, "assistant"), bareLineHash(4, "user")],
-            messages_since_dream: 3,
             rollout_path: files.segment,
             reconciled_source_hashes_at: "2026-01-01T00:00:00.000Z",
             synced_from_honcho_message_total: 0,

@@ -1573,7 +1573,6 @@ async function targetBackfill(id, options = {}) {
     const env = targetEnvironment(config, target, candidate.provider, {
       ...process.env,
       HONCHO_AGENT_IMPORT_TRIGGER: "backfill",
-      HONCHO_CODEX_DREAM_EVERY_MESSAGES: "0",
     });
     const result = runCollector(candidate.provider, candidate.file, env);
     if (result.ok) {

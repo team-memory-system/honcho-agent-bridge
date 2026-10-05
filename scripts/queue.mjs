@@ -14,7 +14,6 @@ const SPOOL_ROOT = expandHome(process.env.HONCHO_CODEX_GATE_SPOOL || "~/.hermes/
 const PENDING_DIR = path.join(SPOOL_ROOT, "pending");
 const LOG_PATH = expandHome(process.env.HONCHO_CODEX_GATE_LOG || "~/.hermes/logs/codex-honcho-turn-gate.log");
 const IMPORTER_PATH = expandHome(process.env.HONCHO_CODEX_IMPORTER || path.join(SCRIPT_DIR, "collector.mjs"));
-const IMPORTER_EXEC = process.env.HONCHO_CODEX_IMPORTER_EXEC || "";
 const INTERNAL_BATCH_SIZE = numberEnv("HONCHO_CODEX_INTERNAL_BATCH_SIZE", 1);
 const EXTERNAL_BATCH_SIZE = numberEnv("HONCHO_CODEX_EXTERNAL_BATCH_SIZE", 10);
 const LOCK_STALE_MS = numberEnv("HONCHO_CODEX_GATE_LOCK_STALE_MS", 120_000);
@@ -57,8 +56,6 @@ function importerEnv() {
   const env = {
     ...process.env,
     HONCHO_CODEX_IMPORT_TRIGGER: process.env.HONCHO_CODEX_IMPORTER_TRIGGER || "hook_gate",
-    HONCHO_CODEX_QUIET: "0",
-    HONCHO_CODEX_DREAM_EVERY_MESSAGES: "0",
   };
 
   env.HONCHO_BASE_URL = env.HONCHO_BASE_URL || windowsUserEnv("HONCHO_BASE_URL") || DEFAULT_HONCHO_BASE_URL;
@@ -75,8 +72,6 @@ function targetImporterEnv(target) {
   const base = {
     ...process.env,
     HONCHO_CODEX_IMPORT_TRIGGER: process.env.HONCHO_CODEX_IMPORTER_TRIGGER || "hook_gate",
-    HONCHO_CODEX_QUIET: "0",
-    HONCHO_CODEX_DREAM_EVERY_MESSAGES: "0",
   };
   return targetEnvironment(CONFIG, target, PROVIDER, base);
 }
@@ -259,20 +254,13 @@ function parseImporterResult(stdout) {
   return null;
 }
 
-function importerCommand() {
-  if (IMPORTER_EXEC) return { command: IMPORTER_EXEC, args: [IMPORTER_PATH] };
-  if (IMPORTER_PATH.endsWith(".py")) return { command: "/usr/bin/python3", args: [IMPORTER_PATH] };
-  return { command: process.execPath, args: [IMPORTER_PATH] };
-}
-
 function runImporter(transcriptPath, dryRun, hookInputFile = "", env = importerEnv()) {
-  const importer = importerCommand();
-  const args = [...importer.args, "--rollout", transcriptPath];
+  const args = [IMPORTER_PATH, "--rollout", transcriptPath];
   if (dryRun) args.push("--dry-run");
   if (process.env.HONCHO_GATE_PASS_HOOK_INPUT === "1" && hookInputFile) {
     args.push("--hook-input-file", hookInputFile);
   }
-  const result = spawnSync(importer.command, args, { encoding: "utf8", env });
+  const result = spawnSync(process.execPath, args, { encoding: "utf8", env });
   const parsed = parseImporterResult(result.stdout);
   if (result.error) return { ok: false, error: result.error.message };
   if (!parsed) {
