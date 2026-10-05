@@ -230,7 +230,11 @@ test("a notifier that fails or throws is reported, never thrown", async () => {
 
 // ------------------------------------------------------------- end to end
 
-test("a scheduled run that ends with errors notifies once, the daytime check repeats it later, and a success ends it", { skip: process.getuid?.() === 0 ? "root reads unreadable files" : false }, async (t) => {
+// These make a file unreadable with chmod, which root ignores and Windows does not enforce.
+const UNREADABLE_SKIP = process.platform === "win32" ? "chmod cannot make a file unreadable on Windows"
+  : process.getuid?.() === 0 ? "root reads unreadable files" : false;
+
+test("a scheduled run that ends with errors notifies once, the daytime check repeats it later, and a success ends it", { skip: UNREADABLE_SKIP }, async (t) => {
   const home = await makeHome(t);
   const dest = await temporaryDirectory(t, "dest");
   const dataDir = await temporaryDirectory(t, "data");
@@ -278,7 +282,7 @@ test("a scheduled run that ends with errors notifies once, the daytime check rep
   assert.equal((await backupCommand("status", [], { dataDir })).alert.problem, null);
 });
 
-test("a manual run with errors does not notify; only a scheduled run or the check does", { skip: process.getuid?.() === 0 ? "root reads unreadable files" : false }, async (t) => {
+test("a manual run with errors does not notify; only a scheduled run or the check does", { skip: UNREADABLE_SKIP }, async (t) => {
   const home = await makeHome(t);
   const dest = await temporaryDirectory(t, "dest");
   const dataDir = await temporaryDirectory(t, "data");
@@ -379,7 +383,7 @@ test("the daytime check is a second clock job at 10 and the device's minute on e
   const paths = { nodePath: "/usr/local/bin/node", cliPath: "/app/cli.mjs", logPath: "/app/logs/backup.log", workingDirectory: "/app", stateDir: "/app/state", hour: 3, minute: 17 };
   const mac = backupCheckSpec({ ...base, platform: "darwin" }, paths);
   assert.equal(mac.label, BACKUP_CHECK_LAUNCHD_LABEL);
-  assert.equal(mac.plistPath, "/Users/me/Library/LaunchAgents/team-memory-system.backup-check.plist");
+  assert.equal(mac.plistPath, path.join("/Users/me", "Library", "LaunchAgents", "team-memory-system.backup-check.plist"));
   assert.deepEqual(mac.data.StartCalendarInterval, { Hour: 10, Minute: 17 });
   assert.equal(mac.data.RunAtLoad, false);
   assert.deepEqual(mac.data.ProgramArguments, ["/usr/local/bin/node", "/app/cli.mjs", "backup", "alert", "check"]);
