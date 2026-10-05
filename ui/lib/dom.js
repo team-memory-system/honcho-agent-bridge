@@ -30,7 +30,6 @@ export function clear(element, ...children) {
 }
 
 export const $ = (selector, root = document) => root.querySelector(selector);
-export const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 export function svg(markup, className = "icon") {
   const template = document.createElement("template");

@@ -103,7 +103,3 @@ export function ago(value) {
   if (seconds < 86_400) return `${Math.floor(seconds / 3600)}시간 전`;
   return relativeDay(value);
 }
-
-export function plural(count, word) {
-  return `${number(count)}${word}`;
-}
