@@ -566,6 +566,7 @@ test("setup plan and doctor say what this computer's WARP lacks for a Mesh addre
     HONCHO_AGENT_BRIDGE_HOME: appHome,
     HONCHO_AGENT_BRIDGE_USER_HOME: home,
     HOME: home,
+    USERPROFILE: home,
     HONCHO_API_TOKEN: "",
     PATH: `${warp.bin}${path.delimiter}${process.env.PATH}`,
   };

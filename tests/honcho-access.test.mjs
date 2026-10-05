@@ -79,6 +79,7 @@ async function sandbox(t) {
       HONCHO_AGENT_BRIDGE_HOME: appHome,
       HONCHO_AGENT_BRIDGE_USER_HOME: home,
       HOME: home,
+      USERPROFILE: home,
       CODEX_PLUGIN_ROOT: ROOT,
       CLAUDE_PLUGIN_ROOT: ROOT,
     },

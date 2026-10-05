@@ -50,6 +50,9 @@ async function sandbox(t) {
       HONCHO_AGENT_BRIDGE_HOME: appHome,
       HONCHO_AGENT_BRIDGE_USER_HOME: home,
       HOME: home,
+      // os.homedir() reads USERPROFILE on Windows; without it the hooks run here
+      // spool into the real user's ~/.hermes.
+      USERPROFILE: home,
       CODEX_PLUGIN_ROOT: ROOT,
       CLAUDE_PLUGIN_ROOT: ROOT,
       HONCHO_API_TOKEN: "",

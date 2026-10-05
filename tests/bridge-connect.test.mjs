@@ -27,7 +27,7 @@ async function workspace(t) {
   const home = path.join(root, "user");
   const appHome = path.join(root, "app");
   await fsp.mkdir(home, { recursive: true });
-  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home };
+  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home, USERPROFILE: home };
   for (const name of ["HONCHO_MCP_BEARER_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "HONCHO_AGENT_BRIDGE_CONFIG"]) env[name] = "";
   return { configPath: path.join(appHome, "config.json"), env };
 }

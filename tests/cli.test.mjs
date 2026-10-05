@@ -66,7 +66,7 @@ test("setup apply installs an isolated runtime and preserves unrelated host hook
       },
     }),
   );
-  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home };
+  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home, USERPROFILE: home };
   const args = [
     "setup",
     "apply",
@@ -136,7 +136,7 @@ test("setup apply refuses malformed host settings before installing anything", a
   const codexHooks = path.join(home, ".codex", "hooks.json");
   await fsp.mkdir(path.dirname(codexHooks), { recursive: true });
   await fsp.writeFile(codexHooks, "{ this is not json\n");
-  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home };
+  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home, USERPROFILE: home };
 
   await assert.rejects(
     runCli(
@@ -176,6 +176,7 @@ test("setup apply restores runtime and host files byte-for-byte when the final c
     HONCHO_AGENT_BRIDGE_USER_HOME: home,
     HONCHO_AGENT_BRIDGE_CONFIG: configPath,
     HOME: home,
+    USERPROFILE: home,
   };
   await assert.rejects(
     runCli([
@@ -204,7 +205,7 @@ test("setup apply refuses a concurrent live setup owner", async (t) => {
   const appHome = path.join(root, "app");
   await fsp.mkdir(appHome, { recursive: true });
   await fsp.writeFile(path.join(appHome, "setup.lock"), JSON.stringify({ pid: process.pid, nonce: "live-owner" }));
-  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home };
+  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home, USERPROFILE: home };
   await assert.rejects(
     runCli(
       ["setup", "apply", "--agents", "codex", "--user-peer", "user_test", "--honcho-url", "http://127.0.0.1:9"],
@@ -219,7 +220,7 @@ test("setup apply refuses a concurrent live setup owner", async (t) => {
 test("setup plan rejects an invalid Honcho URL without mutation", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-plan-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  const env = { HONCHO_AGENT_BRIDGE_HOME: path.join(root, "app"), HONCHO_AGENT_BRIDGE_USER_HOME: path.join(root, "user"), HOME: path.join(root, "user") };
+  const env = { HONCHO_AGENT_BRIDGE_HOME: path.join(root, "app"), HONCHO_AGENT_BRIDGE_USER_HOME: path.join(root, "user"), HOME: path.join(root, "user"), USERPROFILE: path.join(root, "user") };
   await assert.rejects(
     runCli(["setup", "plan", "--agents", "codex", "--user-peer", "user_test", "--honcho-url", "not-a-url"], env),
     (error) => String(error.stdout || "").includes("Honcho URL is invalid"),
@@ -230,7 +231,7 @@ test("setup plan rejects an invalid Honcho URL without mutation", async (t) => {
 test("setup rejects and redacts secrets embedded in the Honcho URL", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-secret-url-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  const env = { HONCHO_AGENT_BRIDGE_HOME: path.join(root, "app"), HONCHO_AGENT_BRIDGE_USER_HOME: path.join(root, "user"), HOME: path.join(root, "user") };
+  const env = { HONCHO_AGENT_BRIDGE_HOME: path.join(root, "app"), HONCHO_AGENT_BRIDGE_USER_HOME: path.join(root, "user"), HOME: path.join(root, "user"), USERPROFILE: path.join(root, "user") };
   await assert.rejects(
     runCli(
       [
@@ -272,6 +273,7 @@ test("doctor verifies runtime version, host plugins, Honcho access, and MCP hand
     HONCHO_AGENT_BRIDGE_HOME: appHome,
     HONCHO_AGENT_BRIDGE_USER_HOME: home,
     HOME: home,
+    USERPROFILE: home,
     CODEX_PLUGIN_ROOT: ROOT,
     CLAUDE_PLUGIN_ROOT: ROOT,
   };

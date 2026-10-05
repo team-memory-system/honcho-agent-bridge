@@ -69,7 +69,7 @@ test("before setup the bundled MCP offers no tools", async (t) => {
   const userHome = path.join(root, "user");
   await fsp.mkdir(appHome, { recursive: true });
   const child = spawn(process.execPath, [SERVER, "--provider", "claude"], {
-    env: { ...process.env, HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: userHome, HOME: userHome },
+    env: { ...process.env, HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: userHome, HOME: userHome, USERPROFILE: userHome },
     stdio: ["pipe", "pipe", "pipe"],
   });
   t.after(() => child.kill());
@@ -98,7 +98,7 @@ test("bundled MCP starts read-only, exposes all 31 tools when enabled, forwards 
     }),
   );
   const child = spawn(process.execPath, [SERVER, "--provider", "codex"], {
-    env: { ...process.env, HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: userHome, HOME: userHome },
+    env: { ...process.env, HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: userHome, HOME: userHome, USERPROFILE: userHome },
     stdio: ["pipe", "pipe", "pipe"],
   });
   t.after(() => child.kill());
