@@ -106,16 +106,22 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # Sharing this server with the owner's other computers (`server share enable`).
-  # Only runs with COMPOSE_PROFILES=share in the private .env. The Cloudflare
-  # tunnel on this machine reaches this port and nothing else; every request needs
-  # the gate token, and only /health and /v3/* reach the API.
+  # Sharing this server (`server share enable`). Only runs with COMPOSE_PROFILES=share
+  # in the private .env. The tunnel reaches this service and nothing else. /health
+  # and /v3/* need the gate token and go to the API, for the owner's other
+  # computers. /mcp needs a person's Cloudflare Access login instead and goes to the
+  # mcp service; until the Access team domain, audience and team MCP token are set,
+  # /mcp is not found.
   gate:
     image: honcho-agent-bridge-dashboard:${HONCHO_IMAGE_TAG:-local}
     command: ["node", "/gate/gate.mjs"]
     profiles: ["share"]
     environment:
       HONCHO_GATE_TOKEN: ${HONCHO_GATE_TOKEN:-}
+      HONCHO_GATE_MCP_UPSTREAM: http://mcp:8765
+      HONCHO_GATE_ACCESS_TEAM_DOMAIN: ${HONCHO_ACCESS_TEAM_DOMAIN:-}
+      HONCHO_GATE_ACCESS_AUD: ${HONCHO_ACCESS_AUD:-}
+      HONCHO_TEAM_MCP_TOKEN: ${HONCHO_TEAM_MCP_TOKEN:-}
     ports:
       - "127.0.0.1:${HONCHO_GATE_PORT:-8010}:8010"
     volumes:
@@ -129,6 +135,55 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    restart: unless-stopped
+
+  # Teammates asking this server's memory over MCP. Reached only through the gate's
+  # /mcp, which has already checked the teammate's Cloudflare Access login and sends
+  # the team MCP token and the verified email. It answers `chat` alone, over one
+  # workspace as one peer; callers cannot point it at another by header or argument.
+  mcp:
+    image: honcho-agent-bridge-mcp:${HONCHO_IMAGE_TAG:-local}
+    build:
+      context: ./honcho/local-mcp-bridge
+      dockerfile: Dockerfile
+    profiles: ["share"]
+    environment:
+      HONCHO_BASE_URL: http://api:8000
+      HONCHO_MCP_HOST: 0.0.0.0
+      HONCHO_MCP_PORT: "8765"
+      HONCHO_MCP_PATH: /mcp
+      HONCHO_MCP_REQUIRE_AUTH: "1"
+      HONCHO_MCP_BEARER_TOKEN: ${HONCHO_TEAM_MCP_TOKEN:-}
+      HONCHO_MCP_ENABLED_TOOLS: chat
+      HONCHO_MCP_PIN_DEFAULTS: "1"
+      HONCHO_WORKSPACE_ID: ${HONCHO_TEAM_WORKSPACE:-memory}
+      HONCHO_USER_NAME: ${HONCHO_TEAM_PEER:-}
+      # Every call is recorded, with the caller's email, in a schema of its own here.
+      HONCHO_AUDIT_DSN: postgresql://postgres:${POSTGRES_PASSWORD}@database:5432/postgres
+      HONCHO_AUDIT_BRIDGE: team
+    # The bridge has no health route; any HTTP answer (401 without the token) means
+    # it is serving.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as r, urllib.error as e\ntry: r.urlopen('http://127.0.0.1:8765/mcp', timeout=2)\nexcept e.HTTPError: pass"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The Cloudflare Tunnel of this server, remotely managed: its public hostname and
+  # ingress (http://gate:8010) are set in Cloudflare, so only the token is here.
+  tunnel:
+    image: cloudflare/cloudflared:2026.8.3
+    command: ["tunnel", "--no-autoupdate", "run"]
+    profiles: ["share"]
+    environment:
+      TUNNEL_TOKEN: ${HONCHO_TUNNEL_TOKEN:-}
+    depends_on:
+      - gate
     restart: unless-stopped
 
 volumes:
