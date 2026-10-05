@@ -17,17 +17,44 @@ const SOURCE_CHECKOUT_ONLY = {
   skip: SOURCE_CHECKOUT ? false : "release-builder tests require Git source provenance",
 };
 
-async function createMinimalHoncho(root) {
+// The builder takes a honcho-selfhost wrapper and ships only what its preparer
+// writes. The real preparer exports the pinned upstream with the patches applied;
+// this one writes the files listed in the fixture's prepared.json.
+const PREPARER = `import fs from "node:fs/promises";
+import path from "node:path";
+const output = path.resolve(process.argv[process.argv.indexOf("--output") + 1]);
+const files = JSON.parse(await fs.readFile(new URL("../prepared.json", import.meta.url), "utf8"));
+for (const [relative, text] of Object.entries(files)) {
+  await fs.mkdir(path.dirname(path.join(output, relative)), { recursive: true });
+  await fs.writeFile(path.join(output, relative), text);
+}
+`;
+
+const PREPARED = {
+  "Dockerfile": "FROM scratch\n",
+  "LICENSE": "AGPL test license\n",
+  "src/main.py": "# source\n",
+  "database/init.sql": "CREATE EXTENSION vector;\n",
+  "local-dashboard/Dockerfile": "FROM scratch\n",
+  "local-dashboard/server.mjs": "// dashboard\n",
+  ".honcho-source.json": `${JSON.stringify({
+    format: 1,
+    kind: "honcho-selfhost-source",
+    upstream: { path: "upstream/honcho", repo: "https://github.com/plastic-labs/honcho", ref: "v3.0.11", commit: "a".repeat(40) },
+    patches: [{ path: "patches/0001-selfhost-core.patch", sha256: "b".repeat(64) }],
+  })}\n`,
+};
+
+async function createWrappedHoncho(root, prepared = {}) {
   const honcho = path.join(root, "honcho");
-  await fsp.mkdir(path.join(honcho, "src"), { recursive: true });
-  await fsp.mkdir(path.join(honcho, "database"), { recursive: true });
+  await fsp.mkdir(path.join(honcho, "scripts"), { recursive: true });
   await fsp.mkdir(path.join(honcho, "local-dashboard"), { recursive: true });
-  await fsp.writeFile(path.join(honcho, "Dockerfile"), "FROM scratch\n");
+  await fsp.writeFile(path.join(honcho, "selfhost-source.json"), '{"format":1}\n');
+  await fsp.writeFile(path.join(honcho, "scripts", "prepare-source.mjs"), PREPARER);
+  await fsp.writeFile(path.join(honcho, "prepared.json"), JSON.stringify({ ...PREPARED, ...prepared }));
   await fsp.writeFile(path.join(honcho, "LICENSE"), "AGPL test license\n");
-  await fsp.writeFile(path.join(honcho, "src", "main.py"), "# source\n");
-  await fsp.writeFile(path.join(honcho, "database", "init.sql"), "CREATE EXTENSION vector;\n");
   await fsp.writeFile(path.join(honcho, "local-dashboard", "Dockerfile"), "FROM scratch\n");
-  await fsp.writeFile(path.join(honcho, ".honcho-upstream-version"), "test\n");
+  await fsp.writeFile(path.join(honcho, ".honcho-upstream-version"), "v3.0.11\n");
   await execFileAsync("git", ["init"], { cwd: honcho });
   await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: honcho });
   await execFileAsync("git", ["config", "user.name", "Test"], { cwd: honcho });
@@ -39,33 +66,15 @@ async function createMinimalHoncho(root) {
 test("distribution includes source and topology but excludes state and secrets", SOURCE_CHECKOUT_ONLY, async (t) => {
   const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-distribution-"));
   t.after(() => fsp.rm(temporary, { recursive: true, force: true }));
-  const honcho = path.join(temporary, "honcho");
-  await fsp.mkdir(path.join(honcho, "src"), { recursive: true });
-  await fsp.mkdir(path.join(honcho, "database"), { recursive: true });
-  await fsp.mkdir(path.join(honcho, "local-dashboard", "public"), { recursive: true });
-  await fsp.mkdir(path.join(honcho, "codex-openai-proxy"), { recursive: true });
-  await fsp.mkdir(path.join(honcho, ".bench"), { recursive: true });
-  await fsp.mkdir(path.join(honcho, "sdks", "python", "src", "honcho_ai.egg-info"), { recursive: true });
-  await fsp.writeFile(path.join(honcho, ".gitignore"), "docker-compose.yml\n.env.local\n*.egg-info/\n");
-  await fsp.writeFile(path.join(honcho, "Dockerfile"), "FROM scratch\n");
-  await fsp.writeFile(path.join(honcho, "LICENSE"), "AGPL test license\n");
-  await fsp.writeFile(path.join(honcho, "src", "main.py"), "# source\n");
-  await fsp.writeFile(path.join(honcho, "database", "init.sql"), "CREATE EXTENSION vector;\n");
-  await fsp.writeFile(path.join(honcho, "local-dashboard", "Dockerfile"), "FROM scratch\n");
-  await fsp.writeFile(path.join(honcho, "local-dashboard", "server.mjs"), "// dashboard\n");
-  await fsp.writeFile(path.join(honcho, "codex-openai-proxy", "package.json"), '{"private":true}\n');
-  await fsp.writeFile(path.join(honcho, "codex-openai-proxy", "server.mjs"), "// proxy\n");
-  await fsp.writeFile(path.join(honcho, ".honcho-upstream-version"), "v3.0.11\n");
+  // A preparer that left local state behind in its output: the builder's own
+  // filter still keeps it out of the bundle.
+  const honcho = await createWrappedHoncho(temporary, {
+    ".env": "MUST_NOT_COPY=private\n",
+    ".git/HEAD": "ref: refs/heads/main\n",
+    ".bench/messages.sqlite3": "private benchmark data\n",
+  });
+  // The wrapper checkout itself never ships, tracked or not.
   await fsp.writeFile(path.join(honcho, ".env"), "MUST_NOT_COPY=private\n");
-  await fsp.writeFile(path.join(honcho, ".bench", "messages.sqlite3"), "private benchmark data\n");
-  await fsp.writeFile(path.join(honcho, "docker-compose.yml"), "ignored local override\n");
-  await fsp.writeFile(path.join(honcho, ".env.local"), "LOCAL_SECRET=must-not-copy\n");
-  await fsp.writeFile(path.join(honcho, "sdks", "python", "src", "honcho_ai.egg-info", "PKG-INFO"), "ignored build metadata\n");
-  await execFileAsync("git", ["init"], { cwd: honcho });
-  await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: honcho });
-  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: honcho });
-  await execFileAsync("git", ["add", "."], { cwd: honcho });
-  await execFileAsync("git", ["commit", "-m", "fixture"], { cwd: honcho });
   await fsp.writeFile(path.join(honcho, "notes.txt"), "UNTRACKED_CONFIDENTIAL_SENTINEL\n");
   const environment = path.join(temporary, "source.env");
   await fsp.writeFile(environment, [
@@ -109,10 +118,10 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.equal(await fsp.access(path.join(bundle, "server", "honcho", ".env")).then(() => true, () => false), false);
   assert.equal(await fsp.access(path.join(bundle, "server", "honcho", ".git")).then(() => true, () => false), false);
   assert.equal(await fsp.access(path.join(bundle, "server", "honcho", ".bench")).then(() => true, () => false), false);
-  assert.equal(await fsp.access(path.join(bundle, "server", "honcho", "docker-compose.yml")).then(() => true, () => false), false);
-  assert.equal(await fsp.access(path.join(bundle, "server", "honcho", ".env.local")).then(() => true, () => false), false);
-  assert.equal(await fsp.access(path.join(bundle, "server", "honcho", "sdks", "python", "src", "honcho_ai.egg-info")).then(() => true, () => false), false);
-  assert.equal(await fsp.access(path.join(bundle, "server", "honcho", "notes.txt")).then(() => true, () => false), false);
+  assert.equal(await fsp.readFile(path.join(bundle, "server", "honcho", "local-dashboard", "server.mjs"), "utf8"), "// dashboard\n");
+  for (const wrapperOnly of ["notes.txt", "prepared.json", "selfhost-source.json", path.join("scripts", "prepare-source.mjs")]) {
+    assert.equal(await fsp.access(path.join(bundle, "server", "honcho", wrapperOnly)).then(() => true, () => false), false, wrapperOnly);
+  }
   const profile = await fsp.readFile(path.join(bundle, "server", "env.personal.example"), "utf8");
   assert.match(profile, /^LLM_OPENAI_API_KEY=$/m);
   assert.equal(profile.includes("AUTH_JWT_SECRET"), false);
@@ -168,9 +177,6 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.equal(hostProfileText.includes("11435"), false);
   const gatewayPin = JSON.parse(await fsp.readFile(path.join(bundle, "server", "gateway-source.json"), "utf8"));
   assert.equal(gatewayPin.repo, "https://github.com/team-memory-system/subscription-gateway");
-  for (const name of ["codex-openai-proxy", "claude-print-proxy"]) {
-    await assert.rejects(fsp.access(path.join(bundle, "server", "honcho", name)));
-  }
   assert.equal(hostProfile.ollama.enabled, true);
   assert.equal(hostProfile.ollama.model, "qwen3-embedding-4b-honcho-8192");
   assert.equal(hostProfile.ollama.baseModel, "qwen3-embedding:4b");
@@ -186,6 +192,8 @@ test("distribution includes source and topology but excludes state and secrets",
   assert.equal(typeof manifest.honchoAgentBridge.commit, "string");
   assert.equal(typeof manifest.honchoAgentBridge.dirty, "boolean");
   assert.equal(manifest.honcho.upstreamVersion, "v3.0.11");
+  assert.equal(manifest.honcho.upstream.commit, "a".repeat(40));
+  assert.deepEqual(manifest.honcho.patches.map((patch) => patch.path), ["patches/0001-selfhost-core.patch"]);
   assert.equal(manifest.honcho.dirty, true);
   assert.equal(manifest.hostServices.gateway.routerUrl, "http://127.0.0.1:11400/v1");
 
@@ -203,7 +211,7 @@ test("distribution includes source and topology but excludes state and secrets",
 test("failed environment, copy, and archive stages preserve the prior release byte-for-byte", SOURCE_CHECKOUT_ONLY, async (t) => {
   const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-distribution-rollback-"));
   t.after(() => fsp.rm(temporary, { recursive: true, force: true }));
-  const honcho = await createMinimalHoncho(temporary);
+  const honcho = await createWrappedHoncho(temporary);
   const output = path.join(temporary, "output");
   const bundle = path.join(output, "release");
   const archive = `${bundle}.tar.gz`;

@@ -1710,14 +1710,25 @@ test("the fetch stages the clone, drops its history, and leaves nothing behind o
   const calls = [];
   const fakeClone = async (command, args) => {
     calls.push([command, ...args]);
+    if (command === process.execPath) {
+      // The wrapper's preparer writes the runtime tree to --output.
+      const output = args[2];
+      await fsp.mkdir(path.join(output, "database"), { recursive: true });
+      await fsp.mkdir(path.join(output, "local-dashboard"), { recursive: true });
+      await fsp.writeFile(path.join(output, "Dockerfile"), "FROM scratch\n");
+      await fsp.writeFile(path.join(output, "LICENSE"), "AGPL\n");
+      await fsp.writeFile(path.join(output, "database", "init.sql"), "CREATE EXTENSION vector;\n");
+      await fsp.writeFile(path.join(output, "local-dashboard", "Dockerfile"), "FROM scratch\n");
+      await fsp.writeFile(path.join(output, ".honcho-source.json"), JSON.stringify({ kind: "honcho-selfhost-source" }));
+      return { stdout: "{}\n", stderr: "" };
+    }
     if (args[0] === "--version") return { stdout: "git version 2.0\n", stderr: "" };
     if (args[0] === "clone") {
       const target = args[args.length - 1];
       await fsp.mkdir(path.join(target, ".git"), { recursive: true });
-      await fsp.mkdir(path.join(target, "local-dashboard"), { recursive: true });
-      await fsp.writeFile(path.join(target, "Dockerfile"), "FROM scratch\n");
-      await fsp.writeFile(path.join(target, "LICENSE"), "AGPL\n");
-      await fsp.writeFile(path.join(target, "local-dashboard", "Dockerfile"), "FROM scratch\n");
+      await fsp.mkdir(path.join(target, "scripts"), { recursive: true });
+      await fsp.writeFile(path.join(target, "selfhost-source.json"), "{}\n");
+      await fsp.writeFile(path.join(target, "scripts", "prepare-source.mjs"), "// called by the runner\n");
       return { stdout: "", stderr: "" };
     }
     return { stdout: "11fc292b1bf8e2c7f4e0a5ee2721b2fbe4f29772\n", stderr: "" };
@@ -1734,6 +1745,7 @@ test("the fetch stages the clone, drops its history, and leaves nothing behind o
   assert.equal(await bundleFileExists(root, "honcho/Dockerfile"), true);
   assert.equal(await bundleFileExists(root, "honcho/.git"), false, "the clone's history is not kept");
   assert.equal(await bundleFileExists(root, "honcho.fetching"), false);
+  assert.equal(await bundleFileExists(root, "honcho.prepared"), false);
 
   // A second call is a no-op and does not run git again.
   calls.length = 0;

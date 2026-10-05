@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isWrappedHoncho, prepareHonchoTree } from "./honcho-source.mjs";
+import { prepareHonchoTree } from "./honcho-source.mjs";
 
 import {
   CHAT_MODEL_PREFIXES,
@@ -400,11 +400,7 @@ export async function buildDistribution(args, {
   const bundleName = safeBundleName(args.name || `honcho-agent-bridge-${packageJson.version}`);
   const bundle = path.join(outputRoot, bundleName);
   const archive = `${bundle}.tar.gz`;
-  const wrappedHoncho = await isWrappedHoncho(honchoSource);
-  const requiredSourceFiles = wrappedHoncho
-    ? ["selfhost-source.json", "scripts/prepare-source.mjs", "LICENSE", "local-dashboard/Dockerfile"]
-    : ["Dockerfile", "LICENSE", "src", "database/init.sql", "local-dashboard/Dockerfile"];
-  for (const required of requiredSourceFiles) {
+  for (const required of ["selfhost-source.json", "scripts/prepare-source.mjs", "LICENSE", "local-dashboard/Dockerfile"]) {
     if (!(await exists(path.join(honchoSource, required)))) throw new Error(`Honcho source is missing ${required}`);
   }
   const dirty = git(honchoSource, ["status", "--porcelain"]);
@@ -418,21 +414,12 @@ export async function buildDistribution(args, {
   await fsp.mkdir(candidateBundle, { recursive: true });
   try {
     const preparedHoncho = path.join(stageRoot, "prepared-honcho");
-    const sourceProvenance = wrappedHoncho ? await prepareHonchoTree(honchoSource, preparedHoncho) : null;
+    const sourceProvenance = await prepareHonchoTree(honchoSource, preparedHoncho);
     await copyTree(ROOT, candidateBundle);
     await fsp.mkdir(path.join(candidateBundle, "server", "honcho"), { recursive: true });
-    if (sourceProvenance) {
-      await fsp.cp(preparedHoncho, path.join(candidateBundle, "server", "honcho"), {
-        recursive: true, filter: item => !excluded(preparedHoncho, item),
-      });
-    } else {
-      await copyTree(honchoSource, path.join(candidateBundle, "server", "honcho"));
-    }
-    // Older source checkouts may still contain the proxies. They now ship with the
-    // subscription gateway.
-    for (const name of ["codex-openai-proxy", "claude-print-proxy"]) {
-      await fsp.rm(path.join(candidateBundle, "server", "honcho", name), { recursive: true, force: true });
-    }
+    await fsp.cp(preparedHoncho, path.join(candidateBundle, "server", "honcho"), {
+      recursive: true, filter: item => !excluded(preparedHoncho, item),
+    });
     await fsp.copyFile(path.join(honchoSource, "LICENSE"), path.join(candidateBundle, "HONCHO-LICENSE-AGPL-3.0.txt"));
 
     let hostProfile = null;
@@ -461,7 +448,8 @@ export async function buildDistribution(args, {
         commit: git(honchoSource, ["rev-parse", "HEAD"]),
         branch: git(honchoSource, ["branch", "--show-current"]),
         upstreamVersion: (await fsp.readFile(path.join(honchoSource, ".honcho-upstream-version"), "utf8").catch(() => "unknown")).trim(),
-        ...(sourceProvenance ? { upstream: sourceProvenance.upstream, patches: sourceProvenance.patches } : {}),
+        upstream: sourceProvenance.upstream,
+        patches: sourceProvenance.patches,
         dirty: Boolean(dirty),
       },
       hostServices: hostProfile,

@@ -5,11 +5,6 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export async function isWrappedHoncho(directory) {
-  try { await fs.access(path.join(directory, "selfhost-source.json")); return true; }
-  catch (error) { if (error.code === "ENOENT") return false; throw error; }
-}
-
 /** Export a wrapper's pinned upstream plus patches into the flat runtime layout. */
 export async function prepareHonchoTree(source, output, { runner = execFileAsync } = {}) {
   await runner(process.execPath, [path.join(source, "scripts", "prepare-source.mjs"), "--output", output], {
