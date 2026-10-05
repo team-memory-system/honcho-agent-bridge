@@ -440,6 +440,43 @@ node scripts/cli.mjs doctor
 
 For a portable install, replace `personal` with `portable`. `server prepare` reports the blank external LLM credential fields without printing their values; fill only those fields in the returned installed `.env` path before running `server start`. The collector and MCP bridge always remain on the host so they can read agent transcripts and integrate with the host tool cache. The Honcho API, dashboard, gateway, and Ollama endpoints bind to localhost; database ports are not exposed.
 
+### Logging in to a gateway on another computer
+
+The app's 게이트웨이 screen (`ui open --screen models`) can finish a gateway login when
+the browser is on a different computer from the gateway, such as a server without a
+screen. This needs subscription-gateway `03aa85d` or newer.
+
+- **The link:** 로그인 and 계정 추가 show the gateway's sign-in link.
+- **Claude:** paste the code the page shows after signing in. It goes to
+  `POST /api/gw/api/login/code`.
+- **Codex:** the browser stops on a `localhost:1455/auth/callback?…` address that
+  does not load. Paste the whole address. It goes to `/api/gw/api/login/callback`,
+  and the gateway replays it on its own computer.
+- **취소:** sends `/api/gw/api/login/cancel`.
+
+The relay sends no `Origin`, which the gateway's same-origin rule accepts. An older
+gateway sends no sign-in prompt, and the screen shows the old "브라우저에 열린 로그인
+창…" notice instead.
+
+When the screen opens, it picks up a login still waiting on the gateway. After 5
+minutes it gives up and cancels the login; sending a code or an address restarts the
+5 minutes.
+
+The app finds the gateway only through `GATEWAY_UI_URL` (or `GATEWAY_UI_PORT`) in the
+environment of its server process. A server that is already running keeps the
+address it started with. For a gateway on another computer, open a tunnel, then start
+the app's server with that address:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes -L 21450:127.0.0.1:11450 <server>
+# start the app's server with GATEWAY_UI_URL=http://127.0.0.1:21450 in its environment
+```
+
+Three things still assume the gateway is on this computer:
+- the "API 주소" row, which shows the router's address as the gateway sees it;
+- "게이트웨이 켜기", which starts or opens a gateway here;
+- the header link to the gateway's own screen. Opened through a tunnel port, that screen's buttons only work on a gateway at `03aa85d` or newer; an older one refuses them with 403.
+
 `server verify --profile personal` performs a production-shaped, non-destructive diagnostic: combined server status including the gateway's router health, a local Ollama embedding request proven to exceed 2048 evaluated tokens with truncation disabled and exactly 1536 output dimensions, Docker API-container access to both host services (Ollama and the router's `/health`), and Honcho health. It makes no model call by default. Add `--live-completion` only when an actual minimal completion through the router is intended; it uses the installed `.env`'s router address, key, model and effort, reads the key internally, never places it on a command line, sends it nowhere but this machine, returns only success and model, and discards the completion body.
 
 ## Sending to this server from other computers (Cloudflare) / 다른 컴퓨터에서 이 서버로 보내기
