@@ -4,11 +4,12 @@ import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { configEnvironment, installPaths, loadConfig } from "./config.mjs";
+import { resolveTranscriptPath as resolveGrokTranscriptPath } from "./providers/grok.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const QUEUE_RUNNER = path.join(SCRIPT_DIR, "queue.mjs");
 const COLLECTOR = path.join(SCRIPT_DIR, "collector.mjs");
-const DEFAULT_PROVIDERS = ["codex", "claude", "agy"];
+const DEFAULT_PROVIDERS = ["codex", "claude", "agy", "grok"];
 const RUNTIME_CONFIG = await loadConfig();
 
 function expandHome(value) {
@@ -136,18 +137,33 @@ async function logAggregate(results) {
 
 // A host can run a hook meant for another host: Codex 0.157 loaded the Claude
 // plugin's Stop hook too, which then queued a Codex rollout as a Claude transcript.
+// Grok also runs the hooks in ~/.claude/settings.json, with its own session's
+// updates.jsonl as transcript_path (under ~/.grok, or wherever GROK_HOME is).
+const GROK_SESSION_FILE = /(^|[\\/])\.grok[\\/]|(^|[\\/])(updates|chat_history)\.jsonl$/;
+
 function foreignTranscript(provider, input) {
   const transcript = String(input.transcript_path || "");
+  if ((provider === "claude" || provider === "codex") && GROK_SESSION_FILE.test(transcript)) return true;
   if (provider === "claude") return /[\\/]\.codex[\\/]/.test(transcript);
   if (provider === "codex") return /[\\/]\.claude[\\/]projects[\\/]/.test(transcript);
   return false;
+}
+
+// A Grok Stop payload names updates.jsonl, or only the session id and working
+// directory; what is queued is the session's chat_history.jsonl, and nothing when
+// the session has none on disk.
+function withGrokTranscript(provider, input) {
+  if (provider !== "grok") return input;
+  const { transcript_path: _given, ...rest } = input;
+  const transcriptPath = resolveGrokTranscriptPath(input);
+  return transcriptPath ? { ...rest, transcript_path: transcriptPath } : rest;
 }
 
 const { provider, passthrough } = parseArgs(process.argv.slice(2));
 const hookInput = normalizeHookInput(await readHookInput());
 if (foreignTranscript(provider, hookInput)) process.exit(0);
 const providers = provider === "all" ? DEFAULT_PROVIDERS : [provider];
-const results = providers.map((item) => runGate(item, passthrough, hookInput));
+const results = providers.map((item) => runGate(item, passthrough, withGrokTranscript(item, hookInput)));
 await logAggregate(results).catch(() => {});
 printIfUseful(results);
 process.exitCode = results.every((item) => item.status === 0 && !item.error) ? 0 : 1;

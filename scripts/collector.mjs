@@ -36,7 +36,7 @@ const MESSAGE_CHAR_LIMIT = Number(
 const STATE_LOCK_STALE_MS = Number(process.env.HONCHO_AGENT_STATE_LOCK_STALE_MS || "120000");
 const IMPORT_TRIGGER = process.env.HONCHO_AGENT_IMPORT_TRIGGER || process.env.HONCHO_CODEX_IMPORT_TRIGGER || "manual";
 
-const SUPPORTED_PROVIDERS = new Set(["codex", "claude", "agy", "chatgpt"]);
+const SUPPORTED_PROVIDERS = new Set(["codex", "claude", "agy", "chatgpt", "grok"]);
 const CODEX_SESSION_ROOT = expandHome(process.env.CODEX_SESSION_ROOT || "~/.codex/sessions");
 const CODEX_MAX_AGE_SECONDS = Number(process.env.HONCHO_CODEX_IMPORT_MAX_AGE_SECONDS || "180");
 const CODEX_DREAM_EVERY_MESSAGES = Number(process.env.HONCHO_CODEX_DREAM_EVERY_MESSAGES || "20");
@@ -739,6 +739,11 @@ async function main() {
         : {};
   if (!args.transcript) {
     args.transcript = hookInput.transcript_path || hookInput.transcriptPath || "";
+  }
+  // A Grok hook names updates.jsonl (or only the session); the messages are in the
+  // session's chat_history.jsonl.
+  if (args.provider === "grok") {
+    args.transcript = getProvider("grok").resolveTranscriptPath({ ...hookInput, transcript_path: args.transcript }) || args.transcript;
   }
   if (args.provider === "chatgpt") {
     // A ChatGPT conversation has no working directory, so it never belongs to a
