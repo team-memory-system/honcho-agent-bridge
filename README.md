@@ -219,6 +219,24 @@ gets an answer, without reading the underlying messages.
   names it. Codex's hook is the one `setup apply` writes into `~/.codex/hooks.json`;
   Codex asks the user to approve it before it runs. `main.mjs` also drops a Stop
   payload whose transcript belongs to the other host.
+- **Codex stops running a hook whose command changed.** Its trust turns to
+  `modified` (`hooks/list` shows it), and the hook does not run until the user
+  approves it again in the Codex app or with `/hooks`. For a one-off test,
+  `codex exec --dangerously-bypass-hook-trust` runs it anyway.
+- **On Windows the two hosts run hooks through different shells.** Codex uses
+  `cmd.exe /C`, Claude Code uses Git Bash. `node "C:/Users/<you>/…/scripts/main.mjs"
+  --provider codex` works in both: plain `node` from `PATH`, forward slashes, and
+  the path in double quotes. It also survives a Node upgrade through winget.
+- **A computer that already has conversations sends each one whole on its next
+  Stop.** The state files (`<dataDir>/state/codex.json`, `claude.json`) record which
+  turns were sent. With no state, the next Stop in an older session sends that
+  session's whole history, unless Honcho already holds it. On one Windows PC on
+  2026-10-05 that would have been 3,360 Codex and 1,043 Claude turns.
+  `main.mjs --provider <p> --transcript <file> --dry-run` shows what a Stop would
+  send. When those conversations reach the server another way, mark their current
+  turns as sent before the hook goes on. No command does this; that PC's state was
+  written by a one-off script over the collector's own parsers and
+  `turnHashCandidates`.
 - **A new server does not assume 8001 and 4173 are free.** `server prepare` picks the
   first free port from each (another Honcho or an SSH tunnel often holds 8001) and
   writes `HONCHO_API_PORT` / `HONCHO_DASHBOARD_PORT` into the installed `.env`; an
