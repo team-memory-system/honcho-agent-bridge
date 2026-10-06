@@ -1,14 +1,13 @@
 // 서버 → 기억 서버: the memory server on this computer. Install it, start and stop
-// it, choose the gateway model it thinks with, check it end to end, and see the
-// pieces beside it (the gateway's host services and the Ollama embedding model).
-// Building or restarting it is a deployment, so every button that does that says
-// so first. Sharing it lives under 내 컴퓨터 and 팀 (share.js).
+// it, and check it end to end. The models it uses, the subscription gateway and the
+// Ollama embedding model, are the 모델 tab (models.js). Building or restarting it
+// is a deployment, so every button that does that says so first. Sharing it lives
+// under 내 컴퓨터 and 팀 (share.js).
 import { cli, gateway, post } from "../lib/api.js";
-import { modelGroups } from "../lib/accounts.js";
 import { h, clear } from "../lib/dom.js";
 import { screenTabs } from "../lib/hub.js";
 import { api, app, go, loadContext, refreshStatus } from "../lib/state.js";
-import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, statusTag, tag, toast } from "../lib/ui.js";
+import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, statusTag, tag } from "../lib/ui.js";
 
 const CHECK_NAMES = {
   status: "서버와 컨테이너",
@@ -97,7 +96,7 @@ export default {
     const body = h("div", { class: "pad" });
     const refresh = button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침" });
     page.append(
-      pageHead({ title: "서버", subtitle: "기억을 보관하는 서버와, 그 옆에서 도는 게이트웨이·임베딩을 관리합니다.", actions: [refresh], subnav: screenTabs("server") }),
+      pageHead({ title: "서버", subtitle: "기억을 보관하는 서버를 켜고 끄고, 끝에서 끝까지 점검합니다.", actions: [refresh], subnav: screenTabs("server") }),
       h("div", { class: "page-body" }, body),
     );
 
@@ -108,14 +107,12 @@ export default {
 
     async function draw() {
       clear(body, h("div", { class: "empty" }, spinner()));
-      const [status, host, gatewayStatus] = await Promise.allSettled([
+      const [status, gatewayStatus] = await Promise.allSettled([
         post("/api/server/status", { profile: "personal" }),
-        post("/api/host/status", {}),
         gateway.status(),
       ]);
       const gatewayReport = gatewayStatus.status === "fulfilled" ? gatewayStatus.value : null;
       const server = status.status === "fulfilled" ? status.value : null;
-      const hostStatus = host.status === "fulfilled" ? host.value : null;
       planCache = !server?.installed ? await post("/api/server/plan", { profile: "personal" }).catch(() => null) : null;
       const context = app.context;
       // A memory server on another computer: this one must not get a second one.
@@ -126,7 +123,7 @@ export default {
       if (!server) {
         nodes.push(errorNotice(status.reason));
       } else if (server.installed) {
-        nodes.push(serverSection(server), modelSection(gatewayReport), hostSection(hostStatus), verifySection());
+        nodes.push(serverSection(server), verifySection());
       } else {
         nodes.push(section({ title: "기억 서버" },
           external
@@ -137,7 +134,6 @@ export default {
         nodes.push(external
           ? h("details", { class: "raw", style: { marginTop: "-8px" }, open: installOpen ? true : null, ontoggle: (event) => { installOpen = event.currentTarget.open; } }, h("summary", { class: "muted" }, "그래도 이 컴퓨터에 새 서버를 설치하려면"), h("div", { style: { marginTop: "12px" } }, notice("warn", "한 사람의 기억은 서버 하나에 모아야 합니다. 지금 서버를 옮기려는 게 아니라면 설치하지 마세요."), installSection(server, gatewayReport)))
           : installSection(server, gatewayReport));
-        if (hostStatus?.installed) nodes.push(hostSection(hostStatus));
       }
       clear(body, nodes);
     }
@@ -184,76 +180,6 @@ export default {
       ),
       h("p", { class: "muted", style: { fontSize: "12.5px", marginTop: "10px" } }, `설치 위치 ${server.directory}`),
       );
-    }
-
-    // 기억 서버가 쓰는 모델: the gateway model the server sorts conversations and
-    // answers with. Only a server this app installed on this computer can be
-    // changed here; changing it rewrites the server's settings and restarts it.
-    function modelSection(gatewayReport) {
-      const local = app.context?.localServer;
-      if (!local) return null;
-      const current = local.chatModel || "";
-      const groups = modelGroups(gatewayReport?.models?.models, gatewayReport?.accounts);
-      const known = groups.some((group) => group.models.includes(current));
-      const note = "대화를 정리하고, 묻기에 답할 때 쓰는 모델입니다. 바꾸면 기억 서버를 다시 시작합니다.";
-      const now = h("div", {}, h("div", { class: "title" }, current ? h("code", { class: "mono" }, current) : "정해지지 않음"), h("div", { class: "sub" }, "지금 설정"));
-      if (!groups.length) {
-        return section({ id: "server-model", title: "기억 서버가 쓰는 모델", note },
-          h("div", { class: "rows" }, h("div", { class: "row" }, now, h("div", { class: "end" }))),
-          h("div", { style: { marginTop: "12px" } }, notice("warn",
-            h("b", {}, "고를 수 있는 모델이 없습니다."),
-            h("div", {}, gatewayReport ? "게이트웨이에 연결된 계정이 없습니다. 구독 게이트웨이에서 계정을 로그인하고 연결하세요." : "구독 게이트웨이가 답하지 않습니다. 게이트웨이를 켜면 모델 목록이 보입니다."),
-            h("div", { class: "form-actions", style: { marginTop: "8px" } }, button("구독 게이트웨이로", { kind: "small", onClick: () => go("models") })),
-          )),
-        );
-      }
-      const choice = h("select", { class: "select", style: { width: "auto", minWidth: "220px" }, "aria-label": "기억 서버 모델" },
-        current && !known ? h("option", { value: current, selected: true }, `${current} (게이트웨이에 없음)`) : null,
-        groups.map((group) => h("optgroup", { label: group.label },
-          group.models.map((id) => h("option", { value: id, selected: id === current ? true : null }, id)))),
-      );
-      return section({ id: "server-model", title: "기억 서버가 쓰는 모델", note },
-        h("div", { class: "rows" }, h("div", { class: "row" },
-          now,
-          h("div", { class: "end" }, choice, button("바꾸기", { kind: "small", onClick: async (event) => {
-            if (choice.value === current) return toast("이미 이 모델을 씁니다");
-            const ok = await confirmSheet({ title: `${choice.value}로 바꿀까요?`, text: "기억 서버 설정을 고치고 다시 시작합니다. 1~2분 동안 기억을 쓰거나 찾을 수 없습니다.", confirm: "바꾸고 다시 시작" });
-            if (!ok) return;
-            await busy(event.currentTarget, async () => {
-              await cli("/api/server/start", { profile: "personal", model: choice.value });
-              await loadContext();
-              await draw();
-              refreshStatus();
-            }, { done: "모델을 바꿨습니다" });
-          } })),
-        )),
-      );
-    }
-
-    function hostSection(host) {
-      if (!host) return null;
-      const ollama = host.ollama || {};
-      return section({
-        title: "서버 옆에서 도는 것",
-        note: "구독 게이트웨이는 스스로 자동 시작합니다. Ollama 임베딩 감시는 컴퓨터를 다시 켠 뒤 여기서 한 번 켜야 다시 돕니다.",
-        actions: [
-          host.running
-            ? button("멈추기", { kind: "small", iconName: "stop", onClick: (event) => busy(event.currentTarget, async () => { await cli("/api/host/stop", {}); await draw(); refreshStatus(); }, { done: "멈췄습니다" }) })
-            : button("켜기", { kind: "small primary", iconName: "play", onClick: (event) => busy(event.currentTarget, async () => { await cli("/api/host/start", {}); await draw(); refreshStatus(); }, { done: "켰습니다" }) }),
-        ],
-      },
-      h("div", { class: "rows" },
-        h("div", { class: "row" },
-          h("div", {}, h("div", { class: "title" }, statusTag(host.gateway?.ok, ["준비됨", host.gateway?.installed ? "문제 있음" : "설치 안 됨"]), "구독 게이트웨이"),
-            h("div", { class: "sub" }, host.gateway?.ok ? "계정·모델·나눠 쓰는 방식은 구독 게이트웨이에서 정합니다." : host.gateway?.error || "")),
-          h("div", { class: "end" }, button("게이트웨이 설정", { kind: "small quiet", onClick: () => go("models") })),
-        ),
-        h("div", { class: "row" },
-          h("div", {}, h("div", { class: "title" }, statusTag(ollama.healthy && ollama.resident, ["올라가 있음", ollama.healthy ? "모델이 내려가 있음" : "Ollama 꺼짐"]), "임베딩 모델"),
-            h("div", { class: "sub" }, [ollama.model, host.supervisor?.processAlive ? "감시 중" : "감시 꺼짐"].filter(Boolean).join(" · "))),
-          h("div", { class: "end" }),
-        ),
-      ));
     }
 
     function verifySection() {

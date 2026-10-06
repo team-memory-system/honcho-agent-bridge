@@ -3,6 +3,7 @@
 // is the same `cli.mjs backup` command a terminal would run (scripts/backup.mjs).
 import { cli, get } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
+import { pickFolder } from "../lib/folders.js";
 import { ago, fullDate, number } from "../lib/format.js";
 import { button, busy, details, errorNotice, notice, pageHead, section, spinner, tag, toast, toggle } from "../lib/ui.js";
 
@@ -102,7 +103,24 @@ export default {
     function drawSummary() {
       const run = status.lastRun;
       const schedule = status.schedule || {};
-      const when = `매일 ${pad(schedule.hour ?? 3)}:${pad(schedule.minute ?? 0)}`;
+      const minute = pad(schedule.minute ?? 0);
+      const when = `매일 ${pad(schedule.hour ?? 3)}:${minute}`;
+      // The hour is the person's; the minute comes from the device id, so computers
+      // backing up to one place do not start together.
+      const hour = h("select", { class: "select hour-select", "aria-label": "백업 시각", disabled: !status.destination },
+        Array.from({ length: 24 }, (_, value) => h("option", { value: String(value), selected: value === (schedule.hour ?? 3) ? true : null }, pad(value))));
+      hour.addEventListener("change", async () => {
+        const next = Number(hour.value);
+        hour.disabled = true;
+        try {
+          const result = await cli("/api/backup/schedule", { on: Boolean(schedule.registered), hour: next });
+          status.schedule = result.schedule || { ...schedule, hour: next };
+          toast(schedule.registered ? `매일 ${pad(next)}:${minute}에 백업합니다` : "백업 시각을 바꿨습니다");
+        } catch (error) {
+          toast(error.message, "bad");
+        }
+        drawSummary();
+      });
       const check = schedule.check || null;
       clear(summary, alertBanner(status.alert), h("div", { class: "panel summary" },
         h("div", { class: "summary-head" },
@@ -129,7 +147,8 @@ export default {
               // The 알림 line follows whether the daytime check is registered now.
               drawSummary();
             }, { label: "자동 백업", disabled: !status.destination }),
-            h("span", { class: "muted", style: { marginLeft: "8px" } }, `${when} · 컴퓨터가 꺼져 있었으면 켜진 뒤에`),
+            h("span", { class: "backup-when" }, "매일", hour, `:${minute}`),
+            h("span", { class: "muted" }, "컴퓨터가 꺼져 있었으면 켜진 뒤에"),
           ),
           h("dt", {}, "알림"), h("dd", {},
             "백업이 실패하거나 48시간 넘게 성공하지 못하면 이 컴퓨터에 알림을 보냅니다.",
@@ -181,8 +200,12 @@ export default {
     function folderForm(container) {
       const current = status?.destination?.kind === "folder" ? status.destination.path : "";
       const input = h("input", { class: "input", value: current, placeholder: "/Volumes/백업드라이브 또는 E:\\백업", spellcheck: "false" });
+      const choose = button("폴더 고르기", { iconName: "folder", onClick: async () => {
+        const folder = await pickFolder({ title: "백업할 폴더 고르기", start: input.value.trim() });
+        if (folder) input.value = folder;
+      } });
       clear(container, h("div", { class: "panel" },
-        h("label", { class: "field wide" }, h("span", {}, "폴더"), input,
+        h("div", { class: "field wide" }, h("span", {}, "폴더"), h("div", { class: "input-row" }, input, choose),
           h("small", {}, "지금 연결돼 있는 폴더만 고를 수 있습니다. 드라이브를 빼면 다시 꽂을 때까지 연결 대기로 둡니다.")),
         h("div", { class: "form-actions" }, button("이 폴더로 정하기", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
           await cli("/api/backup/set", { kind: "folder", path: input.value.trim() });

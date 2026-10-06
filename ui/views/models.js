@@ -1,15 +1,17 @@
-// 게이트웨이: the subscription gateway, seen from here. Log Codex and Claude
-// accounts in, order them inside each backend and choose how they share the load,
-// and see the models they offer (써 보기 opens 묻기 with that model). Which model
-// the memory server uses is a server setting, on the 서버 screen. Everything is
-// the gateway's own API; this page only puts it in one place.
-import { cli, gateway } from "../lib/api.js";
+// 서버 → 모델: the models the memory server on this computer uses. The
+// subscription gateway turns Codex and Claude accounts into the chat models: log
+// accounts in, order them inside each backend, choose how they share the load, and
+// see the models they offer (써 보기 opens 묻기 with that model); everything there is
+// the gateway's own API. The memory server's chat model is chosen here too, and
+// the Ollama embedding model kept resident by the host supervisor is shown with a
+// way to start it again.
+import { cli, gateway, post } from "../lib/api.js";
 import { accountGroups, backendName, loginEnded, loginPanelText, loginPrompt, loginSubmission, modelGroups, pendingLogin, sharedGroups, signInLink } from "../lib/accounts.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { screenTabs } from "../lib/hub.js";
 import { ago, number } from "../lib/format.js";
-import { app, go, refreshStatus } from "../lib/state.js";
-import { button, busy, confirmSheet, empty, errorNotice, notice, pageHead, section, segmented, spinner, tag, toast } from "../lib/ui.js";
+import { app, go, loadContext, refreshStatus } from "../lib/state.js";
+import { button, busy, confirmSheet, empty, errorNotice, notice, pageHead, section, segmented, spinner, statusTag, tag, toast } from "../lib/ui.js";
 
 const LOGIN_WAIT_MS = 5 * 60_000;
 
@@ -18,14 +20,14 @@ function planLabel(plan) {
 }
 
 export default {
-  title: "게이트웨이",
+  title: "모델",
   async mount(page, params) {
     const body = h("div", { class: "pad" });
     const refresh = button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침" });
     page.append(
       pageHead({
         title: "서버",
-        subtitle: "Codex·Claude 구독 계정을 모델 API로 바꿔 줍니다. 계정을 넣고 나눠 쓰는 방식을 정하고, 모델을 써 봅니다.",
+        subtitle: "기억 서버가 쓰는 모델, 구독 게이트웨이, 임베딩 모델을 관리합니다.",
         subnav: screenTabs("models"),
         actions: [
           app.context?.gatewayUiUrl ? h("a", { class: "btn quiet", href: app.context.gatewayUiUrl, target: "_blank", rel: "noreferrer" }, "게이트웨이 화면") : null,
@@ -36,6 +38,8 @@ export default {
     );
 
     let report = null;
+    // The host side: the Ollama embedding model and the supervisor keeping it up.
+    let host = null;
     // The login this screen waits on: { accountId, backend, since, prompt, view }.
     // `prompt` is null from a gateway that sends none, which keeps the old notice.
     let waiting = null;
@@ -44,14 +48,15 @@ export default {
     let advancedOpen = false;
 
     async function load() {
-      try {
-        report = await gateway.status();
-        app.status.gateway.report = report;
-        return null;
-      } catch (error) {
+      const [gatewayResult, hostResult] = await Promise.allSettled([gateway.status(), post("/api/host/status", {})]);
+      host = hostResult.status === "fulfilled" ? hostResult.value : null;
+      if (gatewayResult.status === "rejected") {
         report = null;
-        return error;
+        return gatewayResult.reason;
       }
+      report = gatewayResult.value;
+      app.status.gateway.report = report;
+      return null;
     }
 
     async function draw() {
@@ -69,6 +74,8 @@ export default {
       clear(body,
         waiting ? (waiting.view ? waiting.view.root : loginPanel()) : null,
         overview(accounts, serving),
+        embeddingSection(),
+        serverModelSection(),
         accountsSection(accounts, serving),
         modelsSection(models, accounts),
         servicesSection(report.services || []),
@@ -107,13 +114,14 @@ export default {
           button("기억 서버로", { onClick: () => go("server") }),
         ),
         error && !error.unreachable ? h("div", { style: { marginTop: "12px" } }, errorNotice(error)) : null,
+        h("div", { style: { marginTop: "28px" } }, embeddingSection()),
       );
     }
 
     function overview(accounts, serving) {
       const loggedIn = accounts.filter((account) => account.login?.loggedIn).length;
       const unconnected = accounts.filter((account) => account.login?.loggedIn && !serving.has(account.id));
-      return section({ title: "연결 상태" },
+      return section({ title: "구독 게이트웨이" },
         h("div", { class: "rows" },
           h("div", { class: "row" },
             h("div", {},
@@ -448,7 +456,7 @@ export default {
     function modelsSection(models, accounts) {
       const serverModel = app.context?.localServer?.chatModel || "";
       const groups = modelGroups(models, accounts);
-      return section({ title: "모델", note: "계정이 제공하는 모델입니다. 써 보기를 누르면 묻기 화면에서 그 모델에 바로 물어볼 수 있습니다." },
+      return section({ title: "게이트웨이 모델", note: "써 보기를 누르면 묻기 화면에서 그 모델에 바로 물어봅니다." },
         groups.length
           ? groups.map((group) => h("div", { class: "gw-group" },
             h("div", { class: "gw-group-head" }, h("b", {}, group.label), h("span", {}, `모델 ${number(group.models.length)}개`)),
@@ -458,9 +466,67 @@ export default {
             ))),
           ))
           : empty("쓸 수 있는 모델이 없습니다", "계정을 로그인하고 연결하면 모델이 보입니다."),
-        app.context?.localServer
-          ? h("p", { class: "gw-foot" }, "기억 서버가 쓰는 모델은 기억 서버 탭에서 바꿉니다. ", button("기억 서버로", { kind: "small quiet gw-go", iconName: "arrow", onClick: () => go("server") }))
-          : null,
+      );
+    }
+
+    // The gateway model the memory server sorts conversations and answers with.
+    // Only a server this app installed on this computer can be changed here;
+    // changing it rewrites the server's settings and restarts it.
+    function serverModelSection() {
+      const local = app.context?.localServer;
+      if (!local) return null;
+      const current = local.chatModel || "";
+      const groups = modelGroups(report?.models?.models, report?.accounts);
+      const known = groups.some((group) => group.models.includes(current));
+      const now = h("div", {}, h("div", { class: "title" }, current ? h("code", { class: "mono" }, current) : "정해지지 않음"), h("div", { class: "sub" }, "대화를 정리하고 묻기에 답하는 모델"));
+      if (!groups.length) {
+        return section({ id: "server-model", title: "기억 서버가 쓰는 모델" },
+          h("div", { class: "rows" }, h("div", { class: "row" }, now, h("div", { class: "end" }))),
+          h("div", { style: { marginTop: "12px" } }, notice("warn", h("b", {}, "고를 수 있는 모델이 없습니다."), h("div", {}, "아래 구독 계정에서 계정을 로그인하고 연결하세요."))),
+        );
+      }
+      const choice = h("select", { class: "select", style: { width: "auto", minWidth: "220px" }, "aria-label": "기억 서버 모델" },
+        current && !known ? h("option", { value: current, selected: true }, `${current} (게이트웨이에 없음)`) : null,
+        groups.map((group) => h("optgroup", { label: group.label },
+          group.models.map((id) => h("option", { value: id, selected: id === current ? true : null }, id)))),
+      );
+      return section({ id: "server-model", title: "기억 서버가 쓰는 모델" },
+        h("div", { class: "rows" }, h("div", { class: "row" },
+          now,
+          h("div", { class: "end" }, choice, button("바꾸기", { kind: "small", onClick: async (event) => {
+            if (choice.value === current) return toast("이미 이 모델을 씁니다");
+            const ok = await confirmSheet({ title: `${choice.value}로 바꿀까요?`, text: "기억 서버 설정을 고치고 다시 시작합니다. 1~2분 동안 기억을 쓰거나 찾을 수 없습니다.", confirm: "바꾸고 다시 시작" });
+            if (!ok) return;
+            await busy(event.currentTarget, async () => {
+              await cli("/api/server/start", { profile: "personal", model: choice.value });
+              await loadContext();
+              await draw();
+              refreshStatus();
+            }, { done: "모델을 바꿨습니다" });
+          } })),
+        )),
+      );
+    }
+
+    // The Ollama embedding model. The supervisor keeping it resident starts at
+    // login by itself; 켜기 is for when it was stopped or failed.
+    function embeddingSection() {
+      if (!host?.installed) return null;
+      const ollama = host.ollama || {};
+      const up = Boolean(ollama.healthy && ollama.resident);
+      const watching = Boolean(host.supervisor?.processAlive);
+      return section({ title: "임베딩 모델" },
+        h("div", { class: "rows" }, h("div", { class: "row" },
+          h("div", {},
+            h("div", { class: "title" }, statusTag(up, ["올라가 있음", ollama.healthy ? "모델이 내려가 있음" : "Ollama 꺼짐"]), ollama.model ? h("code", { class: "mono" }, ollama.model) : "Ollama"),
+            watching ? null : h("div", { class: "sub" }, "감시 꺼짐: 켜기를 누르세요."),
+          ),
+          h("div", { class: "end" }, up && watching ? null : button("켜기", { kind: "small primary", iconName: "play", onClick: (event) => busy(event.currentTarget, async () => {
+            await cli("/api/host/start", {});
+            await draw();
+            refreshStatus();
+          }, { done: "켰습니다" }) })),
+        )),
       );
     }
 

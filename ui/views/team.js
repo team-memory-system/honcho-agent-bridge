@@ -1,13 +1,12 @@
 // 팀: what this memory gives teammates and what this computer takes from theirs.
-// With the server here: who may ask it (내 기억 공유), the tools they get, and what
-// they asked. On any computer: teammates' memories in this computer's agents, and
-// chosen folders sent to a company server as well.
+// With the server here: who may ask it (내 기억 공유) and what they asked. On any
+// computer: teammates' memories in this computer's agents. Teammates get `chat`
+// alone, fixed in the server's settings, so there are no tool switches here.
 import { hub } from "../lib/hub.js";
 import { app } from "../lib/state.js";
 import audit from "./audit.js";
 import { TASKS, openTask, taskState } from "./connect.js";
 import { openShare, shareState } from "./share.js";
-import { openTools } from "./tools.js";
 
 const task = (key) => TASKS.find((item) => item.key === key);
 const serverHere = () => Boolean(app.context?.localServer);
@@ -20,17 +19,10 @@ export default hub({
     {
       key: "share",
       title: "내 기억 공유",
-      why: "팀원이 Google로 로그인해 이 기억에 묻게 합니다. 팀원 명단과 팀 주소도 여기 있습니다.",
+      why: "팀원이 Google로 로그인해 이 기억에 chat으로 묻게 합니다. 팀원 명단과 팀 주소도 여기 있습니다.",
       available: serverHere,
       refine: shareState,
       open: (page, head) => openShare(page, head, "team"),
-    },
-    {
-      key: "tools",
-      title: "팀원이 쓰는 도구",
-      why: "팀원의 Claude Code·Codex가 이 기억 서버에서 부를 수 있는 MCP 도구를 켜고 끕니다.",
-      available: serverHere,
-      open: (page, head) => openTools(page, head, "shared"),
     },
     {
       key: "audit",
@@ -41,6 +33,5 @@ export default hub({
     },
     // The 연결 task is "share"; here it is the other way round from 내 기억 공유.
     { ...task("share"), key: "memories", state: () => taskState("share"), open: (page, head) => openTask(page, "share", head) },
-    { ...task("targets"), state: () => taskState("targets"), open: (page, head) => openTask(page, "targets", head) },
   ],
 });

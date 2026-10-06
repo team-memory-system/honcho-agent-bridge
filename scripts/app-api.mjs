@@ -1,7 +1,7 @@
 // What the Team Memory app needs beyond the CLI.
 //
 // The app is one screen over three programs: the Honcho server (memories), its
-// dashboard container (MCP tool switches and the audit log), and the subscription
+// dashboard container (the audit log and the tools it names), and the subscription
 // gateway (accounts and models). Each keeps its own API. This module only knows
 // where each one answers on this machine and relays the app's requests there, so
 // the browser talks to one origin and never holds a Honcho token itself.
@@ -21,7 +21,7 @@ import { ALL_TOOLS, WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { publicUrl } from "./redact.mjs";
 import { installedServerModel, installedServerPorts } from "./server-manager.mjs";
-import { configuredTargets, targetSummary } from "./targets.mjs";
+import { configuredTargets, countPending, sentSummary, targetSummary } from "./targets.mjs";
 import { registeredTeamServers } from "./team-access.mjs";
 import { VERSION } from "./version.mjs";
 
@@ -104,6 +104,33 @@ async function teamMemoryContext(options = {}) {
   return { connected: names.size, claude: Object.keys(registered.claude).length, codex: Object.keys(registered.codex).length };
 }
 
+/**
+ * This computer's conversations on their way into its own memory server (대화 쌓기),
+ * from the spool and state the collector keeps (configEnvironment, main.mjs):
+ * `{ pending, sessions, lastSentAt }`, the turns waiting to be sent, the
+ * conversations sent so far, and when the last one went. Files only, no request.
+ */
+export async function collectFlow(config) {
+  const { dataDir } = installPaths(config);
+  const agents = Object.entries(config?.agents || {}).filter(([, enabled]) => enabled).map(([name]) => name);
+  let pending = 0;
+  let sessions = 0;
+  let lastSentAt = "";
+  for (const provider of agents) {
+    pending += await countPending(path.join(dataDir, "spool", provider, "pending"));
+    const sent = await sentSummary(path.join(dataDir, "state", `${provider}.json`));
+    sessions += sent.sessions;
+    if (sent.lastAt > lastSentAt) lastSentAt = sent.lastAt;
+  }
+  return { pending, sessions, lastSentAt: lastSentAt || null };
+}
+
+/** The dashboard's flow: the own server's side (collectFlow) and each other server's. */
+export async function appFlow(config) {
+  if (!config) return { collect: null, targets: [] };
+  return { collect: await collectFlow(config), targets: await targetsContext(config) };
+}
+
 async function targetsContext(config) {
   const targets = [];
   for (const target of configuredTargets(config)) {
@@ -179,7 +206,7 @@ export async function relayHoncho(req, res, url, options = {}) {
   });
 }
 
-/** `/api/dashboard/...` → the server's dashboard: MCP tool switches and the audit log. */
+/** `/api/dashboard/...` → the server's dashboard: the audit log and the tools it names. */
 export async function relayDashboard(req, res, url, options = {}) {
   const endpoints = await appEndpoints(options);
   return relay(req, res, `${endpoints.dashboardUrl}${url.pathname}${url.search}`, {
@@ -305,7 +332,7 @@ export async function setLocalTool({ name, enabled }, { config } = {}) {
   if (!ALL_TOOLS.includes(name)) throw Object.assign(new Error(`Unknown MCP tool: ${name}`), { status: 400 });
   if (typeof enabled !== "boolean") throw Object.assign(new Error("enabled must be true or false."), { status: 400 });
   const loaded = config === undefined ? await loadConfig() : config;
-  if (!loaded) throw Object.assign(new Error("대화 수집을 먼저 설정하세요."), { status: 409 });
+  if (!loaded) throw Object.assign(new Error("대화 쌓기를 먼저 켜세요."), { status: 409 });
   const current = await localTools({ config: loaded });
   const disabled = new Set(current.tools.filter((tool) => !tool.enabled).map((tool) => tool.name));
   if (enabled) disabled.delete(name); else disabled.add(name);

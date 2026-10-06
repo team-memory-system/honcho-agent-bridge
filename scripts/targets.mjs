@@ -232,7 +232,8 @@ export function withoutTargetFilter(env) {
   return next;
 }
 
-async function countPending(directory) {
+/** How many turns wait in a spool's pending folder to be sent. */
+export async function countPending(directory) {
   try {
     return (await fsp.readdir(directory)).filter((name) => name.endsWith(".json")).length;
   } catch {
@@ -240,18 +241,36 @@ async function countPending(directory) {
   }
 }
 
-async function lastImportedAt(file) {
+// state file -> { size, mtimeMs, summary }: a file that has not changed is not parsed again.
+const sentCache = new Map();
+
+/**
+ * What a collector state file says was sent: `{ lastAt, sessions }`, the newest
+ * send and how many conversations went. Missing or unreadable: nothing sent.
+ */
+export async function sentSummary(file) {
+  let stat;
   try {
-    const state = JSON.parse(await fsp.readFile(file, "utf8"));
-    let latest = "";
-    for (const session of Object.values(state?.sessions || {})) {
-      const value = typeof session?.last_imported_at === "string" ? session.last_imported_at : "";
-      if (value > latest) latest = value;
-    }
-    return latest;
+    stat = await fsp.stat(file);
   } catch {
-    return "";
+    return { lastAt: "", sessions: 0 };
   }
+  const cached = sentCache.get(file);
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.summary;
+  let summary = { lastAt: "", sessions: 0 };
+  try {
+    const sessions = Object.values(JSON.parse(await fsp.readFile(file, "utf8"))?.sessions || {});
+    let lastAt = "";
+    for (const session of sessions) {
+      const value = typeof session?.last_imported_at === "string" ? session.last_imported_at : "";
+      if (value > lastAt) lastAt = value;
+    }
+    summary = { lastAt, sessions: sessions.length };
+  } catch {
+    // Caught mid-write: the next write changes the file, and it is read again.
+  }
+  sentCache.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, summary });
+  return summary;
 }
 
 /** What a caller may see about a target: never a secret, only whether one is set. */
@@ -261,8 +280,8 @@ export async function targetSummary(config, target) {
   let lastSentAt = "";
   for (const provider of TARGET_PROVIDERS) {
     pending += await countPending(paths.pending(provider));
-    const sent = await lastImportedAt(paths.state(provider));
-    if (sent > lastSentAt) lastSentAt = sent;
+    const { lastAt } = await sentSummary(paths.state(provider));
+    if (lastAt > lastSentAt) lastSentAt = lastAt;
   }
   return {
     id: target.id,

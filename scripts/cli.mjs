@@ -77,6 +77,7 @@ import {
 import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
 import { checkPrereqs, FEATURES, parseFeatures } from "./prereqs.mjs";
 import { backupCommand } from "./backup.mjs";
+import { transcriptFiles } from "./projects.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MAIN_SCRIPT = path.join(SCRIPT_DIR, "main.mjs");
@@ -1360,38 +1361,6 @@ async function targetTest(id) {
 // backfill.json, so the next run carries on where this one stopped. The importer
 // dedupes against the target's own state and what that server already holds, so
 // running it again sends nothing twice.
-
-async function walkFiles(root, accept, depth = Infinity) {
-  const found = [];
-  const stack = [{ directory: root, level: 0 }];
-  while (stack.length) {
-    const { directory, level } = stack.pop();
-    let entries;
-    try {
-      entries = await fsp.readdir(directory, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const full = path.join(directory, entry.name);
-      if (entry.isDirectory() && level + 1 < depth) stack.push({ directory: full, level: level + 1 });
-      else if (entry.isFile() && accept(entry.name)) found.push(full);
-    }
-  }
-  return found;
-}
-
-/** Where each agent keeps its transcripts on this computer. */
-async function transcriptFiles(config, provider) {
-  if (provider === "codex") {
-    const root = config?.sources?.codex?.root || path.join(userHome(), ".codex", "sessions");
-    return walkFiles(root, (name) => name.startsWith("rollout-") && name.endsWith(".jsonl"));
-  }
-  // Claude Code: ~/.claude/projects/<project>/<session>.jsonl. Subagent transcripts
-  // sit deeper and are not conversations of their own.
-  const root = config?.sources?.claude?.root || path.join(userHome(), ".claude", "projects");
-  return walkFiles(root, (name) => name.endsWith(".jsonl"), 2);
-}
 
 function parseSince(value) {
   if (value === undefined) return { sinceMs: 0, issues: [] };

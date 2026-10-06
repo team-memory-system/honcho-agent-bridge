@@ -16,11 +16,13 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { appContext, localTools, relayDashboard, relayGateway, relayHoncho, sessionsPage, setLocalTool } from "./app-api.mjs";
-import { configEnvironment, loadConfig } from "./config.mjs";
+import { appContext, appFlow, localTools, relayDashboard, relayGateway, relayHoncho, sessionsPage, setLocalTool } from "./app-api.mjs";
+import { configEnvironment, loadConfig, userHome } from "./config.mjs";
+import { listFolders } from "./folders.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
 import { FEATURES, parseFeatures } from "./prereqs.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
+import { conversationProjects } from "./projects.mjs";
 import { redactSecrets } from "./redact.mjs";
 import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
 import { API_TOKEN_ENV, codexLogin, INVITE_ENV, teamAddress, teammateAdd, teamName } from "./team-access.mjs";
@@ -406,6 +408,18 @@ export function backupSetInvocation(body) {
   return null;
 }
 
+/**
+ * What `/api/backup/schedule` runs: on or off, and the hour of the nightly run when
+ * the request names one. Null for an hour that is not a whole number from 0 to 23.
+ */
+export function backupScheduleInvocation(body) {
+  const args = ["backup", "schedule", body?.on === true ? "on" : "off"];
+  const hour = body?.hour;
+  if (hour === undefined || hour === null) return args;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  return [...args, `--hour=${hour}`];
+}
+
 const BACKUP_ROUTES = {
   "/api/backup/set": async (body) => {
     const args = backupSetInvocation(body);
@@ -413,7 +427,11 @@ const BACKUP_ROUTES = {
     return runCli(args, { timeout: 120_000 });
   },
   "/api/backup/start": async () => runCli(["backup", "start"], { timeout: 30_000 }),
-  "/api/backup/schedule": async (body) => runCli(["backup", "schedule", body?.on === true ? "on" : "off"], { timeout: 120_000 }),
+  "/api/backup/schedule": async (body) => {
+    const args = backupScheduleInvocation(body);
+    if (!args) return { ok: false, error: "Choose an hour from 0 to 23." };
+    return runCli(args, { timeout: 120_000 });
+  },
 };
 
 const ROUTES = {
@@ -443,12 +461,11 @@ const ROUTES = {
  * `host start` installs the subscription gateway through its own CLI - the gateway
  * registers its own autostart - and registers a per-user login autostart for the
  * Ollama supervisor and starts it, so it survives this UI process restarting, a
- * terminal closing, and a reboot. `host stop` removes that autostart.
+ * terminal closing, and a reboot. `host stop`, in a terminal, removes that autostart.
  */
 const HOST_ROUTES = {
   "/api/host/status": ["host", "status", "--profile", "personal"],
   "/api/host/start": ["host", "start", "--profile", "personal"],
-  "/api/host/stop": ["host", "stop", "--profile", "personal"],
   "/api/gateway/open": ["gateway", "open"],
 };
 
@@ -627,6 +644,29 @@ export function createUiServer() {
           ...(error.access ? { unreachable: false, access: true } : {}),
           error: String(error?.message || error),
         });
+      }
+    }
+    // What waits to go to the memory server and what went, for the dashboard: read
+    // only and cheap, so it can be asked every few seconds.
+    if (url.pathname === "/api/app/flow") {
+      if (req.method !== "GET") return json(res, 405, { ok: false, error: "Method not allowed" });
+      try {
+        return json(res, 200, { ok: true, ...(await appFlow(await loadConfig().catch(() => null))) });
+      } catch (error) {
+        return json(res, 500, { ok: false, error: String(error?.message || error) });
+      }
+    }
+    // The folder picker and the list of folders conversations were held in: read
+    // only, and answered here rather than by the CLI.
+    if (url.pathname === "/api/app/folders" || url.pathname === "/api/app/projects") {
+      if (req.method !== "GET") return json(res, 405, { ok: false, error: "Method not allowed" });
+      try {
+        if (url.pathname === "/api/app/folders") {
+          return json(res, 200, await listFolders({ path: url.searchParams.get("path") ?? undefined, home: userHome() }));
+        }
+        return json(res, 200, await conversationProjects({ config: await loadConfig().catch(() => null) }));
+      } catch (error) {
+        return json(res, 500, { ok: false, error: String(error?.message || error) });
       }
     }
     if (url.pathname === "/api/app/prereqs") {

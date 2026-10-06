@@ -1,11 +1,12 @@
 // 내 컴퓨터: what this computer does with its own conversations and agents. It
-// sends the conversations to a memory server, chooses the memory tools its agents
-// see, lets the owner's other computers in when the server is here, and takes in
-// a ChatGPT export.
+// piles the conversations up in a memory server, and those of chosen projects in
+// other servers too, chooses the MCP tools its agents see, lets the owner's other
+// computers in when the server is here, and takes in a ChatGPT export.
 import { hub } from "../lib/hub.js";
 import { app } from "../lib/state.js";
 import { TASKS, chatgptCount, openTask, taskState } from "./connect.js";
 import { openShare, shareState } from "./share.js";
+import { openTargets, targetsState } from "./targets.js";
 import { openTools } from "./tools.js";
 
 const task = (key) => TASKS.find((item) => item.key === key);
@@ -17,10 +18,17 @@ export default hub({
   pages: [
     { ...task("collect"), state: () => taskState("collect"), open: (page, head) => openTask(page, "collect", head) },
     {
+      key: "targets",
+      title: "다른 서버에도 쌓기",
+      why: "고른 프로젝트의 대화를 다른 기억 서버에도 쌓습니다. 회사 서버나 내 다른 서버를 더합니다.",
+      state: targetsState,
+      open: (page, head) => openTargets(page, head),
+    },
+    {
       key: "tools",
-      title: "에이전트 도구",
-      why: "이 컴퓨터의 Claude Code·Codex가 쓸 MCP 기억 도구를 켜고 끕니다.",
-      open: (page, head) => openTools(page, head, "local"),
+      title: "MCP 도구",
+      why: "이 컴퓨터의 Claude Code·Codex가 쓸 기억 MCP 도구를 켜고 끕니다.",
+      open: (page, head) => openTools(page, head),
     },
     {
       key: "share",

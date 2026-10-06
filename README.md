@@ -39,15 +39,20 @@ question and gets an answer, without reading the underlying messages.
 2. **Install.** `scripts/cli.mjs` detects agents, previews changes, backs up what it
    edits, and writes the hook.
 3. **The Team Memory app.** `scripts/ui.mjs` serves `ui/`, one screen over all three
-   programs, in five menus. 기억 reads and searches the memories and asks Honcho or
-   a gateway model. 내 컴퓨터 sets up collection, switches this computer's MCP tools,
-   opens the server to the owner's other computers and imports ChatGPT. 팀 shares
-   the memory with teammates, switches the tools they get, reads the audit log, and
-   connects teammates' memories and company targets. 서버 runs the server and logs
-   subscription accounts in to the gateway, and 백업 copies the raw conversations.
+   programs, in six menus. 대시보드, the first screen after setup, shows at a glance
+   how this computer's memory stands: what waits on this computer to be sent, how
+   many conversations the server holds, how far Honcho has got putting them in
+   order, and the gateway, models, backup and sharing; nothing on it is a link. 기억
+   reads and searches the memories and asks Honcho or a gateway model. 내 컴퓨터
+   sets up collection, sends chosen projects' conversations to other servers too,
+   switches this computer's MCP tools, opens the server to the owner's other
+   computers and imports ChatGPT. 팀 shares the memory with teammates, reads the
+   audit log and connects teammates' memories. 서버 runs the server (기억 서버) and,
+   on 모델, the subscription gateway, the embedding model and the model the server
+   uses; 백업 copies the raw conversations every day at the hour chosen.
    Setup steps run the same CLI a terminal would; memories, the gateway and the
-   server's tool switches are relayed to those programs' own APIs by
-   `scripts/app-api.mjs`, which adds the Honcho token so the page never holds it.
+   audit log are relayed to those programs' own APIs by `scripts/app-api.mjs`,
+   which adds the Honcho token so the page never holds it.
    `cli.mjs ui open` starts it detached (default `http://127.0.0.1:4180`) and opens
    the browser, which is how `/memory-setup` shows it.
 4. **Run the local stack.** `server ...` drives the Honcho Docker stack;
@@ -460,7 +465,7 @@ For a portable install, replace `personal` with `portable`. `server prepare` rep
 
 ### Logging in to a gateway on another computer
 
-The app's 서버 → 구독 게이트웨이 screen (`ui open --screen models`) can finish a gateway login when
+The app's 서버 → 모델 screen (`ui open --screen models`) can finish a gateway login when
 the browser is on a different computer from the gateway, such as a server without a
 screen. This needs subscription-gateway `03aa85d` or newer.
 
@@ -662,6 +667,16 @@ saved (`hasToken`, `hasAccess`), never the token. The app's routes are
 `GET /api/targets` and `POST /api/targets/add|remove|set|test|backfill`; the tokens
 typed into its form reach the CLI through its environment only.
 
+In the app, 내 컴퓨터 → 다른 서버에도 쌓기 adds a server in four steps: the server,
+the projects, past conversations, and a last look before 더하기. The projects offered
+are the folders this computer's Claude Code and Codex conversations were held in
+(`GET /api/app/projects`, `scripts/projects.mjs`, reading the same transcripts as
+`target backfill`). A folder counts under the repository it sits in. Outside a
+repository, one-off folders count under the folder that holds them: anything in the
+system's temporary folder, and a folder whose name starts with a date, as the Codex
+app's `~/Documents/Codex/<date>-<task>`. A folder that is gone shows when searched
+for, and 다른 폴더 더하기 picks any folder through `GET /api/app/folders`.
+
 On disk, each target keeps its own directory, `<data>/targets/<id>/`:
 `spool/<agent>/pending/` (turns waiting for it), `state/<agent>.json` (what it has
 been sent), `logs/<agent>.log`, and `backfill.json`. `target remove` deletes that
@@ -713,7 +728,7 @@ This copies each agent's original conversation files, byte for byte, to a folder
 node scripts/cli.mjs backup set --cloud gdrive_dev: --device studio   # or --folder /Volumes/Backup
 node scripts/cli.mjs backup run --dry-run --verbose                    # what it would do; writes nothing
 node scripts/cli.mjs backup run                                        # copy now (`backup start` runs it in the background)
-node scripts/cli.mjs backup schedule on                                # daily; `schedule off` stops it
+node scripts/cli.mjs backup schedule on --hour 3                       # daily at 03:MM; `schedule off` stops it
 node scripts/cli.mjs backup status
 node scripts/cli.mjs backup remotes                                    # rclone remotes it can use
 ```
@@ -746,6 +761,7 @@ node scripts/cli.mjs backup remotes                                    # rclone 
 - **State and schedule.**
   - State lives in `<data>/backup/`: `settings.json`, `status.json`, `ledger-<destination hash>.json` and `run.lock`. The log is `<data>/logs/backup.log`.
   - The scheduled job is launchd `team-memory-system.backup`, systemd `team-memory-backup.timer` or the Windows task `TeamMemoryBackup`. It runs `backup run --scheduled`, which re-checks the whole destination (`--full`) when the last full check is more than 7 days old.
+  - The hour is the person's: 3 unless `--hour` or the hour box on the app's 백업 screen says otherwise. The minute comes from the device id. On that screen 폴더 고르기 browses this computer's folders for a folder destination.
 - **Alerts.** A notification appears on the computer whose backup has a problem: a scheduled run ended with errors, threw or stopped midway, or there has been no successful run for more than 48 hours with at least two unsuccessful runs since. A single waiting run after a recent success does not alert.
   - Notifiers: `osascript` on macOS (credited to Script Editor, so its notifications must be allowed), a PowerShell toast on Windows, `notify-send` on Linux. A failed notification is logged as an `alert (...)` line in `backup.log` and never fails the backup.
   - The nightly run checks when it ends. A daytime check at 10:MM repeats it while the problem lasts, at most once per problem in 4 hours: launchd `team-memory-system.backup-check`, systemd `team-memory-backup-check.timer` or the Windows task `TeamMemoryBackupCheck`. The 백업 screen shows the same problem as a banner.
@@ -810,7 +826,7 @@ Codex loads `.mcp.json`; Claude Code loads `.mcp.claude.json`. Both start `scrip
 }
 ```
 
-Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability.
+Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability. The app's 내 컴퓨터 → MCP 도구 shows the same switches.
 
 A teammate's `team-<name>` server is not one of these tools: it is a separate remote MCP server in Claude Code and Codex (see [Asking a teammate's memory](#asking-a-teammates-memory--팀원-기억-연결)), and `mcp-tools.json` does not list or switch it.
 

@@ -1,6 +1,6 @@
-// What this computer is connected to, as four tasks. 내 컴퓨터 lists 대화 쌓기
-// and ChatGPT 기록 가져오기, and 팀 lists 팀원 기억 연결 and 회사 서버에도 보내기
-// (views/computer.js, views/team.js); each opens here as its own page. 대화 쌓기
+// What this computer is connected to, as three tasks. 내 컴퓨터 lists 대화 쌓기
+// and ChatGPT 기록 가져오기, and 팀 lists 팀원 기억 연결 (views/computer.js,
+// views/team.js); each opens here as its own page. 대화 쌓기
 // is a few steps over the one setup form in index.html, sent whole at the end, so
 // the fields the CLI reads stay the ones the tests check. 팀원 기억 연결 puts a
 // teammate's server into Claude Code and Codex as a remote MCP server (team-<name>);
@@ -39,7 +39,7 @@ const WARNINGS = [
   [/Honcho URL must not contain credentials/, () => "기억 서버 주소에 아이디·비밀번호·물음표 뒤 값을 넣지 마세요. 토큰은 서버 토큰 칸에 넣습니다."],
 ];
 
-function explainWarning(text) {
+export function explainWarning(text) {
   for (const [pattern, render] of WARNINGS) {
     const match = pattern.exec(text);
     if (match) return render(match);
@@ -74,7 +74,6 @@ function sameServer(a, b) {
 
 export const TASKS = [
   { key: "collect", title: "대화 쌓기", why: "이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 모으고, 에이전트가 내 기억을 꺼내 쓰게 합니다." },
-  { key: "targets", title: "회사 서버에도 보내기", why: "정한 폴더에서 한 대화만 회사 서버 같은 다른 기억 서버에도 보냅니다. 내 서버에는 그대로 모두 갑니다." },
   { key: "share", title: "팀원 기억 연결", why: "팀원이 공유한 기억을 Claude Code와 Codex에 원격 MCP 서버로 연결합니다. 에이전트는 원문을 보지 않고 chat으로 답만 받습니다." },
   { key: "import", title: "ChatGPT 기록 가져오기", why: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다. 한 번 해 두면 됩니다." },
 ];
@@ -91,16 +90,6 @@ export function taskState(key) {
         detail: [sameServer(context.honcho?.url, context.localServer?.apiUrl) ? "이 컴퓨터 서버" : context.honcho?.url, agentNames(context.agents) || "에이전트 없음"].filter(Boolean).join(" · "),
       }
       : { label: "꺼짐", detail: "아직 설정하지 않았습니다" };
-  }
-  if (key === "targets") {
-    const targets = context.targets || [];
-    if (!targets.length) return { label: "없음", detail: context.configured ? "" : "대화 쌓기를 켠 뒤에 씁니다" };
-    const pending = targets.reduce((sum, target) => sum + (target.pending || 0), 0);
-    return {
-      label: `${targets.length}개`,
-      kind: "ok",
-      detail: [targets.map((target) => target.label || target.id).join(", "), pending ? `기다리는 대화 ${number(pending)}` : null].filter(Boolean).join(" · "),
-    };
   }
   if (key === "share") {
     const connected = Number(context.teamMemory?.connected || 0);
@@ -132,7 +121,7 @@ function checkText(check) {
     : `${agent(plugin[1])}에 팀 메모리 플러그인이 없습니다. 플러그인을 설치하고 켜세요.`;
   if (check.name === "claude-hook") return "Claude Code는 플러그인에 든 훅으로 모읍니다. 플러그인을 켜면 함께 켜집니다.";
   const hook = /^(codex|claude)-hook$/.exec(check.name);
-  if (hook) return `${agent(hook[1])}에 대화 수집 훅이 없거나 예전 것입니다. 설정을 다시 적용하세요.`;
+  if (hook) return `${agent(hook[1])}에 대화 쌓기 훅이 없거나 예전 것입니다. 설정을 다시 적용하세요.`;
   if (check.name === "configuration") return "수집 설정이 없습니다.";
   if (check.name === "runtime") return `수집 프로그램이 ${check.actualVersion ? `예전 판(${check.actualVersion})` : "설치돼 있지 않습니다"}. 설정을 다시 적용하면 새로 설치합니다.`;
   if (check.name === "honcho-health" && check.code === "cloudflare-access") return "Cloudflare Access가 이 컴퓨터를 막았습니다. 그 서버의 Access 서비스 토큰을 넣으세요.";
@@ -425,142 +414,6 @@ function collectFlow(body) {
   draw();
 }
 
-// ── 회사 서버에도 보내기 ──────────────────────────────────
-
-function targetsPage(container) {
-  async function drawTargets(banner = null) {
-    let list;
-    try {
-      list = await cli("/api/targets", {});
-    } catch (error) {
-      clear(container, errorNotice(error));
-      return;
-    }
-    const items = list.targets || [];
-    if (!app.context?.configured) {
-      clear(container, notice("", "먼저 대화 쌓기를 켜세요. 그다음에 다른 서버를 더할 수 있습니다."),
-        h("div", { class: "form-actions" }, button("대화 쌓기 설정", { kind: "primary", onClick: () => go("computer/collect") })));
-      return;
-    }
-    clear(container,
-      banner,
-      items.length ? h("div", { class: "rows" }, items.map(targetRow)) : null,
-      addTargetForm(items.length === 0),
-    );
-  }
-  // The 연결 list counts the servers from the setup it has, so keep that current.
-  const refreshContext = () => loadContext().catch(() => {});
-
-  function targetRow(target) {
-    const status = h("div", {});
-    const sent = target.lastSentAt ? `마지막으로 보낸 때 ${new Date(target.lastSentAt).toLocaleString("ko-KR")}` : "아직 보낸 대화 없음";
-    return h("div", { class: "row", style: { alignItems: "flex-start" } },
-      h("div", { style: { minWidth: "0" } },
-        h("div", { class: "title" }, target.enabled ? tag("보내는 중", "ok") : tag("멈춤"), target.label || target.id, target.pending ? tag(`기다리는 대화 ${target.pending}`, "warn") : null),
-        h("div", { class: "sub mono" }, target.url || ""),
-        h("div", { class: "sub" }, `폴더: ${(target.folders || []).join(", ")}`),
-        h("div", { class: "sub" }, [`workspace ${target.workspace}`, `peer ${target.userPeerId}`, target.hasToken ? "토큰 있음" : null, target.hasAccess ? "Access 서비스 토큰 있음" : null, sent].filter(Boolean).join(" · ")),
-        status,
-      ),
-      h("div", { class: "end", style: { flexWrap: "wrap", justifyContent: "flex-end" } },
-        button("시험", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
-          const result = await post("/api/targets/test", { id: target.id });
-          clear(status, result.ok
-            ? notice("ok", "서버가 답하고 workspace를 읽을 수 있습니다.")
-            : notice("bad", explainWarning(result.health?.error || result.workspace?.error || result.error || "서버가 답하지 않습니다.")));
-        }) }),
-        button("폴더 바꾸기", { kind: "small quiet", onClick: async () => {
-          const next = window.prompt("보낼 폴더를 쉼표로 나눠 적으세요.", (target.folders || []).join(", "));
-          if (next === null) return;
-          try { await cli("/api/targets/set", { id: target.id, folders: next.split(",").map((item) => item.trim()).filter(Boolean) }); toast("폴더를 바꿨습니다"); drawTargets(); refreshContext(); } catch (error) { toast(error.message, "bad"); }
-        } }),
-        button(target.enabled ? "멈추기" : "다시 보내기", { kind: "small quiet", onClick: (event) => busy(event.currentTarget, async () => { await cli("/api/targets/set", { id: target.id, enabled: !target.enabled }); await drawTargets(); refreshContext(); }) }),
-        button("지난 대화 보내기", { kind: "small quiet", onClick: async (event) => {
-          const since = window.prompt("언제부터의 대화를 보낼까요? (예: 2026-09-01) 비워 두면 그 폴더의 모든 지난 대화를 보냅니다.", "");
-          if (since === null) return;
-          if (since && !/^\d{4}-\d{2}-\d{2}$/.test(since.trim())) { toast("날짜는 2026-09-01처럼 적습니다.", "bad"); return; }
-          const ok = await confirmSheet({ title: `${target.label || target.id}에 지난 대화를 보낼까요?`, text: `${(target.folders || []).join(", ")} 폴더에서 한 대화${since ? `(${since.trim()} 이후)` : ""}를 보냅니다. 이미 보낸 것은 다시 보내지 않습니다. 한 번에 500개까지 보내고, 남으면 다시 누르면 이어서 보냅니다.`, confirm: "보내기" });
-          if (!ok) return;
-          await busy(event.currentTarget, async () => {
-            const body = { id: target.id };
-            if (since.trim()) body.since = since.trim();
-            const result = await post("/api/targets/backfill", body);
-            const counts = [`대화 ${number(result.sent_sessions || 0)}개`, `새 메시지 ${number(result.new_messages || 0)}개`, result.remaining ? `남은 것 ${number(result.remaining)}개 (다시 누르면 이어서)` : null, result.failed ? `실패 ${number(result.failed)}개` : null].filter(Boolean).join(" · ");
-            clear(status, notice(result.ok ? "ok" : "warn", h("b", {}, result.ok ? "보냈습니다." : "일부만 보냈습니다."), ` ${counts}`, result.stopped ? h("div", {}, "서버가 계속 답하지 않아 멈췄습니다. 서버가 돌아오면 다시 누르세요.") : null));
-            await loadContext();
-          });
-        } }),
-        button("", { kind: "small icon-only quiet danger", iconName: "trash", title: "빼기", onClick: async (event) => {
-          const ok = await confirmSheet({ title: `${target.label || target.id}를 뺄까요?`, text: "이제부터 이 서버로 보내지 않습니다. 이미 보낸 대화는 그 서버에 그대로 남습니다. 아직 못 보낸 대화는 버립니다.", confirm: "빼기", danger: true });
-          if (!ok) return;
-          await busy(event.currentTarget, async () => { await cli("/api/targets/remove", { id: target.id }); await drawTargets(); refreshContext(); }, { done: "뺐습니다" });
-        } }),
-      ),
-    );
-  }
-
-  function addTargetForm(open) {
-    const field = (label, input, hint) => h("label", { class: "field" }, h("span", {}, label), input, hint ? h("small", {}, hint) : null);
-    const wide = (label, input, hint) => h("label", { class: "field wide" }, h("span", {}, label), input, hint ? h("small", {}, hint) : null);
-    const inputs = {
-      label: h("input", { class: "input", placeholder: "예: 회사" }),
-      url: h("input", { class: "input", type: "url", placeholder: "https://memory.company.com" }),
-      folders: h("textarea", { class: "input", rows: "2", placeholder: "/Users/me/work, /Users/me/dev/company-app" }),
-      apiToken: h("input", { class: "input", type: "password", autocomplete: "off" }),
-      workspace: h("input", { class: "input", placeholder: app.context?.workspace || "memory" }),
-      userPeer: h("input", { class: "input", placeholder: app.context?.user?.peerId || "" }),
-      accessClientId: h("input", { class: "input", type: "password", autocomplete: "off" }),
-      accessClientSecret: h("input", { class: "input", type: "password", autocomplete: "off" }),
-    };
-    const outcome = h("div", {});
-    const form = h("div", { class: "panel" },
-      h("div", { class: "form-grid" },
-        field("이름", inputs.label, "화면에 보일 이름입니다."),
-        field("서버 주소", inputs.url),
-        wide("보낼 폴더", inputs.folders, "이 폴더 안에서 연 에이전트 대화만 보냅니다. 쉼표나 줄바꿈으로 여러 개를 적습니다."),
-        wide("서버 토큰", inputs.apiToken, "그 서버 관리자에게 받습니다."),
-        field("그 서버의 workspace", inputs.workspace, "비우면 내 서버와 같게 둡니다."),
-        field("그 서버에서 쓸 peer 이름", inputs.userPeer, "비우면 내 서버와 같게 둡니다."),
-        h("details", { class: "field wide access-fields" },
-          h("summary", {}, "Cloudflare Access 서비스 토큰"),
-          h("div", { class: "form-grid" }, field("Access 서비스 토큰 ID", inputs.accessClientId), field("Access 서비스 토큰 비밀", inputs.accessClientSecret)),
-        ),
-      ),
-      h("div", { class: "form-actions" },
-        button("더하기", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
-          const label = inputs.label.value.trim() || "회사";
-          const body = {
-            id: slug(label),
-            label,
-            url: inputs.url.value.trim(),
-            folders: inputs.folders.value.split(/[,\n]/).map((item) => item.trim()).filter(Boolean),
-          };
-          for (const key of ["workspace", "userPeer", "apiToken", "accessClientId", "accessClientSecret"]) if (inputs[key].value.trim()) body[key] = inputs[key].value.trim();
-          const result = await post("/api/targets/add", body);
-          if (!result.ok) {
-            clear(outcome, notice("bad", h("b", {}, "더하지 못했습니다."), h("ul", {}, (result.issues || [result.error]).filter(Boolean).map((issue) => h("li", {}, explainWarning(issue))))));
-            return;
-          }
-          refreshContext();
-          await drawTargets(notice("ok", h("b", {}, `${label}에도 보냅니다.`), " 지금부터 끝나는 대화가 갑니다. 지난 대화도 보내려면 지난 대화 보내기를 누르세요.",
-            result.warnings?.length ? h("ul", {}, result.warnings.map((warning) => h("li", {}, explainWarning(warning)))) : null));
-        }) }),
-      ),
-      outcome,
-    );
-    return open ? form : h("details", { class: "raw", style: { marginTop: "12px" } }, h("summary", {}, "다른 서버 더하기"), h("div", { style: { marginTop: "10px" } }, form));
-  }
-
-  function slug(text) {
-    if (/회사/.test(text)) return "company";
-    const ascii = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    return ascii || `server-${Date.now().toString(36).slice(-4)}`;
-  }
-
-  clear(container, h("div", { class: "empty" }, spinner()));
-  return drawTargets();
-}
-
 // ── 팀원 기억 연결 ───────────────────────────────────────
 
 const CLIENTS = { claude: "Claude Code", codex: "Codex" };
@@ -788,7 +641,7 @@ function importPage(importer) {
   );
 }
 
-const PAGES = { collect: collectPage, targets: targetsPage, share: sharePage, import: importPage };
+const PAGES = { collect: collectPage, share: sharePage, import: importPage };
 
 /** One task as its own page, under the header its menu gives it. */
 export async function openTask(page, key, head) {

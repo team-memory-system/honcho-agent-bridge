@@ -158,27 +158,11 @@ a { color: inherit; text-underline-offset: 2px; }
 }
 .nav a[aria-current="page"] .icon { color: var(--accent); }
 .nav .count { margin-left: auto; font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.nav-label { padding: 0 10px 4px; font-size: 11.5px; color: var(--ink-3); font-weight: 500; }
-
-.machine { display: flex; flex-direction: column; gap: 2px; }
-.machine a {
-  display: grid;
-  grid-template-columns: 8px 1fr auto;
-  align-items: center;
-  gap: 10px;
-  padding: 5px 10px;
-  border-radius: var(--radius);
-  text-decoration: none;
-  color: var(--ink-2);
-  font-size: 13px;
-}
-.machine a:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
-.machine small { color: var(--ink-3); font-size: 12px; }
 
 .light { width: 7px; height: 7px; border-radius: 50%; background: var(--line-2); }
 .light.on { background: var(--ok); }
 .light.warn { background: var(--warn); }
-.light.off { background: var(--bad); }
+.light.off, .light.bad { background: var(--bad); }
 .light.idle { background: var(--line-2); }
 
 .rail-foot {
@@ -943,7 +927,6 @@ details.group[open] > summary::before { content: "▾"; }
 .gw-model .btn { flex: none; }
 .btn.gw-go { flex-direction: row-reverse; }
 .gw-model.current { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
-.gw-foot { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 12px 0 0; color: var(--ink-3); font-size: 12.5px; }
 .gw-advanced { margin-top: 4px; padding-top: 14px; border-top: 1px solid var(--line); }
 .gw-advanced > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; font-weight: 550; }
 .gw-advanced[open] > summary { margin-bottom: 12px; }
@@ -1114,3 +1097,134 @@ table.log-table { width: 100%; border-collapse: collapse; table-layout: fixed; f
   .log-table tr.entry[aria-expanded="true"] { background: var(--sunk); }
 }
 /* ── end of the ui/nav block ── */
+
+/* 대시보드: one line on how it stands, the flow into memory, then the parts around it.
+   Nothing on it is a link. */
+.dash-summary { margin: 0 0 22px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); }
+.dash-summary.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 6%, var(--raised)); }
+.dash-summary.bad { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); background: color-mix(in srgb, var(--bad) 6%, var(--raised)); }
+.dash-summary-head { display: flex; align-items: center; gap: 10px; }
+.dash-summary-head .light { width: 9px; height: 9px; flex: none; }
+.dash-summary-head b { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+.dash-summary-head small { margin-left: auto; color: var(--ink-3); font-size: 12.5px; white-space: nowrap; }
+.dash-summary ul { margin: 8px 0 0; padding-left: 19px; color: var(--ink-2); font-size: 13.5px; line-height: 1.6; }
+.dash-section { margin: 0 0 22px; }
+.dash-section h2 { margin: 0 0 10px; color: var(--ink-2); font-size: 13px; font-weight: 600; }
+.flow-steps { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; }
+.flow-arrow { align-self: center; color: var(--ink-3); font-size: 18px; line-height: 1; }
+.flow-step,
+.dash-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 14px 16px 15px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+}
+.flow-step.warn, .dash-card.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.flow-step.off, .flow-step.bad, .dash-card.off, .dash-card.bad { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+.flow-bar { height: 6px; margin: 6px 0 3px; overflow: hidden; border-radius: 3px; background: var(--sunk); }
+.flow-bar span { display: block; height: 100%; border-radius: inherit; background: var(--ok); transition: width 0.4s ease; }
+.flow-branch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+  margin-top: 8px;
+  padding: 10px 14px;
+  border: 1px dashed var(--line-2);
+  border-radius: 10px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.flow-branch-label { color: var(--ink-3); }
+.flow-target { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.flow-target b { color: var(--ink); font-weight: 600; }
+.dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.dash-head { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 13px; font-weight: 550; }
+.dash-value { margin-top: 4px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.flow-step small, .dash-card small { color: var(--ink-3); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) {
+  .flow-steps { grid-template-columns: minmax(0, 1fr); }
+  .flow-arrow { justify-self: center; transform: rotate(90deg); }
+}
+
+/* A folder of this computer, chosen inside the page (lib/folders.js). */
+.folder-picker .sheet-body { padding-bottom: 2px; }
+.picker-roots { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.picker-root {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.picker-root.on { border-color: var(--accent); color: var(--ink); }
+.picker-path { display: flex; align-items: center; gap: 6px; min-height: 30px; margin-bottom: 6px; }
+.picker-path code { font-size: 12.5px; overflow-wrap: anywhere; }
+.picker-list { max-height: min(46vh, 360px); overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.picker-item:last-child { border-bottom: 0; }
+.picker-item:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.picker-item .icon { flex: none; color: var(--ink-3); }
+.picker-empty { padding: 14px 12px; color: var(--ink-3); font-size: 13px; }
+.input-row { display: flex; align-items: center; gap: 8px; }
+.input-row .input { flex: 1; min-width: 0; }
+
+/* 다른 서버에도 쌓기: the projects to tick, and a server's own panels. */
+.project-box { display: flex; flex-direction: column; gap: 8px; }
+.project-box .form-actions { margin-top: 0; }
+.project-picks { max-height: 420px; overflow: auto; border-top: 1px solid var(--line); }
+.project-pick {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.project-main { display: flex; flex-direction: column; min-width: 0; }
+.project-main b { font-size: 14px; font-weight: 550; }
+.project-main small { color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-main .project-notes { margin-top: 2px; white-space: normal; }
+.project-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--ink-2); font-size: 12.5px; text-align: right; }
+.project-meta small { color: var(--ink-3); font-size: 12px; }
+.picker-more {
+  display: block;
+  width: 100%;
+  padding: 10px 2px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.picker-more:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.inline-panel { display: flex; flex-direction: column; gap: 10px; margin: 0 0 12px; }
+.inline-panel .form-actions { margin-top: 0; }
+
+/* 백업: the hour of the daily run beside its switch. */
+.backup-when { display: inline-flex; align-items: center; gap: 4px; margin: 0 8px; }
+.hour-select { width: auto; min-width: 64px; }

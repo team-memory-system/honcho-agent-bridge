@@ -8,7 +8,7 @@ import { pageHead, tag } from "./ui.js";
 /** The screens of a tabbed menu item; the first is the one the menu opens. */
 export const TABS = {
   memory: [["memory", "찾기"], ["ask", "묻기"]],
-  server: [["server", "기억 서버"], ["models", "구독 게이트웨이"]],
+  server: [["server", "기억 서버"], ["models", "모델"]],
 };
 
 /** The tabs for a page header, with `current` marked. */

@@ -279,7 +279,6 @@ test("the host buttons drive the host lifecycle, not the Docker stack", async ()
   const routes = source.match(/const HOST_ROUTES = \{([\s\S]*?)\n\};/)[1];
   assert.match(routes, /"host", "status"/);
   assert.match(routes, /"host", "start"/);
-  assert.match(routes, /"host", "stop"/);
   assert.match(routes, /"gateway", "open"/);
   assert.equal(/"server",/.test(routes), false, "a host button must not start the whole stack");
   assert.equal(/proxies|llmProxyRoot/.test(source), false, "there is no proxy source location to edit any more");
@@ -294,7 +293,7 @@ test("the host buttons drive the host lifecycle, not the Docker stack", async ()
   // Every host action the screens call has a route to go to.
   const screens = await uiSources();
   const hostCalls = [...new Set([...screens.matchAll(/"\/api\/host\/([a-z]+)"/g)].map((match) => match[1]))];
-  assert.ok(hostCalls.includes("start") && hostCalls.includes("stop") && hostCalls.includes("status"), "the host controls were not found");
+  assert.ok(hostCalls.includes("start") && hostCalls.includes("status"), "the host controls were not found");
   for (const action of hostCalls) assert.match(routes, new RegExp(`"/api/host/${action}"`));
   assert.match(screens, /"\/api\/gateway\/open"/);
   assert.equal(/id="proxy-config"|llmProxyRoot/.test(screens), false);
@@ -472,7 +471,7 @@ test("every screen a link opens exists, and so does every page of 내 컴퓨터 
   const views = shell.match(/const VIEWS = \{([^}]*)\}/)[1].split(",").map((name) => name.trim()).filter(Boolean);
   const connect = await fsp.readFile(path.join(ROOT, "ui", "views", "connect.js"), "utf8");
   const tasks = [...connect.matchAll(/\{ key: "([a-z]+)", title:/g)].map((match) => match[1]).sort();
-  assert.deepEqual(tasks, ["collect", "import", "share", "targets"]);
+  assert.deepEqual(tasks, ["collect", "import", "share"]);
   // A menu's pages are its own entries and the 연결 tasks it spreads in, unless it renames one.
   const pages = {};
   for (const menu of ["computer", "team"]) {
@@ -482,7 +481,7 @@ test("every screen a link opens exists, and so does every page of 내 컴퓨터 
       ...[...source.matchAll(/\{ \.\.\.task\("([a-z]+)"\), (?!key:)/g)].map((match) => match[1]),
     ].sort();
   }
-  assert.deepEqual(pages, { computer: ["collect", "import", "share", "tools"], team: ["audit", "memories", "share", "targets", "tools"] });
+  assert.deepEqual(pages, { computer: ["collect", "import", "share", "targets", "tools"], team: ["audit", "memories", "share"] });
   const hub = await fsp.readFile(path.join(ROOT, "ui", "lib", "hub.js"), "utf8");
   const tabbed = [...hub.match(/const TABS = \{([\s\S]*?)\n\};/)[1].matchAll(/\["([a-z]+)", "/g)].map((match) => match[1]);
   assert.deepEqual(tabbed, ["memory", "ask", "server", "models"]);
@@ -500,8 +499,9 @@ test("every screen a link opens exists, and so does every page of 내 컴퓨터 
     assert.ok(views.includes(view), `a link opens #/${link}, which no screen serves`);
     if (pages[view] && page) assert.ok(pages[view].includes(page), `#/${link} is not one of the pages under ${view}`);
   }
-  // Addresses from before the menus were regrouped, as an older skill or a saved link opens them.
-  for (const old of ["connect", "connect/collect", "connect/share", "tools", "tools/audit", "audit"]) {
+  // Addresses from before the menus were regrouped, or of a page that moved menus, as an
+  // older skill or a saved link opens them.
+  for (const old of ["connect", "connect/collect", "connect/share", "connect/targets", "team/targets", "tools", "tools/shared", "tools/audit", "audit"]) {
     assert.ok(moved[old], `#/${old} no longer leads anywhere`);
   }
 });

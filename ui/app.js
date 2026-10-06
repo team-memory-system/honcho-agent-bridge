@@ -1,12 +1,14 @@
-// The app shell: navigation, the "this computer" status in the rail, the theme,
-// the quick-jump palette, and handing the page to one screen at a time.
+// The app shell: navigation, the theme, the quick-jump palette, and handing the
+// page to one screen at a time. What this computer runs, and how each part stands,
+// is the 대시보드 screen.
 import { get } from "./lib/api.js";
 import { h, clear, svg, $ } from "./lib/dom.js";
 import { TABS } from "./lib/hub.js";
 import { icon } from "./lib/icons.js";
 import { app, go, loadContext, me, onChange, refreshStatus, workspace } from "./lib/state.js";
-import { button, errorNotice, light, pageHead, toast } from "./lib/ui.js";
+import { button, errorNotice, pageHead, toast } from "./lib/ui.js";
 
+import dashboard from "./views/dashboard.js";
 import memory from "./views/memory.js";
 import ask from "./views/ask.js";
 import computer from "./views/computer.js";
@@ -16,9 +18,10 @@ import models from "./views/models.js";
 import start from "./views/start.js";
 import backup from "./views/backup.js";
 
-const VIEWS = { memory, ask, computer, team, server, models, start, backup };
-// 기억 and 서버 also hold a second screen each (묻기, 구독 게이트웨이), one tab away.
+const VIEWS = { dashboard, memory, ask, computer, team, server, models, start, backup };
+// 기억 and 서버 also hold a second screen each (묻기, 모델), one tab away.
 const NAV = [
+  ["dashboard", "대시보드", "gauge"],
   ["memory", "기억", "memory"],
   ["computer", "내 컴퓨터", "connect"],
   ["team", "팀", "person"],
@@ -27,15 +30,17 @@ const NAV = [
 ];
 const START = ["start", "시작하기", "start"];
 
-// Where an address from before the menus were regrouped (0.4.5) goes now.
+// Where an address from before the menus were regrouped (0.4.5), or a page that
+// moved to another menu since (0.4.7), goes now.
 const MOVED = {
   connect: "computer",
   "connect/collect": "computer/collect",
   "connect/import": "computer/import",
   "connect/share": "team/memories",
-  "connect/targets": "team/targets",
+  "connect/targets": "computer/targets",
+  "team/targets": "computer/targets",
   tools: "computer/tools",
-  "tools/shared": "team/tools",
+  "tools/shared": "team",
   "tools/audit": "team/audit",
   audit: "team/audit",
 };
@@ -61,8 +66,9 @@ function route() {
 
 function movedTo() {
   const [name = "", page = ""] = decodeURIComponent(location.hash.replace(/^#\/?/, "")).split("/");
+  if (MOVED[`${name}/${page}`]) return MOVED[`${name}/${page}`];
   if (VIEWS[name]) return null;
-  return MOVED[`${name}/${page}`] || MOVED[name] || null;
+  return MOVED[name] || null;
 }
 
 /** The menu item a screen sits under: its tab group's first screen, or itself. */
@@ -172,24 +178,7 @@ function renderNav() {
   }));
 }
 
-function renderMachine() {
-  const context = app.context;
-  const { honcho, gateway, collector } = app.status;
-  const lines = [];
-  if (context) {
-    const here = serverHere();
-    if (here || context.configured) {
-      lines.push(h("a", { href: here ? "#/server" : "#/computer/collect" }, light(honcho.state), h("span", {}, "기억 서버"), h("small", {}, honcho.text)));
-    }
-    if (here) lines.push(h("a", { href: "#/models" }, light(gateway.state), h("span", {}, "구독 게이트웨이"), h("small", {}, gateway.text)));
-    if (context.configured || !teamConnected()) {
-      lines.push(h("a", { href: "#/computer/collect" }, light(collector.state), h("span", {}, "대화 쌓기"), h("small", {}, collector.text)));
-    }
-    if (teamConnected()) {
-      lines.push(h("a", { href: "#/team/memories" }, light("on"), h("span", {}, "팀원 기억"), h("small", {}, `${context.teamMemory.connected}곳 연결`)));
-    }
-  }
-  clear($("#machine"), lines);
+function renderWho() {
   $("#who-name").textContent = me() || "이름 미설정";
   $("#who-space").textContent = `작업공간 ${workspace()}`;
 }
@@ -209,11 +198,9 @@ function renderTheme() {
 }
 
 function defaultView() {
-  if (!app.context) return "memory";
+  if (!app.context) return "dashboard";
   if (startOpen()) return "start";
-  // Joined a teammate's memory only: there is no memory of one's own to open.
-  if (!app.context.localServer && !app.context.configured && !memoryAnswers()) return "team";
-  return "memory";
+  return "dashboard";
 }
 
 /** What a locked screen shows when it is opened by URL. */
@@ -347,8 +334,8 @@ async function boot() {
       if (!document.querySelector("dialog.palette")) palette();
     }
   });
-  onChange(() => { renderMachine(); renderNav(); regate(); });
-  renderMachine();
+  onChange(() => { renderWho(); renderNav(); regate(); });
+  renderWho();
   try {
     await loadContext();
   } catch (error) {
