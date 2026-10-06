@@ -141,7 +141,7 @@ export default {
         ["언제", `${longDay.format(new Date(row.at))} ${clock.format(new Date(row.at))}`],
         ["누가", [row.caller, row.caller_source ? `(${row.caller_source})` : ""].filter(Boolean).join(" ")],
         ["브리지", row.bridge],
-        ["작업공간", row.workspace_id],
+        ["workspace", row.workspace_id],
         ["걸린 시간", row.duration_ms != null ? `${number(row.duration_ms)}ms` : ""],
         ["판정 점수", row.jev_score != null ? String(row.jev_score) : ""],
       ].filter(([, value]) => value);

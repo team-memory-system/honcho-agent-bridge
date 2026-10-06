@@ -1,6 +1,8 @@
-// 내 컴퓨터 → MCP 도구: which tools of this computer's memory MCP server (the
-// plugin's) Claude Code and Codex see, as switches. Teammates are not asked here:
-// the server's teammate MCP answers `chat` alone (server/compose.yaml).
+// 기억 설정 → MCP 도구: which tools of this computer's memory MCP server (the
+// plugin's) Claude Code and Codex see. Two switches cover them, one for the tools
+// that read memory and one for those that change or delete it; each tool's own
+// switch sits folded below. Teammates are not asked here: the server's teammate
+// MCP answers `chat` alone (server/compose.yaml).
 import { get, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { number } from "../lib/format.js";
@@ -30,7 +32,6 @@ function toolRows(tools, onToggle) {
         h("div", {},
           h("div", { class: "title" }, h("code", { class: "mono" }, tool.name), tag(label, kind)),
           h("div", { class: "sub", style: { fontSize: "13px", color: "var(--ink-2)" } }, tool.info.description),
-          tool.info.offImpact ? h("div", { class: "sub" }, `끄면: ${tool.info.offImpact}`) : null,
         ),
         h("div", { class: "end" }, toggle(tool.enabled, (next) => onToggle(tool.name, next), { label: `${tool.name} 켜기` })),
       );
@@ -46,14 +47,35 @@ async function drawLocal(local) {
       return;
     }
     let tools = result.tools;
-    const redraw = () => clear(local,
-      h("p", { class: "section-note", style: { marginTop: "0" } }, "기억을 바꾸거나 지우는 도구는 처음에 꺼져 있습니다. 바꾸면 에이전트가 다음에 도구 목록을 물을 때 반영됩니다."),
-      h("p", { class: "muted", style: { fontSize: "12.5px", margin: "0 0 4px" } }, `${number(tools.filter((tool) => tool.enabled).length)}/${tools.length}개 켜짐 · ${result.path}`),
-      toolRows(tools, async (name, enabled) => {
-        const next = await post("/api/app/mcp-tools", { name, enabled });
-        tools = next.tools;
-      }),
-    );
+    // The single switches stay unfolded across redraws once someone opened them.
+    let unfolded = false;
+    const set = async (body) => {
+      const next = await post("/api/app/mcp-tools", body);
+      tools = next.tools;
+      redraw();
+    };
+    const groupRow = (title, members) => {
+      const on = members.filter((tool) => tool.enabled).length;
+      return h("div", { class: "row" },
+        h("div", {}, h("div", { class: "title" }, title), h("div", { class: "sub" }, `${number(members.length)}개 중 ${number(on)}개 켜짐`)),
+        // Mixed counts as off: pressing it turns the whole group on.
+        h("div", { class: "end" }, toggle(on === members.length, (enabled) => set({ names: members.map((tool) => tool.name), enabled }), { label: `${title} 모두 켜기` })),
+      );
+    };
+    function redraw() {
+      const single = h("details", { class: "raw tool-singles", style: { marginTop: "16px" }, open: unfolded || null },
+        h("summary", { class: "muted" }, "하나씩 켜고 끄기"),
+        toolRows(tools, (name, enabled) => set({ name, enabled })));
+      single.addEventListener("toggle", () => { unfolded = single.open; });
+      clear(local,
+        h("p", { class: "section-note", style: { marginTop: "0" } }, "바꾼 뒤 Claude Code는 /reload-plugins, Codex는 새 세션을 여세요."),
+        h("div", { class: "rows" },
+          groupRow("찾기 도구", tools.filter((tool) => !tool.write)),
+          groupRow("바꾸기·지우기 도구", tools.filter((tool) => tool.write)),
+        ),
+        single,
+      );
+    }
     redraw();
   } catch (error) {
     clear(local, errorNotice(error));

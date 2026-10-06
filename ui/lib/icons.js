@@ -7,6 +7,7 @@ const PATHS = {
   memory: '<path d="M3 2.5h7.5L13 5v8.5H3z"/><path d="M10.5 2.5V5H13"/><path d="M5.5 8h5M5.5 10.5h3.5"/>',
   ask: '<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/><path d="M6 6.5h4"/>',
   models: '<rect x="3" y="3" width="10" height="10" rx="1.5"/><path d="M6 6h4v4H6z"/><path d="M6 1.5V3M10 1.5V3M6 13v1.5M10 13v1.5M1.5 6H3M1.5 10H3M13 6h1.5M13 10h1.5"/>',
+  sliders: '<path d="M2.5 4.5h4M9.5 4.5h4M2.5 11.5h7M12.5 11.5h1"/><circle cx="8" cy="4.5" r="1.5"/><circle cx="11" cy="11.5" r="1.5"/>',
   connect: '<path d="M6.5 9.5l3-3"/><path d="M7.5 4.5l1-1a2.5 2.5 0 013.5 3.5l-1 1"/><path d="M8.5 11.5l-1 1A2.5 2.5 0 014 9l1-1"/>',
   server: '<rect x="2.5" y="2.5" width="11" height="4.5" rx="1"/><rect x="2.5" y="9" width="11" height="4.5" rx="1"/><path d="M5 4.75h.01M5 11.25h.01"/>',
   tools: '<path d="M3 4.5h5M11 4.5h2M3 11.5h2M8 11.5h5"/><circle cx="9.5" cy="4.5" r="1.5"/><circle cx="6.5" cy="11.5" r="1.5"/>',

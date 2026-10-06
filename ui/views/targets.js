@@ -1,4 +1,4 @@
-// 내 컴퓨터 → 다른 서버에도 쌓기: other memory servers that also get this
+// 기억 설정 → 다른 서버에도 쌓기: other memory servers that also get this
 // computer's conversations from chosen projects. Every conversation still goes to
 // the user's own server (대화 쌓기). A project is a folder conversations were opened
 // in, subfolders included (folderMatches in scripts/targets.mjs), picked from the
@@ -29,7 +29,7 @@ function objectParticle(word) {
 const baseName = (folder) => shortPath(folder).split(/[\\/]/).filter(Boolean).pop() || shortPath(folder);
 const inside = (child, parent) => child !== parent && (child.startsWith(`${parent}/`) || child.startsWith(`${parent}\\`));
 
-/** Where 다른 서버에도 쌓기 stands, for the 내 컴퓨터 list. */
+/** Where 다른 서버에도 쌓기 stands, for the 기억 설정 list. */
 export function targetsState() {
   const context = app.context || {};
   const targets = context.targets || [];
@@ -182,7 +182,7 @@ function targetsPage(container) {
       targets.length ? h("div", { class: "form-actions" }, button("서버 더하기", { kind: "primary", iconName: "plus", onClick: () => addFlow() })) : addFlow({ inline: true }),
     );
   }
-  // The 내 컴퓨터 list counts the servers from the setup it has, so keep that current.
+  // The 기억 설정 list counts the servers from the setup it has, so keep that current.
   const refreshContext = () => loadContext().catch(() => {});
 
   function targetRow(target) {
@@ -278,7 +278,7 @@ function targetsPage(container) {
     const serverStep = h("div", { class: "form-grid" },
       field("이름", inputs.label),
       field("서버 주소", inputs.url),
-      wide("서버 토큰", inputs.apiToken, "그 서버를 둔 컴퓨터의 다른 컴퓨터 붙이기 → 서버 token 복사로 받습니다. 회사 서버면 관리자에게 받습니다."),
+      wide("서버 토큰", inputs.apiToken, "그 서버를 둔 컴퓨터의 서버 → 공유에서 서버 token 복사를 누릅니다. 회사 서버면 관리자에게 받습니다."),
       h("details", { class: "field wide access-fields" },
         h("summary", {}, "그 서버의 workspace·peer 이름, Cloudflare Access 서비스 토큰"),
         h("div", { class: "form-grid" },
@@ -390,7 +390,7 @@ function targetsPage(container) {
   return drawTargets();
 }
 
-/** The page, under a header with the way back to 내 컴퓨터. */
+/** The page, under a header with the way back to 기억 설정. */
 export async function openTargets(page, head) {
   // Projects found once per visit, so a folder worked in since shows up.
   projectsCache = null;

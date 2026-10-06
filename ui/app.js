@@ -17,13 +17,14 @@ import server from "./views/server.js";
 import models from "./views/models.js";
 import start from "./views/start.js";
 import backup from "./views/backup.js";
+import share from "./views/share.js";
 
-const VIEWS = { dashboard, memory, ask, computer, team, server, models, start, backup };
-// 기억 and 서버 also hold a second screen each (묻기, 모델), one tab away.
+const VIEWS = { dashboard, memory, ask, computer, team, server, models, share, start, backup };
+// 기억 also holds 묻기, and 서버 holds 모델 and 공유, each one tab away.
 const NAV = [
   ["dashboard", "대시보드", "gauge"],
   ["memory", "기억", "memory"],
-  ["computer", "내 컴퓨터", "connect"],
+  ["computer", "기억 설정", "sliders"],
   ["team", "팀", "person"],
   ["server", "서버", "server"],
   ["backup", "백업", "backup"],
@@ -31,8 +32,9 @@ const NAV = [
 const START = ["start", "시작하기", "start"];
 
 // Where an address from before the menus were regrouped (0.4.5), or a page that
-// moved to another menu since (0.4.7), goes now.
+// moved to another menu since (0.4.7, 0.4.8), goes now.
 const MOVED = {
+  "computer/share": "share",
   connect: "computer",
   "connect/collect": "computer/collect",
   "connect/import": "computer/import",
@@ -107,7 +109,7 @@ function serverHere() {
 /** Screens that mean nothing on this computer are left out of the menu. */
 function visible(name) {
   if (name === "start") return startOpen();
-  if (name === "server" || name === "models") return serverHere();
+  if (name === "server" || name === "models" || name === "share") return serverHere();
   return true;
 }
 
@@ -180,7 +182,7 @@ function renderNav() {
 
 function renderWho() {
   $("#who-name").textContent = me() || "이름 미설정";
-  $("#who-space").textContent = `작업공간 ${workspace()}`;
+  $("#who-space").textContent = `workspace ${workspace()}`;
 }
 
 function renderTheme() {
@@ -289,10 +291,11 @@ function palette() {
     { label: "기억에서 찾기", hint: "기억", screen: "memory", run: () => { go("memory"); setTimeout(() => $("#memory-search")?.focus(), 50); } },
     { label: "내 기억에 묻기", hint: "기억", screen: "ask", run: () => go("ask") },
     { label: "구독 계정 추가", hint: "서버", screen: "models", run: () => go("models") },
-    // Every page 내 컴퓨터 and 팀 list here, found by its title or what it does.
+    // Every page 기억 설정 and 팀 list here, found by its title or what it does.
     ...[["computer", computer], ["team", team]].flatMap(([name, view]) => view.available().map((page) => (
       { label: page.title, hint: view.title, words: page.why, screen: name, run: () => go(`${name}/${page.key}`) }))),
     { label: "서버 점검", hint: "서버", screen: "server", run: () => go("server") },
+    { label: "공유", hint: "서버", words: "다른 컴퓨터 붙이기 서버 token 팀 만들기 초대 코드", screen: "share", run: () => go("share") },
     { label: "대화 원본 백업", hint: "백업", screen: "backup", run: () => go("backup") },
     { label: "처음 설정 다시 보기", hint: "시작하기", screen: "", run: () => go("start") },
   ].filter((entry) => !entry.screen || visible(entry.screen))

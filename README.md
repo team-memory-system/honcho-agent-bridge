@@ -43,13 +43,14 @@ question and gets an answer, without reading the underlying messages.
    how this computer's memory stands: what waits on this computer to be sent, how
    many conversations the server holds, how far Honcho has got putting them in
    order, and the gateway, models, backup and sharing; nothing on it is a link. 기억
-   reads and searches the memories and asks Honcho or a gateway model. 내 컴퓨터
+   reads and searches the memories and asks Honcho or a gateway model. 기억 설정
    sets up collection, sends chosen projects' conversations to other servers too,
-   switches this computer's MCP tools, opens the server to the owner's other
-   computers and imports ChatGPT. 팀 shares the memory with teammates, reads the
-   audit log and connects teammates' memories. 서버 runs the server (기억 서버) and,
-   on 모델, the subscription gateway, the embedding model and the model the server
-   uses; 백업 copies the raw conversations every day at the hour chosen.
+   switches this computer's MCP tools and imports ChatGPT. 팀 adds and removes the
+   teammates who may ask this memory, reads the audit log and connects teammates'
+   memories. 서버 runs the server (기억 서버); on 모델, the subscription gateway, the
+   embedding model and the model the server uses; and on 공유, it opens the server
+   to the owner's other computers and the team. 백업 copies the raw conversations
+   every day at the hour chosen.
    Setup steps run the same CLI a terminal would; memories, the gateway and the
    audit log are relayed to those programs' own APIs by `scripts/app-api.mjs`,
    which adds the Honcho token so the page never holds it.
@@ -266,7 +267,7 @@ question and gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 422 tests, no network, no Docker
+npm test          # 454 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # the Team Memory app on localhost
@@ -274,7 +275,8 @@ npm run ui        # the Team Memory app on localhost
 
 Tests are the contract. Several of them exist specifically to fail when something
 drifts: the tool count in `tests/mcp-server.test.mjs`, the setup and connect forms'
-field names in `tests/ui.test.mjs`, the CLI never printing the Cloudflare API token,
+field names in `tests/ui.test.mjs`, a teammate's share screens never naming Cloudflare in
+`tests/ui.test.mjs`, the CLI never printing the Cloudflare API token,
 a tunnel token or an invite in `tests/team-access.test.mjs`, the absence of any
 OS-registration call in `tests/host-manager.test.mjs`, and the gateway's router key
 never appearing in a returned result in `tests/gateway.test.mjs` and
@@ -593,9 +595,9 @@ Install the plugin, then run setup against the public address with the gate toke
 HONCHO_API_TOKEN='<gate token>' node scripts/cli.mjs setup apply --agents codex,claude --user-peer <id> --honcho-url https://<name>.<your domain>
 ```
 
-In the app on that computer, 내 컴퓨터 → 대화 쌓기 does the same: the address and the gate token go into its form. `/memory-setup` opens that screen for a server on another computer.
+In the app on that computer, 기억 설정 → 대화 쌓기 does the same: the address and the gate token go into its form. `/memory-setup` opens that screen for a server on another computer.
 
-The Team Memory app offers all of this on two pages over the same switch. 내 컴퓨터 → 다른 컴퓨터 붙이기 has "Cloudflare로 공유 켜기" (the API token, the owner's email, and the zone and name under "token 권한과 주소"), "초대 코드로 공유 켜기", the folded "직접 만든 통로로 켜기", and the gate token ("서버 token 복사", "서버 token 바꾸기"). 팀 → 내 기억 공유 has the same two ways to turn it on and, for the owner, the 팀원 list with "팀원 더하기", "공유 빼기" and "팀 주소 복사". A token typed there goes to the app's own server only, and no token or invite is logged.
+The Team Memory app offers all of this on 서버 → 공유: "팀 만들기" (the API token, the owner's email, and the zone and name under "token 권한과 주소"), "초대 코드로 열기", the folded "직접 만든 Tunnel로 켜기", the gate token ("서버 token 복사", "서버 token 바꾸기") and "공유 끄기". 팀 → 내 기억 공유 has, for the owner, the 팀원 list with "팀원 더하기", "공유 빼기" and "팀 주소 복사"; while sharing is off it points to 서버 → 공유. A teammate who came in with an invite sees the public address, the gate and the 팀원 MCP address, and no Cloudflare: that word belongs to the owner's 팀 만들기 and 팀원 list. A token typed there goes to the app's own server only, and no token or invite is logged.
 
 ## Asking a teammate's memory / 팀원 기억 연결
 
@@ -667,7 +669,7 @@ saved (`hasToken`, `hasAccess`), never the token. The app's routes are
 `GET /api/targets` and `POST /api/targets/add|remove|set|test|backfill`; the tokens
 typed into its form reach the CLI through its environment only.
 
-In the app, 내 컴퓨터 → 다른 서버에도 쌓기 adds a server in four steps: the server,
+In the app, 기억 설정 → 다른 서버에도 쌓기 adds a server in four steps: the server,
 the projects, past conversations, and a last look before 더하기. The projects offered
 are the folders this computer's Claude Code and Codex conversations were held in
 (`GET /api/app/projects`, `scripts/projects.mjs`, reading the same transcripts as
@@ -718,7 +720,7 @@ HONCHO_USER_NAME=<your peer> node scripts/collector.mjs --provider chatgpt \
   - Running the same export again sends nothing, and a newer export sends only new messages.
   - The dedupe state is kept per server and workspace, so a different workspace gets everything.
 - **`--dry-run`** sends nothing. It prints a `summary`: the files read, turns by role, the first and last time, and what was skipped and why.
-- **In the app**, 내 컴퓨터 → ChatGPT 기록 가져오기 runs the same import. It takes uploads up to 256 MB and always uses the configured workspace and peer. Use the command for anything bigger or for another workspace.
+- **In the app**, 기억 설정 → ChatGPT 기록 가져오기 runs the same import. It takes uploads up to 256 MB and always uses the configured workspace and peer. Use the command for anything bigger or for another workspace.
 
 ## Backing up the conversation originals / 대화 원본 백업
 
@@ -826,7 +828,7 @@ Codex loads `.mcp.json`; Claude Code loads `.mcp.claude.json`. Both start `scrip
 }
 ```
 
-Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability. The app's 내 컴퓨터 → MCP 도구 shows the same switches.
+Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability. The app's 기억 설정 → MCP 도구 switches them in two groups, 찾기 도구 and 바꾸기·지우기 도구, and one at a time under 하나씩 켜고 끄기; `POST /api/app/mcp-tools` takes one tool as `name` or a group as `names`, with `enabled`.
 
 A teammate's `team-<name>` server is not one of these tools: it is a separate remote MCP server in Claude Code and Codex (see [Asking a teammate's memory](#asking-a-teammates-memory--팀원-기억-연결)), and `mcp-tools.json` does not list or switch it.
 

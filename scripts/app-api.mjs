@@ -328,14 +328,21 @@ export async function localTools({ config } = {}) {
   };
 }
 
-export async function setLocalTool({ name, enabled }, { config } = {}) {
-  if (!ALL_TOOLS.includes(name)) throw Object.assign(new Error(`Unknown MCP tool: ${name}`), { status: 400 });
+/** Turns one tool (`name`) or several at once (`names`, as a group switch does) on or off. */
+export async function setLocalTool({ name, names, enabled }, { config } = {}) {
+  const wanted = names === undefined ? [name] : names;
+  if (!Array.isArray(wanted) || !wanted.length) throw Object.assign(new Error("names must list at least one tool."), { status: 400 });
+  for (const item of wanted) {
+    if (!ALL_TOOLS.includes(item)) throw Object.assign(new Error(`Unknown MCP tool: ${item}`), { status: 400 });
+  }
   if (typeof enabled !== "boolean") throw Object.assign(new Error("enabled must be true or false."), { status: 400 });
   const loaded = config === undefined ? await loadConfig() : config;
   if (!loaded) throw Object.assign(new Error("대화 쌓기를 먼저 켜세요."), { status: 409 });
   const current = await localTools({ config: loaded });
   const disabled = new Set(current.tools.filter((tool) => !tool.enabled).map((tool) => tool.name));
-  if (enabled) disabled.delete(name); else disabled.add(name);
+  for (const item of wanted) {
+    if (enabled) disabled.delete(item); else disabled.add(item);
+  }
   const file = toolsFile(loaded);
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await writePrivateFileAtomic(file, `${JSON.stringify({ disabled_tools: [...disabled].sort() }, null, 2)}\n`);

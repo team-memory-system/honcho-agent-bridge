@@ -231,7 +231,7 @@ function attention(live, around) {
       : "기억 서버가 답하지 않습니다. 서버를 둔 컴퓨터가 켜져 있는지 확인하세요." });
   }
   if (!context.configured && !context.teamMemory?.connected) {
-    items.push({ level: "warn", text: "대화 쌓기가 꺼져 있습니다. 내 컴퓨터 → 대화 쌓기에서 켜세요." });
+    items.push({ level: "warn", text: "대화 쌓기가 꺼져 있습니다. 기억 설정 → 대화 쌓기에서 켜세요." });
   }
   const gateway = app.status.gateway;
   if (here && !gateway.pending) {

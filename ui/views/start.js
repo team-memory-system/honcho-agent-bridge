@@ -22,7 +22,7 @@ const CHOICES = [
   {
     key: "remote",
     title: "다른 컴퓨터의 기억 서버에 연결하기",
-    text: "서버를 둔 컴퓨터의 내 컴퓨터 → 다른 컴퓨터 붙이기에서 주소와 서버 token을 받아 두세요.",
+    text: "서버를 둔 컴퓨터의 서버 → 공유에서 주소와 서버 token을 받아 두세요.",
     features: ["sync"],
   },
 ];
@@ -31,8 +31,8 @@ const CHOICES = [
 // An item with a `feature` shows only when the choice carries that feature.
 const LATER = [
   { title: "팀원 기억 연결", text: "팀원에게 받은 팀 주소를 넣습니다.", screen: "team/memories" },
-  { feature: "server", title: "다른 컴퓨터 붙이기", text: "내 다른 컴퓨터의 대화도 이 서버에 쌓이게 엽니다.", screen: "computer/share" },
-  { feature: "server", title: "내 기억 공유", text: "팀원이 Google로 로그인해 이 기억에 묻게 합니다.", screen: "team/share" },
+  { feature: "server", title: "공유", text: "내 다른 컴퓨터와 팀원이 이 서버에 닿게 엽니다.", screen: "share" },
+  { feature: "server", title: "내 기억 공유", text: "팀원을 더하고 팀 주소를 보냅니다.", screen: "team/share" },
   { title: "다른 서버에도 쌓기", text: "고른 프로젝트의 대화를 다른 기억 서버에도 쌓습니다.", screen: "computer/targets" },
   { title: "ChatGPT 기록 가져오기", text: "ChatGPT에서 내보낸 파일을 넣습니다.", screen: "computer/import" },
 ];

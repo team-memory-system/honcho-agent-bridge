@@ -1,6 +1,6 @@
 // A menu item that holds several pages: #/<name> lists them with where each
 // stands, and #/<name>/<page> opens one under a link back to the list. Two menu
-// items hold two screens each instead, switched by tabs under the title.
+// items hold several screens instead, switched by tabs under the title.
 import { h, clear } from "./dom.js";
 import { icon } from "./icons.js";
 import { pageHead, tag } from "./ui.js";
@@ -8,7 +8,7 @@ import { pageHead, tag } from "./ui.js";
 /** The screens of a tabbed menu item; the first is the one the menu opens. */
 export const TABS = {
   memory: [["memory", "찾기"], ["ask", "묻기"]],
-  server: [["server", "기억 서버"], ["models", "모델"]],
+  server: [["server", "기억 서버"], ["models", "모델"], ["share", "공유"]],
 };
 
 /** The tabs for a page header, with `current` marked. */

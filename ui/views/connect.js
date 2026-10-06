@@ -1,4 +1,4 @@
-// What this computer is connected to, as three tasks. 내 컴퓨터 lists 대화 쌓기
+// What this computer is connected to, as three tasks. 기억 설정 lists 대화 쌓기
 // and ChatGPT 기록 가져오기, and 팀 lists 팀원 기억 연결 (views/computer.js,
 // views/team.js); each opens here as its own page. 대화 쌓기
 // is a few steps over the one setup form in index.html, sent whole at the end, so
@@ -75,7 +75,7 @@ function sameServer(a, b) {
 export const TASKS = [
   { key: "collect", title: "대화 쌓기", why: "이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 모으고, 에이전트가 내 기억을 꺼내 쓰게 합니다." },
   { key: "share", title: "팀원 기억 연결", why: "팀원이 공유한 기억을 Claude Code와 Codex에 원격 MCP 서버로 연결합니다. 에이전트는 원문을 보지 않고 chat으로 답만 받습니다." },
-  { key: "import", title: "ChatGPT 기록 가져오기", why: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다. 한 번 해 두면 됩니다." },
+  { key: "import", title: "ChatGPT 기록 가져오기", why: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다." },
 ];
 
 // ── Where each task stands, for the menus that list them ──
@@ -116,18 +116,19 @@ export function chatgptCount(update) {
 function checkText(check) {
   const agent = (name) => (name === "codex" ? "Codex" : "Claude Code");
   const plugin = /^(codex|claude)-plugin$/.exec(check.name);
+  const turnOn = (name) => (name === "codex" ? "Codex에서 플러그인을 켜고 새 세션을 여세요." : "Claude Code에서 /plugin으로 켜세요.");
   if (plugin) return check.installed
-    ? `${agent(plugin[1])}에 팀 메모리 플러그인이 설치돼 있지만 꺼져 있습니다. 켜야 대화가 모입니다.`
+    ? `${agent(plugin[1])}의 팀 메모리 플러그인이 꺼져 있습니다. ${turnOn(plugin[1])}`
     : `${agent(plugin[1])}에 팀 메모리 플러그인이 없습니다. 플러그인을 설치하고 켜세요.`;
-  if (check.name === "claude-hook") return "Claude Code는 플러그인에 든 훅으로 모읍니다. 플러그인을 켜면 함께 켜집니다.";
+  if (check.name === "claude-hook") return `Claude Code의 대화 쌓기 훅이 꺼져 있습니다. ${turnOn("claude")}`;
   const hook = /^(codex|claude)-hook$/.exec(check.name);
-  if (hook) return `${agent(hook[1])}에 대화 쌓기 훅이 없거나 예전 것입니다. 설정을 다시 적용하세요.`;
-  if (check.name === "configuration") return "수집 설정이 없습니다.";
-  if (check.name === "runtime") return `수집 프로그램이 ${check.actualVersion ? `예전 판(${check.actualVersion})` : "설치돼 있지 않습니다"}. 설정을 다시 적용하면 새로 설치합니다.`;
-  if (check.name === "honcho-health" && check.code === "cloudflare-access") return "Cloudflare Access가 이 컴퓨터를 막았습니다. 그 서버의 Access 서비스 토큰을 넣으세요.";
-  if (check.name === "honcho-health" && check.status === 401) return "기억 서버가 토큰을 받지 않습니다. 서버를 둔 컴퓨터에서 서버 토큰을 다시 복사해 넣으세요.";
+  if (hook) return `${agent(hook[1])}에 대화 쌓기 훅이 없거나 예전 것입니다. 바꾸기를 누르고 마지막 단계에서 적용을 누르세요.`;
+  if (check.name === "configuration") return "대화 쌓기 설정이 없습니다. 바꾸기를 누르고 마지막 단계에서 적용을 누르세요.";
+  if (check.name === "runtime") return `대화 쌓기 프로그램이 ${check.actualVersion ? `예전 판(${check.actualVersion})입니다` : "설치돼 있지 않습니다"}. 바꾸기를 누르고 마지막 단계에서 적용을 누르세요.`;
+  if (check.name === "honcho-health" && check.code === "cloudflare-access") return "그 서버의 Access가 이 컴퓨터를 막았습니다. 바꾸기에서 그 서버의 Access 서비스 토큰을 넣으세요.";
+  if (check.name === "honcho-health" && check.status === 401) return "기억 서버가 토큰을 받지 않습니다. 서버를 둔 컴퓨터의 서버 → 공유에서 서버 token 복사를 누르고, 여기 바꾸기에서 넣으세요.";
   if (check.name === "honcho-health") return "기억 서버가 답하지 않습니다.";
-  if (check.name === "honcho-workspaces") return "기억 서버에 닿았지만 workspace를 읽지 못했습니다. 토큰이 맞는지 확인하세요.";
+  if (check.name === "honcho-workspaces") return "기억 서버에 닿았지만 workspace를 읽지 못했습니다. 바꾸기에서 서버 토큰을 확인하세요.";
   if (check.name === "mcp") return "에이전트용 기억 도구(MCP)가 시작되지 않습니다.";
   return `${check.name}: ${check.error || check.state || "문제 있음"}`;
 }
@@ -181,7 +182,8 @@ async function collectSummary(body, banner = null) {
     );
   };
   const checks = (doctor?.checks || []).filter((check) => !check.ok);
-  const auth = [context.honcho.hasToken ? "서버 토큰 있음" : local ? "필요 없음" : "서버 토큰 없음", context.honcho.hasAccess ? "Access 서비스 토큰 있음" : null].filter(Boolean).join(" · ");
+  // The server on this computer takes no token, so there is nothing to show for it.
+  const auth = [context.honcho.hasToken ? "서버 토큰 있음" : local ? null : "서버 토큰 없음", context.honcho.hasAccess ? "Access 서비스 토큰 있음" : null].filter(Boolean).join(" · ");
 
   clear(body,
     banner ? h("div", { class: "banner" }, banner) : null,
@@ -193,7 +195,7 @@ async function collectSummary(body, banner = null) {
       ),
       h("dl", { class: "facts" },
         h("dt", {}, "기억 서버"), h("dd", {}, local ? "이 컴퓨터 서버 · " : "", h("code", { class: "mono" }, context.honcho.url)),
-        h("dt", {}, "인증"), h("dd", {}, auth),
+        auth ? h("dt", {}, "인증") : null, auth ? h("dd", {}, auth) : null,
         h("dt", {}, "내 peer 이름"), h("dd", {}, h("code", { class: "mono" }, context.user.peerId || "")),
         h("dt", {}, "workspace"), h("dd", {}, h("code", { class: "mono" }, context.workspace || "")),
       ),
@@ -257,7 +259,7 @@ function collectFlow(body) {
   if (localUrl) {
     form.querySelector("[data-slot=\"server-choice\"]").append(h("div", { class: "choices two" },
       card("local", "이 컴퓨터 서버", "주소와 token 없이 바로 쌓습니다.", h("code", { class: "mono" }, localUrl)),
-      card("remote", "다른 컴퓨터 서버", "그 컴퓨터의 다른 컴퓨터 붙이기에서 주소와 서버 token을 받아 넣습니다.")));
+      card("remote", "다른 컴퓨터 서버", "그 컴퓨터의 서버 → 공유에서 주소와 서버 token을 받아 넣습니다.")));
   }
   setMode(mode);
 
@@ -532,7 +534,7 @@ function sharePage(share) {
     if (!app.context?.oldBridge) return null;
     return notice("warn",
       h("b", {}, "예전 방식의 팀원 기억 연결이 남아 있습니다."),
-      h("div", {}, "공유 창구 주소와 token을 저장해 두던 방식은 이제 쓰지 않습니다. 저장된 token을 이 컴퓨터에서 지우세요."),
+      h("div", {}, "예전 연결 지우기를 누르세요."),
       h("div", { class: "form-actions", style: { marginTop: "8px" } }, button("예전 연결 지우기", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
         await cli("/api/bridge/disconnect", {});
         await loadContext();

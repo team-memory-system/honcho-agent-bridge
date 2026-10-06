@@ -465,7 +465,7 @@ test("the app installs no prerequisite itself: the install route is gone", async
   assert.equal(server.includes("/api/app/prereqs/install"), false);
 });
 
-test("every screen a link opens exists, and so does every page of 내 컴퓨터 and 팀 it names", async () => {
+test("every screen a link opens exists, and so does every page of 기억 설정 and 팀 it names", async () => {
   const screens = await uiSources();
   const shell = await fsp.readFile(path.join(ROOT, "ui", "app.js"), "utf8");
   const views = shell.match(/const VIEWS = \{([^}]*)\}/)[1].split(",").map((name) => name.trim()).filter(Boolean);
@@ -481,10 +481,10 @@ test("every screen a link opens exists, and so does every page of 내 컴퓨터 
       ...[...source.matchAll(/\{ \.\.\.task\("([a-z]+)"\), (?!key:)/g)].map((match) => match[1]),
     ].sort();
   }
-  assert.deepEqual(pages, { computer: ["collect", "import", "share", "targets", "tools"], team: ["audit", "memories", "share"] });
+  assert.deepEqual(pages, { computer: ["collect", "import", "targets", "tools"], team: ["audit", "memories", "share"] });
   const hub = await fsp.readFile(path.join(ROOT, "ui", "lib", "hub.js"), "utf8");
   const tabbed = [...hub.match(/const TABS = \{([\s\S]*?)\n\};/)[1].matchAll(/\["([a-z]+)", "/g)].map((match) => match[1]);
-  assert.deepEqual(tabbed, ["memory", "ask", "server", "models"]);
+  assert.deepEqual(tabbed, ["memory", "ask", "server", "models", "share"]);
   const moved = Object.fromEntries([...shell.match(/const MOVED = \{([\s\S]*?)\n\};/)[1].matchAll(/"?([a-z/]+)"?: "([a-z/]+)"/g)].map((match) => [match[1], match[2]]));
 
   const links = [
@@ -501,9 +501,30 @@ test("every screen a link opens exists, and so does every page of 내 컴퓨터 
   }
   // Addresses from before the menus were regrouped, or of a page that moved menus, as an
   // older skill or a saved link opens them.
-  for (const old of ["connect", "connect/collect", "connect/share", "connect/targets", "team/targets", "tools", "tools/shared", "tools/audit", "audit"]) {
+  for (const old of ["connect", "connect/collect", "connect/share", "connect/targets", "team/targets", "computer/share", "tools", "tools/shared", "tools/audit", "audit"]) {
     assert.ok(moved[old], `#/${old} no longer leads anywhere`);
   }
+});
+
+test("a teammate's share screens never name Cloudflare; only the admin's team setup does", async () => {
+  const source = await fsp.readFile(path.join(ROOT, "ui", "views", "share.js"), "utf8");
+  // From a declaration to the next top-level function or export.
+  const part = (start) => {
+    const from = source.indexOf(start);
+    assert.ok(from >= 0, `share.js has no ${start}`);
+    const ends = [source.indexOf("\nfunction ", from + 1), source.indexOf("\nexport ", from + 1)].filter((at) => at > 0);
+    return source.slice(from, ends.length ? Math.min(...ends) : undefined);
+  };
+  const strings = (code) => [...code.replace(/^\s*\/\/.*$/gm, "").matchAll(/"([^"\n]*)"|`([^`]*)`/g)].map((match) => match[1] ?? match[2]);
+  for (const start of ["export async function openTeamShare", "const PUBLIC_STATES", "function mcpRow", "function shareOn", "function inviteForm"]) {
+    assert.equal(strings(part(start)).some((text) => /cloudflare/i.test(text)), false, `${start} names Cloudflare`);
+  }
+  // The cards everyone sees while sharing is off.
+  const off = part("function shareOff");
+  const from = off.indexOf('class: "choices three"');
+  const cards = off.slice(from, off.indexOf("\n    body,", from));
+  assert.ok(from >= 0 && strings(cards).length >= 6, "the share cards were not found");
+  assert.equal(strings(cards).some((text) => /cloudflare/i.test(text)), false, "the share cards name Cloudflare");
 });
 
 test("the setup steps send the one form, so a secret never leaves it except to the setup routes", async () => {

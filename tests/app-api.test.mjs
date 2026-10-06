@@ -226,6 +226,20 @@ test("tool switches start at recall only and write only known names", async () =
   await assert.rejects(setLocalTool({ name: "chat", enabled: "yes" }, { config }), /true or false/);
 });
 
+test("a group switch turns its tools on or off together, and nothing else", async () => {
+  const config = { version: 1, paths: { dataDir: path.join(workdir, "data-group") } };
+  const on = await setLocalTool({ names: [...WRITE_TOOLS], enabled: true }, { config });
+  assert.ok(on.tools.every((tool) => tool.enabled), "every write tool on, the recall tools as they were");
+
+  const off = await setLocalTool({ names: ["search", "chat"], enabled: false }, { config });
+  assert.deepEqual(off.tools.filter((tool) => !tool.enabled).map((tool) => tool.name).sort(), ["chat", "search"]);
+
+  await assert.rejects(setLocalTool({ names: ["search", "rm_rf"], enabled: false }, { config }), /Unknown MCP tool: rm_rf/);
+  await assert.rejects(setLocalTool({ names: [], enabled: false }, { config }), /at least one tool/);
+  const unchanged = await localTools({ config });
+  assert.deepEqual(unchanged.tools.filter((tool) => !tool.enabled).map((tool) => tool.name).sort(), ["chat", "search"], "a refused call writes nothing");
+});
+
 test("a server token typed into the setup form reaches the CLI but not its command line", async () => {
   const response = await send("/api/setup/plan", { method: "POST", body: { userPeer: "probe", honchoUrl: "http://127.0.0.1:9", agents: "codex", apiToken: "typed-token" } });
   assert.equal(response.status, 200);

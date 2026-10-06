@@ -6,7 +6,7 @@ import { hub } from "../lib/hub.js";
 import { app } from "../lib/state.js";
 import audit from "./audit.js";
 import { TASKS, openTask, taskState } from "./connect.js";
-import { openShare, shareState } from "./share.js";
+import { openTeamShare, shareState } from "./share.js";
 
 const task = (key) => TASKS.find((item) => item.key === key);
 const serverHere = () => Boolean(app.context?.localServer);
@@ -19,10 +19,10 @@ export default hub({
     {
       key: "share",
       title: "내 기억 공유",
-      why: "팀원이 Google로 로그인해 이 기억에 chat으로 묻게 합니다. 팀원 명단과 팀 주소도 여기 있습니다.",
+      why: "팀원이 이 기억에 chat으로 묻게 합니다. 팀원 명단과 팀 주소가 여기 있습니다.",
       available: serverHere,
       refine: shareState,
-      open: (page, head) => openShare(page, head, "team"),
+      open: (page, head) => openTeamShare(page, head),
     },
     {
       key: "audit",
