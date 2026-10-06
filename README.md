@@ -588,7 +588,7 @@ Install the plugin, then run setup against the public address with the gate toke
 HONCHO_API_TOKEN='<gate token>' node scripts/cli.mjs setup apply --agents codex,claude --user-peer <id> --honcho-url https://<name>.<your domain>
 ```
 
-In the app on that computer, 내 컴퓨터 → 대화 보내기 does the same: the address and the gate token go into its form. `/memory-setup` opens that screen for a server on another computer.
+In the app on that computer, 내 컴퓨터 → 대화 쌓기 does the same: the address and the gate token go into its form. `/memory-setup` opens that screen for a server on another computer.
 
 The Team Memory app offers all of this on two pages over the same switch. 내 컴퓨터 → 다른 컴퓨터 붙이기 has "Cloudflare로 공유 켜기" (the API token, the owner's email, and the zone and name under "token 권한과 주소"), "초대 코드로 공유 켜기", the folded "직접 만든 통로로 켜기", and the gate token ("서버 token 복사", "서버 token 바꾸기"). 팀 → 내 기억 공유 has the same two ways to turn it on and, for the owner, the 팀원 list with "팀원 더하기", "공유 빼기" and "팀 주소 복사". A token typed there goes to the app's own server only, and no token or invite is logged.
 

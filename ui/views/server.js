@@ -130,8 +130,8 @@ export default {
       } else {
         nodes.push(section({ title: "기억 서버" },
           external
-            ? notice("", h("b", {}, `이 컴퓨터는 ${context?.honcho?.url}의 기억 서버로 대화를 보냅니다.`), h("div", {}, "그 서버는 다른 컴퓨터에 있어 여기서 켜고 끌 수 없습니다. 서버를 둔 컴퓨터에서 이 앱을 여세요."))
-            : notice("warn", h("b", {}, "이 컴퓨터에는 기억 서버가 없습니다."), h("div", {}, "다른 컴퓨터에 서버가 있으면 내 컴퓨터 → 대화 보내기에서 그 주소를 넣으세요.")),
+            ? notice("", h("b", {}, `이 컴퓨터의 대화는 ${context?.honcho?.url}의 기억 서버에 쌓입니다.`), h("div", {}, "그 서버는 다른 컴퓨터에 있어 여기서 켜고 끌 수 없습니다. 서버를 둔 컴퓨터에서 이 앱을 여세요."))
+            : notice("warn", h("b", {}, "이 컴퓨터에는 기억 서버가 없습니다."), h("div", {}, "다른 컴퓨터에 서버가 있으면 내 컴퓨터 → 대화 쌓기에서 그 주소를 넣으세요.")),
         ));
         // Installing a second server beside one that already answers would split a person's memories.
         nodes.push(external
@@ -150,7 +150,7 @@ export default {
         actions: [
           running
             ? button("멈추기", { kind: "small", iconName: "stop", onClick: async (event) => {
-              const ok = await confirmSheet({ title: "기억 서버를 멈출까요?", text: "멈춘 동안에는 대화가 모이지 않고, 끝난 대화는 다시 켤 때 이어서 보냅니다. 에이전트의 기억 검색도 멈춥니다.", confirm: "멈추기", danger: true });
+              const ok = await confirmSheet({ title: "기억 서버를 멈출까요?", text: "멈춘 동안에는 대화가 모이지 않고, 끝난 대화는 다시 켤 때 이어서 쌓입니다. 에이전트의 기억 검색도 멈춥니다.", confirm: "멈추기", danger: true });
               if (!ok) return;
               await busy(event.currentTarget, async () => { await cli("/api/server/stop", { profile: "personal" }); await draw(); refreshStatus(); }, { done: "기억 서버를 멈췄습니다" });
             } })

@@ -72,7 +72,7 @@ function menuOf(name) {
 
 // ── What this computer has, and what it can use yet ─────
 
-/** A memory server answers here: one set up for 대화 보내기, one installed here, or one that was already running. */
+/** A memory server answers here: one set up for 대화 쌓기, one installed here, or one that was already running. */
 function memoryAnswers() {
   return app.status.honcho.state === "on";
 }
@@ -134,9 +134,9 @@ function gate(name) {
   }
   if (!context.localServer && teamConnected() && !context.configured && !memoryAnswers()) {
     return {
-      reason: "대화 보내기를 켜면 열립니다",
+      reason: "대화 쌓기를 켜면 열립니다",
       detail: "이 컴퓨터는 팀원 기억에만 연결돼 있습니다. 기억과 묻기는 내 기억 서버를 봅니다.",
-      fix: ["대화 보내기 설정", "computer/collect"],
+      fix: ["대화 쌓기 설정", "computer/collect"],
     };
   }
   return null;
@@ -183,7 +183,7 @@ function renderMachine() {
     }
     if (here) lines.push(h("a", { href: "#/models" }, light(gateway.state), h("span", {}, "구독 게이트웨이"), h("small", {}, gateway.text)));
     if (context.configured || !teamConnected()) {
-      lines.push(h("a", { href: "#/computer/collect" }, light(collector.state), h("span", {}, "대화 보내기"), h("small", {}, collector.text)));
+      lines.push(h("a", { href: "#/computer/collect" }, light(collector.state), h("span", {}, "대화 쌓기"), h("small", {}, collector.text)));
     }
     if (teamConnected()) {
       lines.push(h("a", { href: "#/team/memories" }, light("on"), h("span", {}, "팀원 기억"), h("small", {}, `${context.teamMemory.connected}곳 연결`)));

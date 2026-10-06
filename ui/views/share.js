@@ -84,19 +84,19 @@ function shareOn(share, redraw, part) {
           button("서버 token 복사", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
             const result = await cli("/api/server/share/token", {});
             await copyText(result.token);
-            toast("서버 token을 복사했습니다. 다른 컴퓨터의 대화 보내기에 붙여 넣으세요.");
+            toast("서버 token을 복사했습니다. 다른 컴퓨터의 대화 쌓기에 붙여 넣으세요.");
           }) }),
         ),
       ),
     ),
     state ? h("div", { style: { marginTop: "12px" } }, notice(state[0], h("b", {}, state[1]), state[2] ? ` ${state[2]}` : "", check.error ? h("div", { class: "muted" }, check.error) : null)) : null,
-    team ? null : h("div", { style: { marginTop: "12px" } }, notice("", "다른 컴퓨터에서 내 컴퓨터 → 대화 보내기 → 다른 컴퓨터 서버를 고르고, 이 주소와 서버 token을 넣으세요.")),
+    team ? null : h("div", { style: { marginTop: "12px" } }, notice("", "다른 컴퓨터에서 내 컴퓨터 → 대화 쌓기 → 다른 컴퓨터 서버를 고르고, 이 주소와 서버 token을 넣으세요.")),
     team && cloudflare.managed ? teamBlock() : null,
     team && cloudflare.joined ? h("div", { style: { marginTop: "12px" } }, notice("", h("b", {}, "팀에 들어가 있습니다."), " 팀원들이 Google로 로그인해 이 기억에 묻습니다.",
       h("div", { class: "form-actions", style: { marginTop: "8px" } }, button("팀원 기억 연결", { kind: "small", onClick: () => go("team/memories") })))) : null,
     h("div", { class: "form-actions" },
       team ? null : button("서버 token 바꾸기", { kind: "small quiet", onClick: async (event) => {
-        const ok = await confirmSheet({ title: "서버 token을 바꿀까요?", text: "지금 token을 쓰는 내 다른 컴퓨터는 모두 끊깁니다. 각 컴퓨터의 대화 보내기에 새 token을 넣어야 다시 모입니다. 끊긴 동안의 대화는 다시 연결하면 이어서 보냅니다. 팀원의 Google 로그인은 그대로입니다.", confirm: "바꾸기", danger: true });
+        const ok = await confirmSheet({ title: "서버 token을 바꿀까요?", text: "지금 token을 쓰는 내 다른 컴퓨터는 모두 끊깁니다. 각 컴퓨터의 대화 쌓기에 새 token을 넣어야 다시 모입니다. 끊긴 동안의 대화는 다시 연결하면 이어서 쌓입니다. 팀원의 Google 로그인은 그대로입니다.", confirm: "바꾸기", danger: true });
         if (!ok) return;
         await busy(event.currentTarget, async () => { await cli("/api/server/share/rotate", {}); await redraw(false); }, { done: "새 서버 token을 만들었습니다" });
       } }),

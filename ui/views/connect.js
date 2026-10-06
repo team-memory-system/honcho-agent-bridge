@@ -1,6 +1,6 @@
-// What this computer is connected to, as four tasks. 내 컴퓨터 lists 대화 보내기
+// What this computer is connected to, as four tasks. 내 컴퓨터 lists 대화 쌓기
 // and ChatGPT 기록 가져오기, and 팀 lists 팀원 기억 연결 and 회사 서버에도 보내기
-// (views/computer.js, views/team.js); each opens here as its own page. 대화 보내기
+// (views/computer.js, views/team.js); each opens here as its own page. 대화 쌓기
 // is a few steps over the one setup form in index.html, sent whole at the end, so
 // the fields the CLI reads stay the ones the tests check. 팀원 기억 연결 puts a
 // teammate's server into Claude Code and Codex as a remote MCP server (team-<name>);
@@ -32,9 +32,9 @@ const WARNINGS = [
   [/is behind Cloudflare Access and refused this computer/, () => "Cloudflare Access가 이 컴퓨터를 막았습니다. Cloudflare Access 서비스 토큰을 열고 그 서버의 서비스 토큰 ID와 비밀을 넣으세요."],
   [/Cloudflare Access (?:client id|service token).*(?:both|together)/i, () => "Access 서비스 토큰은 ID와 비밀을 함께 넣어야 합니다."],
   [/rejected the API token/, () => "서버가 이 토큰을 받지 않습니다. 서버를 둔 컴퓨터의 토큰이 맞는지 확인하세요."],
-  [/at least one detected agent must be selected/, () => "대화를 보낼 에이전트를 하나 이상 고르세요. 이 컴퓨터에 설치된 Claude Code나 Codex만 고를 수 있습니다."],
+  [/at least one detected agent must be selected/, () => "대화를 쌓을 에이전트를 하나 이상 고르세요. 이 컴퓨터에 설치된 Claude Code나 Codex만 고를 수 있습니다."],
   [/The API token saved for (\S+) is not carried to (\S+)/, (m) => `${m[1]}에 쓰던 토큰은 ${m[2]}로 옮기지 않습니다. 새 서버의 토큰을 넣으세요.`],
-  [/This computer has a Honcho server installed at (\S+), but collection goes to (\S+)\./, (m) => `이 컴퓨터에 ${m[1]} 기억 서버가 설치돼 있는데, 대화는 ${m[2]}로 보내게 돼 있습니다. 이 컴퓨터 서버로 모으려면 첫 단계에서 이 컴퓨터 서버를 고르세요.`],
+  [/This computer has a Honcho server installed at (\S+), but collection goes to (\S+)\./, (m) => `이 컴퓨터에 ${m[1]} 기억 서버가 설치돼 있는데, 대화는 ${m[2]}에 쌓이게 돼 있습니다. 이 컴퓨터 서버에 쌓으려면 첫 단계에서 이 컴퓨터 서버를 고르세요.`],
   [/Honcho URL is invalid/, () => "기억 서버 주소가 올바르지 않습니다."],
   [/Honcho URL must not contain credentials/, () => "기억 서버 주소에 아이디·비밀번호·물음표 뒤 값을 넣지 마세요. 토큰은 서버 토큰 칸에 넣습니다."],
 ];
@@ -73,7 +73,7 @@ function sameServer(a, b) {
 }
 
 export const TASKS = [
-  { key: "collect", title: "대화 보내기", why: "이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 모으고, 에이전트가 내 기억을 꺼내 쓰게 합니다." },
+  { key: "collect", title: "대화 쌓기", why: "이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 모으고, 에이전트가 내 기억을 꺼내 쓰게 합니다." },
   { key: "targets", title: "회사 서버에도 보내기", why: "정한 폴더에서 한 대화만 회사 서버 같은 다른 기억 서버에도 보냅니다. 내 서버에는 그대로 모두 갑니다." },
   { key: "share", title: "팀원 기억 연결", why: "팀원이 공유한 기억을 Claude Code와 Codex에 원격 MCP 서버로 연결합니다. 에이전트는 원문을 보지 않고 chat으로 답만 받습니다." },
   { key: "import", title: "ChatGPT 기록 가져오기", why: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다. 한 번 해 두면 됩니다." },
@@ -94,7 +94,7 @@ export function taskState(key) {
   }
   if (key === "targets") {
     const targets = context.targets || [];
-    if (!targets.length) return { label: "없음", detail: context.configured ? "" : "대화 보내기를 켠 뒤에 씁니다" };
+    if (!targets.length) return { label: "없음", detail: context.configured ? "" : "대화 쌓기를 켠 뒤에 씁니다" };
     const pending = targets.reduce((sum, target) => sum + (target.pending || 0), 0);
     return {
       label: `${targets.length}개`,
@@ -122,7 +122,7 @@ export function chatgptCount(update) {
     .catch(() => {});
 }
 
-// ── 대화 보내기 ───────────────────────────────────────────
+// ── 대화 쌓기 ───────────────────────────────────────────
 
 function checkText(check) {
   const agent = (name) => (name === "codex" ? "Codex" : "Claude Code");
@@ -178,9 +178,9 @@ async function collectSummary(body, banner = null) {
     const plugin = found?.plugin || {};
     const last = latest[name];
     const state = !found?.detected ? tag("설치 안 됨")
-      : collecting && plugin.enabled ? tag("보내는 중", "ok")
+      : collecting && plugin.enabled ? tag("쌓는 중", "ok")
         : collecting ? tag("플러그인 꺼짐", "warn")
-          : tag("보내지 않음");
+          : tag("쌓지 않음");
     return h("div", { class: "row" },
       h("div", {},
         h("div", { class: "title" }, h("span", { class: `src ${name}` }, name === "codex" ? "X" : "C"), label, state),
@@ -199,7 +199,7 @@ async function collectSummary(body, banner = null) {
     h("div", { class: "panel summary" },
       h("div", { class: "summary-head" },
         tag("켜짐", "ok"),
-        h("b", {}, "이렇게 보내고 있습니다"),
+        h("b", {}, "이렇게 쌓고 있습니다"),
         button("바꾸기", { kind: "small", onClick: () => collectFlow(body) }),
       ),
       h("dl", { class: "facts" },
@@ -209,15 +209,15 @@ async function collectSummary(body, banner = null) {
         h("dt", {}, "workspace"), h("dd", {}, h("code", { class: "mono" }, context.workspace || "")),
       ),
     ),
-    h("h2", { class: "sub-title" }, "보내는 에이전트"),
+    h("h2", { class: "sub-title" }, "쌓는 에이전트"),
     h("div", { class: "rows" }, agentRow("claude"), agentRow("codex")),
     checks.length ? h("div", { style: { marginTop: "12px" } }, notice("warn", h("b", {}, "점검에서 걸린 것"), h("ul", {}, checks.map((check) => h("li", {}, checkText(check)))))) : null,
   );
 }
 
 const STEP_INFO = {
-  server: { label: "기억 서버", title: "어느 기억 서버로 보낼까요?" },
-  agents: { label: "보낼 에이전트", title: "어느 에이전트의 대화를 보낼까요?" },
+  server: { label: "기억 서버", title: "어느 기억 서버에 쌓을까요?" },
+  agents: { label: "쌓을 에이전트", title: "어느 에이전트의 대화를 쌓을까요?" },
   name: { label: "내 이름", title: "기억에서 나를 가리킬 이름", note: "내 모든 컴퓨터에서 같은 이름을 쓰세요." },
   confirm: { label: "확인", title: "이대로 설정할까요?", note: "적용을 누르면 아래 일을 합니다." },
 };
@@ -267,7 +267,7 @@ function collectFlow(body) {
   };
   if (localUrl) {
     form.querySelector("[data-slot=\"server-choice\"]").append(h("div", { class: "choices two" },
-      card("local", "이 컴퓨터 서버", "주소와 token 없이 바로 보냅니다.", h("code", { class: "mono" }, localUrl)),
+      card("local", "이 컴퓨터 서버", "주소와 token 없이 바로 쌓습니다.", h("code", { class: "mono" }, localUrl)),
       card("remote", "다른 컴퓨터 서버", "그 컴퓨터의 다른 컴퓨터 붙이기에서 주소와 서버 token을 받아 넣습니다.")));
   }
   setMode(mode);
@@ -316,7 +316,7 @@ function collectFlow(body) {
       return false;
     }
     if (key === "agents" && !form.querySelector('input[name="agents"]:checked')) {
-      clear(problem, notice("warn", "대화를 보낼 에이전트를 하나 이상 고르세요."));
+      clear(problem, notice("warn", "대화를 쌓을 에이전트를 하나 이상 고르세요."));
       return false;
     }
     return true;
@@ -438,8 +438,8 @@ function targetsPage(container) {
     }
     const items = list.targets || [];
     if (!app.context?.configured) {
-      clear(container, notice("", "먼저 대화 보내기를 켜세요. 그다음에 다른 서버를 더할 수 있습니다."),
-        h("div", { class: "form-actions" }, button("대화 보내기 설정", { kind: "primary", onClick: () => go("computer/collect") })));
+      clear(container, notice("", "먼저 대화 쌓기를 켜세요. 그다음에 다른 서버를 더할 수 있습니다."),
+        h("div", { class: "form-actions" }, button("대화 쌓기 설정", { kind: "primary", onClick: () => go("computer/collect") })));
       return;
     }
     clear(container,
@@ -782,7 +782,7 @@ function importPage(importer) {
     ),
     context.configured
       ? h("p", { class: "muted dest" }, "넣을 곳: ", sameServer(context.honcho?.url, context.localServer?.apiUrl) ? "이 컴퓨터 서버 · " : "", h("code", { class: "mono" }, context.honcho?.url || ""), ` · workspace ${context.workspace || "memory"}`)
-      : notice("warn", "대화 보내기를 아직 켜지 않았습니다. 먼저 켜면 내 기억 서버로 들어갑니다.", " ", h("a", { href: "#/computer/collect" }, "대화 보내기 설정")),
+      : notice("warn", "대화 쌓기를 아직 켜지 않았습니다. 먼저 켜면 내 기억 서버로 들어갑니다.", " ", h("a", { href: "#/computer/collect" }, "대화 쌓기 설정")),
     h("div", { class: "panel", style: { marginTop: "12px" } }, h("div", { class: "upload-line" }, file, upload), result),
     last?.at ? h("p", { class: "muted dest" }, `이 앱에서 마지막으로 가져온 때 ${ago(last.at)} · 대화 ${number(last.conversations || 0)}개 · 새 메시지 ${number(last.newMessages || 0)}개`) : null,
   );

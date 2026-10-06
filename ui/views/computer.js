@@ -13,7 +13,7 @@ const task = (key) => TASKS.find((item) => item.key === key);
 export default hub({
   name: "computer",
   title: "내 컴퓨터",
-  subtitle: "이 컴퓨터의 대화를 어디로 보내고, 에이전트가 무엇을 쓸지 정합니다.",
+  subtitle: "이 컴퓨터의 대화를 어디에 쌓고, 에이전트가 무엇을 쓸지 정합니다.",
   pages: [
     { ...task("collect"), state: () => taskState("collect"), open: (page, head) => openTask(page, "collect", head) },
     {
@@ -25,7 +25,7 @@ export default hub({
     {
       key: "share",
       title: "다른 컴퓨터 붙이기",
-      why: "내 다른 컴퓨터도 이 컴퓨터의 기억 서버로 대화를 보내게 엽니다.",
+      why: "내 다른 컴퓨터의 대화도 이 컴퓨터의 기억 서버에 쌓이게 엽니다.",
       available: () => Boolean(app.context?.localServer),
       refine: shareState,
       open: (page, head) => openShare(page, head, "computer"),

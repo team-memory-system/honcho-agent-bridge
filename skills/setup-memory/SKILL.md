@@ -10,7 +10,7 @@ Use the deterministic CLI bundled at `<plugin-root>/scripts/cli.mjs`. Resolve `<
 
 Speak to the user in the language they wrote in: progress notes, questions, warnings and summaries alike (Korean for a Korean request). This file and the CLI's JSON are in English; translate what you pass on and never switch to English mid-setup.
 
-The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버 → 기억 서버), `models` (서버 → 구독 게이트웨이), `computer/collect` (내 컴퓨터 → 대화 보내기), `computer/share` (내 컴퓨터 → 다른 컴퓨터 붙이기), `team/share` (팀 → 내 기억 공유), `team/memories` (팀 → 팀원 기억 연결). Do not send them to the gateway's own page at 11450.
+The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버 → 기억 서버), `models` (서버 → 구독 게이트웨이), `computer/collect` (내 컴퓨터 → 대화 쌓기), `computer/share` (내 컴퓨터 → 다른 컴퓨터 붙이기), `team/share` (팀 → 내 기억 공유), `team/memories` (팀 → 팀원 기억 연결). Do not send them to the gateway's own page at 11450.
 
 ## Fixed lines
 
@@ -30,8 +30,8 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | Server started and verified | 기억 서버가 켜졌습니다. 팀 메모리 앱: <ui open의 url> |
 | Agents question | Question "어느 에이전트의 대화를 보낼까요?" Options "찾은 에이전트 모두 (<이름들>)", "지금 쓰는 <이름>만", "직접 고르기" |
 | Peer ID question (only when none is configured) | 기억에서 나를 가리킬 이름을 정해 주세요. 영문 소문자와 밑줄로 쓰고, 내 다른 컴퓨터와 같은 이름을 씁니다. 예: user_hong |
-| Server elsewhere | 방금 연 대화 보내기 화면(<url>)에 서버 주소와 서버 token을 넣고 적용까지 진행하세요. token은 채팅에 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
-| Setup plan confirmation | Question "대화 보내기를 이렇게 설정합니다. 진행할까요?" whose text lists the files from `operations`. Options "진행", "취소" |
+| Server elsewhere | 방금 연 대화 쌓기 화면(<url>)에 서버 주소와 서버 token을 넣고 적용까지 진행하세요. token은 채팅에 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
+| Setup plan confirmation | Question "대화 쌓기를 이렇게 설정합니다. 진행할까요?" whose text lists the files from `operations`. Options "진행", "취소" |
 | `approve-hook` | Codex를 새로 열면 훅 승인 창이 뜹니다. "Syncing codex conversation to personal memory"만 승인하세요. |
 | `reload-plugins` | 이미 열려 있는 Claude Code 창에서는 `/reload-plugins`를 입력하세요. |
 | `install-plugin` | <Codex 또는 Claude Code> 플러그인: 터미널에서 아래 명령을 차례로 실행하세요. <그 단계의 `commands`를 한 줄에 하나씩> |
@@ -127,7 +127,7 @@ node <plugin-root>/scripts/cli.mjs setup plan \
 
 ## Own server on another computer
 
-For a user whose own Honcho already runs on another of their computers, this computer gets only the collector. The user sets it up on the app's 대화 보내기 screen, so the server token goes from them straight into the app and never through chat:
+For a user whose own Honcho already runs on another of their computers, this computer gets only the collector. The user sets it up on the app's 대화 쌓기 screen, so the server token goes from them straight into the app and never through chat:
 
 1. Install the plugin as usual. Skip `server ...` entirely.
 2. Run `node <plugin-root>/scripts/cli.mjs ui open --screen computer/collect` and say the "Server elsewhere" line. The screen takes the address and the server token, then the agents and the peer name, checks the server, and runs the same `setup apply`. Its result lists what to do in Codex and Claude Code, so do not repeat the `approve-hook` and `reload-plugins` lines.

@@ -31,7 +31,7 @@ const CHOICES = [
 // An item with a `feature` shows only when the choice carries that feature.
 const LATER = [
   { title: "팀원 기억 연결", text: "팀원에게 받은 팀 주소를 넣습니다.", screen: "team/memories" },
-  { feature: "server", title: "다른 컴퓨터 붙이기", text: "내 다른 컴퓨터도 이 서버로 대화를 보내게 엽니다.", screen: "computer/share" },
+  { feature: "server", title: "다른 컴퓨터 붙이기", text: "내 다른 컴퓨터의 대화도 이 서버에 쌓이게 엽니다.", screen: "computer/share" },
   { feature: "server", title: "내 기억 공유", text: "팀원이 Google로 로그인해 이 기억에 묻게 합니다.", screen: "team/share" },
   { title: "회사 서버에도 보내기", text: "정한 폴더의 대화를 다른 기억 서버에도 보냅니다.", screen: "team/targets" },
   { title: "ChatGPT 기록 가져오기", text: "ChatGPT에서 내보낸 파일을 넣습니다.", screen: "computer/import" },
@@ -126,10 +126,10 @@ export default {
         });
       }
       steps.push({
-        title: "대화 보내기 설정",
+        title: "대화 쌓기 설정",
         done: Boolean(context?.configured),
-        text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "대화 보내기에서 이 컴퓨터 서버를 고르고 적용까지 진행하세요." : "대화 보내기에 받아 둔 주소와 서버 token을 넣고 적용까지 진행하세요.",
-        action: ["대화 보내기로", () => go("computer/collect")],
+        text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "대화 쌓기에서 이 컴퓨터 서버를 고르고 적용까지 진행하세요." : "대화 쌓기에 받아 둔 주소와 서버 token을 넣고 적용까지 진행하세요.",
+        action: ["대화 쌓기로", () => go("computer/collect")],
       });
       // Only a conversation from an agent this computer collects, after setup, proves it works.
       let latest = null;
