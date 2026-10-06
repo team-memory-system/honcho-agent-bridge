@@ -242,9 +242,9 @@ async function collectSummary(body, banner = null) {
 
 const STEP_INFO = {
   server: { label: "기억 서버", title: "어느 기억 서버로 보낼까요?" },
-  agents: { label: "보낼 에이전트", title: "어느 에이전트의 대화를 보낼까요?", note: "고른 에이전트는 대화가 끝날 때마다 보내고, 내 기억을 꺼내 쓰는 MCP 도구를 받습니다." },
-  name: { label: "내 이름", title: "기억에서 나를 가리킬 이름", note: "기억 서버는 대화 속의 나를 이 peer 이름으로 묶습니다. 내 모든 컴퓨터에서 같은 이름을 씁니다." },
-  confirm: { label: "확인", title: "이대로 설정할까요?", note: "적용하면 아래 일을 합니다. 바꾸는 설정 파일은 미리 백업합니다." },
+  agents: { label: "보낼 에이전트", title: "어느 에이전트의 대화를 보낼까요?" },
+  name: { label: "내 이름", title: "기억에서 나를 가리킬 이름", note: "내 모든 컴퓨터에서 같은 이름을 쓰세요." },
+  confirm: { label: "확인", title: "이대로 설정할까요?", note: "적용을 누르면 아래 일을 합니다." },
 };
 
 function collectFlow(body) {
@@ -292,13 +292,10 @@ function collectFlow(body) {
   };
   if (localUrl) {
     form.querySelector("[data-slot=\"server-choice\"]").append(h("div", { class: "choices two" },
-      card("local", "이 컴퓨터 서버", "이 컴퓨터에 설치한 서버로 보냅니다. 주소와 토큰이 필요 없습니다.", h("code", { class: "mono" }, localUrl)),
-      card("remote", "다른 컴퓨터 서버", "다른 컴퓨터에 둔 내 서버로 보냅니다. 그 컴퓨터의 앱에서 주소와 서버 토큰을 받습니다.")));
+      card("local", "이 컴퓨터 서버", "주소와 token 없이 바로 보냅니다.", h("code", { class: "mono" }, localUrl)),
+      card("remote", "다른 컴퓨터 서버", "그 컴퓨터의 서버 → 공유에서 주소와 서버 token을 받아 넣습니다.")));
   }
   setMode(mode);
-  STEP_INFO.server.note = localUrl
-    ? "이 컴퓨터에 기억 서버가 있습니다. 내 서버가 다른 컴퓨터에 있으면 그쪽을 고릅니다."
-    : "다른 컴퓨터에 둔 내 기억 서버로 보냅니다. 그 컴퓨터의 앱에서 서버 → 공유를 열면 주소와 서버 token이 있습니다. 서버가 Cloudflare Access 뒤에 있으면 Access 서비스 토큰도 넣습니다.";
 
   // Which agents this computer has; until known the boxes keep their values.
   let touched = false;
@@ -434,11 +431,10 @@ function collectFlow(body) {
       if (!done.ok) { clear(extra, chosenSummary(), planView(done)); throw new Error("설정하지 못했습니다."); }
       await loadContext();
       refreshStatus();
-      await collectSummary(body, notice("ok", h("b", {}, "설정했습니다. 에이전트를 다시 시작하면 모이기 시작합니다."),
+      await collectSummary(body, notice("ok", h("b", {}, "설정했습니다."),
         h("ul", {},
-          chosen.includes("codex") ? h("li", {}, "Codex: 새 세션을 열면 훅을 승인하라고 묻습니다. “Syncing codex conversation to personal memory”를 승인하세요.") : null,
+          chosen.includes("codex") ? h("li", {}, "Codex: 새 세션에서 “Syncing codex conversation to personal memory” 훅을 승인하세요.") : null,
           chosen.includes("claude") ? h("li", {}, "Claude Code: 열려 있는 세션에서 /reload-plugins 를 실행하거나 새로 여세요.") : null,
-          h("li", {}, "그다음부터는 대화가 끝날 때마다 자동으로 모입니다. 시작하기 화면에서 첫 기억이 들어왔는지 확인할 수 있습니다."),
         )));
     });
   }

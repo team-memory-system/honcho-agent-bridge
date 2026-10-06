@@ -620,7 +620,7 @@ export default {
       const steps = [
         {
           title: "무엇을 설치할지 보기",
-          text: "바꾸는 것을 먼저 확인합니다. 아직 아무것도 설치하지 않습니다.",
+          text: "설치할 것을 미리 봅니다. 아무것도 바꾸지 않습니다.",
           done: false,
           body: [button("살펴보기", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
             const plan = await post("/api/server/plan", { profile: "personal" });
@@ -630,26 +630,30 @@ export default {
         {
           title: "Docker와 Ollama 준비",
           text: dockerReady && ollamaReady
-            ? "둘 다 이 컴퓨터에 있습니다."
-            : `${[!server.docker?.installed ? "Docker Desktop" : null, !ollamaReady ? "Ollama" : null].filter(Boolean).join("과 ") || "Docker Desktop"}을 이 앱이 받아서 설치합니다.${!server.docker?.installed ? " Docker는 처음 켤 때 약관 동의와 암호 입력이 한 번 필요합니다." : server.docker?.running ? "" : " Docker Desktop이 꺼져 있으면 켭니다."}`,
+            ? "둘 다 있습니다."
+            : !server.docker?.installed
+              ? "받아서 설치를 누르세요. Docker 창이 뜨면 약관에 동의하고 권장 설정을 고른 뒤, 암호를 물으면 넣으세요."
+              : "이어서 준비를 누르세요.",
           done: dockerReady && ollamaReady,
           body: dockerReady && ollamaReady ? [] : [button(server.docker?.installed ? "이어서 준비" : "받아서 설치", { kind: "small primary", onClick: prepare({ title: "Docker와 Ollama를 설치할까요?", text: "Docker Desktop(약 600MB)과 Ollama를 받아 설치합니다. Docker Desktop 창이 뜨면 약관에 동의하고 권장 설정을 고르세요.", confirm: "설치" }) })],
         },
         {
           title: "구독 게이트웨이 설치",
           text: gatewayUp
-            ? `설치돼 있고 ${gatewayReport.endpoint || "라우터"}에서 답합니다.`
-            : "Honcho 소스와 게이트웨이를 받고, 게이트웨이를 이 컴퓨터에 설치해 자동 시작하게 합니다. 몇 분 걸립니다.",
+            ? "설치돼 있습니다."
+            : dockerReady ? "설치를 누르세요. 몇 분 걸립니다." : "Docker와 Ollama 준비 다음에 합니다.",
           done: gatewayUp,
           body: gatewayUp || !dockerReady ? [] : [button("설치", { kind: "small primary", onClick: prepare({ title: "구독 게이트웨이를 설치할까요?", text: "Honcho 소스와 게이트웨이를 받고 게이트웨이를 설치합니다. 계정 로그인이 필요해지면 거기서 멈춥니다.", confirm: "설치" }) })],
         },
         {
           title: "게이트웨이에 구독 계정 로그인",
           text: serving
-            ? `계정 ${serving}개가 연결돼 있습니다. 기억 서버는 이 계정의 모델로 대화를 정리합니다.`
+            ? `계정 ${serving}개가 연결돼 있습니다.`
             : loggedIn
-              ? "로그인한 계정이 아직 라우터에 연결되지 않았습니다. 게이트웨이 화면에서 연결하세요."
-              : "기억 서버가 대화를 정리할 모델입니다. Codex나 Claude 구독 계정 하나면 됩니다. 브라우저에 로그인 창이 열립니다.",
+              ? "게이트웨이 설정에서 지금 연결을 누르세요."
+              : gatewayUp
+                ? "Codex로 로그인이나 Claude로 로그인을 누르고 브라우저에서 로그인을 마치세요."
+                : "게이트웨이 설치 다음에 합니다.",
           done: serving > 0,
           body: !gatewayUp ? [] : serving
             ? [button("게이트웨이 설정", { kind: "small quiet", onClick: () => go("models") })]
@@ -661,20 +665,20 @@ export default {
         },
         {
           title: "기억 서버 준비",
-          text: "게이트웨이 주소·키·모델을 서버 설정에 쓰고, 서버 파일을 놓고, 임베딩 모델을 받습니다. 임베딩 모델은 처음 한 번 몇 GB를 받습니다.",
+          text: serving ? "준비를 누르세요. 처음에는 임베딩 모델(몇 GB)을 받느라 오래 걸립니다." : "로그인 다음에 합니다.",
           done: false,
           body: serving ? [button("준비", { kind: "small primary", onClick: prepare({ title: "기억 서버를 준비할까요?", text: "서버 설정과 파일을 쓰고 임베딩 모델을 받습니다. 몇 분에서 수십 분 걸릴 수 있습니다.", confirm: "준비" }) })] : [],
         },
         {
           title: "시작",
-          text: "준비가 끝나면 이 화면에 기억 서버가 나타나고, 거기서 시작을 누릅니다. 처음에는 이미지를 만드느라 오래 걸립니다.",
+          text: "준비가 끝나면 이 화면에 나타나는 기억 서버에서 시작을 누르세요. 처음에는 오래 걸립니다.",
           done: false,
           body: [],
         },
       ];
       // Looking at the plan is optional; the next thing to do is the first unfinished step after it.
       const current = steps.findIndex((step, index) => index > 0 && !step.done);
-      return section({ title: "서버 설치", note: "기억 서버, 구독 게이트웨이, 임베딩 모델을 이 컴퓨터에 설치합니다." },
+      return section({ title: "서버 설치", note: "위에서부터 차례로 진행하세요." },
         h("div", { class: "steps" }, steps.map((step, index) => h("div", { class: `step ${step.done ? "done" : index === current ? "current" : ""}` },
           h("span", { class: "step-num" }),
           h("div", {},

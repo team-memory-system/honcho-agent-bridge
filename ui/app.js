@@ -68,6 +68,11 @@ function setupDone() {
   return Boolean(context?.configured || teamConnected() || context?.localServer || memoryAnswers());
 }
 
+/** 시작하기 stays until setup is done, or, once a choice is made there, until its steps all are. */
+function startOpen() {
+  return !setupDone() || (Boolean(app.prefs.startChoice) && !app.prefs.startDone);
+}
+
 /** A server here, one about to be installed here, or a gateway answering here. */
 function serverHere() {
   const picked = app.prefs.startChoice === "here";
@@ -76,7 +81,7 @@ function serverHere() {
 
 /** Screens that mean nothing on this computer are left out of the menu. */
 function visible(name) {
-  if (name === "start") return !setupDone();
+  if (name === "start") return startOpen();
   if (name === "server" || name === "models") return serverHere();
   if (name === "audit") return Boolean(app.context?.localServer) || auditAnswers;
   return true;
@@ -187,7 +192,7 @@ function renderTheme() {
 
 function defaultView() {
   if (!app.context) return "memory";
-  if (!setupDone()) return "start";
+  if (startOpen()) return "start";
   // Joined a teammate's memory only: there is no memory of one's own to open.
   if (!app.context.localServer && !app.context.configured && !memoryAnswers()) return "connect";
   return "memory";
