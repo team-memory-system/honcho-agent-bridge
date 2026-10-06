@@ -34,6 +34,7 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | Setup plan confirmation | Question "대화 보내기를 이렇게 설정합니다. 진행할까요?" whose text lists the files from `operations`. Options "진행", "취소" |
 | `approve-hook` | Codex를 새로 열면 훅 승인 창이 뜹니다. "Syncing codex conversation to personal memory"만 승인하세요. |
 | `reload-plugins` | 이미 열려 있는 Claude Code 창에서는 `/reload-plugins`를 입력하세요. |
+| `install-plugin` | <Codex 또는 Claude Code> 플러그인: 터미널에서 아래 명령을 차례로 실행하세요. <그 단계의 `commands`를 한 줄에 하나씩> |
 | Chat connection | 팀원에게 받은 팀 주소를 방금 연 앱 화면(<url>)에 붙여 넣고 "Claude Code·Codex에 연결"을 누르세요. 끝나면 "했어"라고 말해 주세요. |
 | Chat login | Claude Code에서는 `/mcp`를 입력하고 <team-이름>을 골라 Authenticate를 누르세요. Codex는 앱 화면의 "Codex 로그인"을 누르세요. 브라우저가 열리면 팀에 등록된 Google 계정으로 로그인하세요. 끝나면 "했어"라고 말해 주세요. |
 | Chat connected | 팀원 기억에 연결했습니다. 에이전트는 <team-이름> 서버의 chat 도구로 물을 수 있습니다. |
@@ -114,11 +115,13 @@ node <plugin-root>/scripts/cli.mjs setup plan \
 ```
 
 6. Summarize the exact files and agents from `operations`. Do not apply when `ready` is false.
-   - Explain every `warning`. Selecting a host without its Honcho Agent Bridge plugin installed and enabled can prepare shared configuration, but that host will not receive the bundled skills, MCP server, or Claude hook.
+   - Explain every `warning`.
+   - An `install-plugin` operation means apply puts this plugin into that host with the host's own CLI, from the source this plugin came from. The user runs nothing for it. A plugin that is installed but turned off stays off, and its warning says so.
 7. Obtain confirmation before changing host settings. Replace `plan` with `apply` using the same options.
 8. Run `node <plugin-root>/scripts/cli.mjs doctor` and report any failed check.
 9. Tell the user every entry of `nextSteps` from the apply result, in their words. Collection is not finished without them:
-   - `approve-hook` (Codex): Codex shows the new Stop hook for approval when a session starts, or in `/hooks`. Approve only "Syncing codex conversation to personal memory". Nothing from Codex is collected before that.
+   - `install-plugin`: setup could not install the plugin into that host. The CLI was missing, or its install failed; the reason is in `plugins[].error`. Say the `install-plugin` line with the step's `commands`. Then run `doctor` again after the user says they ran them.
+   - `approve-hook` (Codex): Codex shows the new Stop hook for approval when a session starts, or in `/hooks`. Approve only "Syncing codex conversation to personal memory". Nothing from Codex is collected before that. After setup installed the Codex plugin, the same new session also loads its skills and recall MCP server.
    - `reload-plugins` (Claude Code): sessions that were already open need `/reload-plugins` or a restart; new sessions need nothing. Earlier turns of those sessions are sent with their next turn.
 10. The memory-changing MCP tools (writes and deletes) start turned off; recall does not need them. Mention it only if the user asks for a tool that is missing.
 

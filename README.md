@@ -325,9 +325,11 @@ With `--profile personal` on macOS (Apple Silicon or Intel) or Windows 11, a mis
 
 Git is still a prerequisite. When git is absent, the setup skill offers an explicitly confirmed installation through the detected platform's official package manager or vendor installer, then reruns the prerequisite checks. System software installation is never hidden inside the release archive.
 
-One setup run can enable conversation collection for every detected agent. Installing the plugin in each host is still required for that host to receive the skills and MCP tools.
+One setup run can enable conversation collection for every detected agent, and it puts the plugin into each of those hosts that does not have it yet (see [Plugin installation](#plugin-installation)).
 
 ## Plugin installation
+
+Install the plugin in the host you start from; one of these pairs is enough:
 
 ```sh
 codex plugin marketplace add team-memory-system/honcho-agent-bridge
@@ -336,6 +338,26 @@ codex plugin add honcho-agent-bridge@honcho-agent-bridge
 claude plugin marketplace add team-memory-system/honcho-agent-bridge
 claude plugin install honcho-agent-bridge@honcho-agent-bridge
 ```
+
+`setup apply` puts the plugin into the other host for you. For every agent it turns collection on for, it looks at that host's plugin. A host where the plugin is missing gets the plugin installed with its own CLI, as an `install-plugin` operation in the plan. Claude Code's Stop hook ships only inside the plugin, and Codex gets its skills and recall MCP server from it.
+
+- **Source.** The other host's marketplace record says where this plugin came from:
+  - Claude Code's `~/.claude/plugins/known_marketplaces.json`;
+  - Codex's `[marketplaces.<name>]` in `~/.codex/config.toml`.
+
+  A GitHub repository (with its ref), a git URL or a local directory is used as it is. Without a record, the source is `team-memory-system/honcho-agent-bridge`. On Windows a local directory falls back to it too, because a backslash path cannot pass the CLI argument check.
+- **Commands.**
+  - Codex runs `codex plugin marketplace add <source> [--ref <ref>]`, then `codex plugin add honcho-agent-bridge@<marketplace>`.
+  - Claude Code runs `claude plugin marketplace add <source>[#<ref>]`, then `claude plugin install honcho-agent-bridge@<marketplace> --scope user`.
+  - A marketplace the host already has is not added again. Claude Code would point it at the new source, and Codex refuses a second source under the same name.
+  - Each command may take 180 seconds, because it clones from git.
+- **Finding the Codex CLI.** Setup looks for `codex` on `PATH` first. A computer with only the desktop app falls back, in order, to:
+  1. `CODEX_CLI_PATH` from the environment;
+  2. `CODEX_CLI_PATH` in `~/.codex/config.toml`;
+  3. the CLI inside the macOS app bundle.
+- **Result.** The apply result lists `plugins: [{agent, action}]`, where `action` is `installed`, `already`, `failed` or `missing-cli`.
+  - An install that fails, or finds no CLI, never fails setup or rolls it back. Its `nextSteps` entry `install-plugin` carries the two `commands` to run by hand, and the app shows them in its result.
+  - A plugin that is installed but turned off stays off, and the plan warns about it.
 
 To update an installed plugin:
 
@@ -357,8 +379,11 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 2. Ask which detected agents should collect conversations.
 3. Offer the OS-default storage location or a custom path.
 4. Show the exact installation plan without changing files.
-5. Apply only after confirmation.
-6. Run the diagnostic checks and pass on `nextSteps` from `setup apply`: Codex asks the user to approve the new Stop hook (or `/hooks`), and Claude Code sessions opened before setup need `/reload-plugins`.
+5. Apply only after confirmation. Apply also installs the plugin into any chosen host that lacks it.
+6. Run the diagnostic checks and pass on `nextSteps` from `setup apply`:
+   - Codex asks the user to approve the new Stop hook in a new session (or `/hooks`).
+   - Claude Code sessions opened before setup need `/reload-plugins`.
+   - An `install-plugin` step lists the commands to run when setup could not install the plugin itself.
 
 ### Collecting from another computer
 

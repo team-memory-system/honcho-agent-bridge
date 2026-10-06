@@ -21,9 +21,11 @@ const OPERATIONS = {
   "remove-hook": (op) => `${op.agent === "codex" ? "Codex" : "Claude Code"}에서 수집 훅을 뺍니다.`,
   "write-config": () => "이 컴퓨터의 수집 설정을 저장합니다.",
   "write-mcp-tool-defaults": (op) => `기억을 바꾸는 MCP 도구 ${op.disabled?.length || 0}개를 꺼 둔 채로 시작합니다.`,
+  "install-plugin": (op) => `${op.agent === "codex" ? "Codex" : "Claude Code"}에 팀 메모리 플러그인을 설치합니다.`,
 };
 
 const WARNINGS = [
+  [/(\w+) collection is enabled, but the Honcho Agent Bridge plugin is not installed in \w+ and the \w+ command was not found; install it by running (.+), then (.+)$/, (m) => `${m[1] === "codex" ? "Codex" : "Claude Code"}: 터미널에서 차례로 실행하세요. ${m[2]} → ${m[3]}`],
   [/(\w+) collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in (\w+)/, (m) => `${m[2] === "codex" ? "Codex" : "Claude Code"}에 팀 메모리 플러그인이 켜져 있지 않습니다. 플러그인을 켜야 대화가 모입니다.`],
   [/A Honcho server answers at (\S+), but it is not the server this plugin installed/, (m) => `${m[1]}에 기억 서버가 있지만 이 앱이 설치한 서버는 아닙니다. 내 서버가 맞는지 확인하세요.`],
   [/requires an API token/, () => "이 서버는 토큰이 필요합니다. 서버 토큰 칸을 채우세요."],
@@ -431,10 +433,17 @@ function collectFlow(body) {
       if (!done.ok) { clear(extra, chosenSummary(), planView(done)); throw new Error("설정하지 못했습니다."); }
       await loadContext();
       refreshStatus();
+      // A plugin setup could not install: that agent's line is the commands to run.
+      const agentLine = (name, text) => {
+        const manual = (done.nextSteps || []).find((step) => step.agent === name && step.action === "install-plugin");
+        return manual?.commands?.length
+          ? h("li", {}, `${AGENTS[name]}: 터미널에서 차례로 실행하세요. `, manual.commands.map((command, index) => [index ? " → " : "", h("code", { class: "mono" }, command)]))
+          : h("li", {}, text);
+      };
       await collectSummary(body, notice("ok", h("b", {}, "설정했습니다."),
         h("ul", {},
-          chosen.includes("codex") ? h("li", {}, "Codex: 새 세션에서 “Syncing codex conversation to personal memory” 훅을 승인하세요.") : null,
-          chosen.includes("claude") ? h("li", {}, "Claude Code: 열려 있는 세션에서 /reload-plugins 를 실행하거나 새로 여세요.") : null,
+          chosen.includes("codex") ? agentLine("codex", "Codex: 새 세션에서 “Syncing codex conversation to personal memory” 훅을 승인하세요.") : null,
+          chosen.includes("claude") ? agentLine("claude", "Claude Code: 열려 있는 세션에서 /reload-plugins 를 실행하거나 새로 여세요.") : null,
         )));
     });
   }

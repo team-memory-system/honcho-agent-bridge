@@ -59,6 +59,7 @@ import {
   teammateUnshare,
 } from "./team-access.mjs";
 import { gatewayDirectory, gatewayOpen } from "./gateway.mjs";
+import { hostPluginPlan, installHostPlugins } from "./host-plugins.mjs";
 import { getProvider } from "./providers/index.mjs";
 import {
   TARGET_ID,
@@ -432,9 +433,18 @@ async function setupPlan(options = {}) {
   if (installedPorts.installed && !options.honchoUrl && !sameOrigin(baseUrl, installedUrl)) {
     warnings.push(`This computer has a Honcho server installed at ${installedUrl}, but collection goes to ${publicUrl(baseUrl)}. Pass --honcho-url ${installedUrl} to collect into this computer's server.`);
   }
-  for (const provider of ["codex", "claude"]) {
-    if (agents[provider] && !detected.agents[provider].plugin?.enabled) {
-      warnings.push(`${provider} collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in ${provider}`);
+  // A host without the plugin gets it installed by apply; one where it is turned
+  // off is left off and warned about.
+  const plugins = await hostPluginPlan(agents, {
+    statuses: { codex: detected.agents.codex.plugin, claude: detected.agents.claude.plugin },
+    home: userHome(),
+  });
+  for (const entry of plugins) {
+    if (entry.state === "disabled") {
+      warnings.push(`${entry.agent} collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in ${entry.agent}`);
+    }
+    if (entry.state === "missing-cli") {
+      warnings.push(`${entry.agent} collection is enabled, but the Honcho Agent Bridge plugin is not installed in ${entry.agent} and the ${entry.agent} command was not found; install it by running ${entry.commands.join(", then ")}`);
     }
   }
   // The address this plan writes, which is not always the one detect tried.
@@ -475,6 +485,9 @@ async function setupPlan(options = {}) {
       ...((await pathExists(mcpToolsPath(paths)))
         ? []
         : [{ type: "write-mcp-tool-defaults", target: mcpToolsPath(paths), disabled: [...WRITE_TOOLS] }]),
+      ...plugins
+        .filter((entry) => entry.state === "install")
+        .map(({ agent, source, ref, marketplace }) => ({ type: "install-plugin", agent, source, ...(ref ? { ref } : {}), marketplace })),
     ],
   };
 }
@@ -689,24 +702,63 @@ async function withSetupLock(appHome, fn) {
   }
 }
 
-/** What the user still has to do in each host; the 2026-09-30 install test missed both. */
-function setupNextSteps(agents) {
+/**
+ * What the user still has to do in each host; the 2026-09-30 install test missed
+ * both. A plugin setup could not install comes first, with the commands to run.
+ */
+function setupNextSteps(agents, plugins = [], entries = []) {
   const steps = [];
+  const action = (agent) => plugins.find((item) => item.agent === agent)?.action;
+  for (const item of plugins) {
+    if (item.action !== "failed" && item.action !== "missing-cli") continue;
+    const commands = entries.find((entry) => entry.agent === item.agent)?.commands || [];
+    const name = item.agent === "codex" ? "Codex" : "Claude Code";
+    // The commands stay out of the message: printing strips a URL's #ref from a message.
+    steps.push({
+      agent: item.agent,
+      action: "install-plugin",
+      commands,
+      message: `Install the Honcho Agent Bridge plugin in ${name} yourself: run the commands below in order.`,
+    });
+  }
   if (agents.codex) {
     steps.push({
       agent: "codex",
       action: "approve-hook",
-      message: "Codex asks to approve the new Stop hook when a session starts (or open /hooks). Approve 'Syncing codex conversation to personal memory'; nothing is collected from Codex until then.",
+      message: action("codex") === "installed"
+        ? "Setup installed the Honcho Agent Bridge plugin in Codex. Open a new Codex session; it asks to approve the new Stop hook (or open /hooks). Approve 'Syncing codex conversation to personal memory'; nothing is collected from Codex until then."
+        : "Codex asks to approve the new Stop hook when a session starts (or open /hooks). Approve 'Syncing codex conversation to personal memory'; nothing is collected from Codex until then.",
     });
   }
   if (agents.claude) {
     steps.push({
       agent: "claude",
       action: "reload-plugins",
-      message: "Claude Code sessions that were already open need /reload-plugins (or a restart) to load the plugin's hook and MCP server; new sessions load them by themselves. Turns from before the reload are sent with the next one.",
+      message: action("claude") === "installed"
+        ? "Setup installed the Honcho Agent Bridge plugin in Claude Code. Open Claude Code anew, or run /reload-plugins in a session that is already open, to load its hook and MCP server."
+        : "Claude Code sessions that were already open need /reload-plugins (or a restart) to load the plugin's hook and MCP server; new sessions load them by themselves. Turns from before the reload are sent with the next one.",
     });
   }
   return steps;
+}
+
+/**
+ * Installs the plugin into each host setup collects from that lacks it. Runs after
+ * the hooks and the configuration are written; nothing here fails setup or rolls
+ * it back.
+ */
+async function installPlugins(agents) {
+  let entries = [];
+  try {
+    entries = await hostPluginPlan(agents, {
+      statuses: { codex: await codexPluginStatus(), claude: await claudePluginStatus() },
+      home: userHome(),
+    });
+    return { entries, plugins: await installHostPlugins(entries, { home: userHome() }) };
+  } catch (error) {
+    const reason = String(error?.message || error).slice(0, 300);
+    return { entries, plugins: entries.map((entry) => ({ agent: entry.agent, action: "failed", error: reason })) };
+  }
 }
 
 async function setupApply(options = {}) {
@@ -767,14 +819,16 @@ async function applySetupPlan(plan, paths) {
         warnings.push(`MCP tool defaults were not written to ${toolsPath}: ${error?.message || error}`);
       }
     }
+    const { entries, plugins } = await installPlugins(plan.config.agents);
     return {
       ok: true,
       version: VERSION,
       paths,
       runtime,
       hooks,
+      plugins,
       restartRequired: true,
-      nextSteps: setupNextSteps(plan.config.agents),
+      nextSteps: setupNextSteps(plan.config.agents, plugins, entries),
       ...(warnings.length ? { warnings } : {}),
     };
   } catch (error) {

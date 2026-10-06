@@ -442,8 +442,9 @@ export const CLIENT_NAMES = Object.freeze({ claude: "Claude Code", codex: "Codex
 const CLIENTS = Object.keys(CLIENT_NAMES);
 const CLIENT_TIMEOUT_MS = 60_000;
 // What may go to a client CLI: names and https URLs only, so even cmd.exe (Windows
-// runs an npm .cmd shim through it) reads every argument as plain text.
-const SAFE_ARGUMENT = /^[A-Za-z0-9._:/@=-]+$/;
+// runs an npm .cmd shim through it) reads every argument as plain text. # is there
+// for a marketplace source's ref (owner/repo#main), which cmd.exe leaves alone.
+const SAFE_ARGUMENT = /^[A-Za-z0-9._:/@=#-]+$/;
 const UNSAFE_PATH = /["%^&|<>!\r\n]/;
 const LOGIN_WAIT_MS = 8_000;
 const LOGIN_LIMIT_MS = 10 * 60_000;
@@ -576,8 +577,13 @@ export function findClient(command, { env = process.env, platform = process.plat
   return null;
 }
 
+/** Whether a value may go to a client CLI as one argument. */
+export function safeClientArgument(value) {
+  return typeof value === "string" && SAFE_ARGUMENT.test(value);
+}
+
 /** How to start a client: the binary itself, or cmd.exe for a .cmd shim, with plain-text arguments only. */
-function clientCommand(binary, args, platform, env) {
+export function clientCommand(binary, args, platform, env) {
   for (const arg of args) if (!SAFE_ARGUMENT.test(arg)) throw new Error("A client argument holds characters a name or an https address never has");
   if (platform === "win32" && /\.(cmd|bat)$/i.test(binary)) {
     if (UNSAFE_PATH.test(binary)) throw new Error(`The path of ${path.basename(binary)} holds characters cmd.exe would read as commands`);
@@ -590,24 +596,32 @@ function clientCommand(binary, args, platform, env) {
   return { command: binary, args, extra: {} };
 }
 
-function execClient(command, args, extra, env) {
+function execClient(command, args, extra, env, timeout = CLIENT_TIMEOUT_MS) {
   return new Promise((resolve) => {
-    execFile(command, args, { env, timeout: CLIENT_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024, ...extra }, (error, stdout, stderr) => {
-      resolve({ code: error ? (typeof error.code === "number" ? error.code : -1) : 0, stdout: String(stdout || ""), stderr: String(stderr || "") });
+    execFile(command, args, { env, timeout, windowsHide: true, maxBuffer: 4 * 1024 * 1024, ...extra }, (error, stdout, stderr) => {
+      resolve({
+        code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
+        stdout: String(stdout || ""),
+        stderr: String(stderr || ""),
+        ...(error?.killed ? { timedOut: true } : {}),
+      });
     });
   });
 }
 
-/** One client CLI call: {missing} when the client is not installed, else {code, stdout, stderr}. */
-async function runClient(ctx, client, args) {
-  if (ctx.clientRunner) return ctx.clientRunner(client, args);
-  const binary = findClient(client, ctx);
+/**
+ * One client CLI call: {missing} when the client is not installed, else {code, stdout, stderr}.
+ * `binary` runs that executable instead of the one on PATH; `timeoutMs` replaces the 60 s limit.
+ */
+export async function runClient(ctx, client, args, { binary: given = null, timeoutMs = CLIENT_TIMEOUT_MS } = {}) {
+  if (ctx.clientRunner) return ctx.clientRunner(client, args, { binary: given, timeoutMs });
+  const binary = given || findClient(client, ctx);
   if (!binary) return { missing: true };
   const { command, args: list, extra } = clientCommand(binary, args, ctx.platform, ctx.env);
-  return execClient(command, list, extra, ctx.env);
+  return execClient(command, list, extra, ctx.env, timeoutMs);
 }
 
-function clientFailure(result) {
+export function clientFailure(result) {
   const text = `${result.stderr || ""}\n${result.stdout || ""}`.trim().split(/\r?\n/).find(Boolean) || `exit ${result.code}`;
   return text.slice(0, 300);
 }

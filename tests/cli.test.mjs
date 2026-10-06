@@ -66,7 +66,15 @@ test("setup apply installs an isolated runtime and preserves unrelated host hook
       },
     }),
   );
-  const env = { HONCHO_AGENT_BRIDGE_HOME: appHome, HONCHO_AGENT_BRIDGE_USER_HOME: home, HOME: home, USERPROFILE: home };
+  // Both plugins count as installed, so setup runs neither real CLI to install one.
+  const env = {
+    HONCHO_AGENT_BRIDGE_HOME: appHome,
+    HONCHO_AGENT_BRIDGE_USER_HOME: home,
+    HOME: home,
+    USERPROFILE: home,
+    CODEX_PLUGIN_ROOT: ROOT,
+    CLAUDE_PLUGIN_ROOT: ROOT,
+  };
   const args = [
     "setup",
     "apply",
