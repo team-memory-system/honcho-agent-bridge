@@ -56,8 +56,7 @@ question and gets an answer, without reading the underlying messages.
    through it. Each teammate's server is a remote MCP server of its own,
    `team-<name>` at `https://<host>/mcp`, that `teammates connect` adds to Claude
    Code and Codex, and each client logs in to it itself (see [Asking a teammate's
-   memory](#asking-a-teammates-memory--팀원-기억-연결)). Until 0.3.28 this server
-   relayed a teammate's bridge as `shared_chat`; that relay is gone.
+   memory](#asking-a-teammates-memory--팀원-기억-연결)).
 6. **Recall at the start of work.** `scripts/recall.mjs` is meant for Claude Code's
    SessionStart (`session-start`, on startup and `/clear`) and UserPromptSubmit
    (`prompt`) hooks. At session start it adds the short summary of the last
@@ -305,7 +304,7 @@ Cross-device database synchronization is intentionally deferred until the person
 - Node.js 18 or newer.
 - Docker Desktop/Engine with Compose when installing the bundled local Honcho server (`server prepare` starts a closed Docker Desktop on macOS and Windows and waits for its engine), or an existing Honcho API. For your own server on another computer, see [Collecting from another computer](#collecting-from-another-computer).
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
-- For sharing, the team's owner only: a Cloudflare account with a domain on it, Zero Trust with a Google login method, and an API token (see [What the owner needs in Cloudflare](#what-the-owner-needs-in-cloudflare)). Teammates need only a Google account, and nothing from Cloudflare runs on any computer outside Docker.
+- For sharing, the team's owner only: a Cloudflare account with a domain on it, Zero Trust with a Google login method, and an API token (see [What the owner needs in Cloudflare](#what-the-owner-needs-in-cloudflare)). Teammates need only a Google account.
 
 `prereqs [--features server,sync,chat]` reports Node.js and git for every feature, and Docker and Ollama for `server`.
 
@@ -374,8 +373,8 @@ On that other computer, setup needs two things:
    `HONCHO_API_TOKEN`.
 
 A shared server's `/v3` and `/health` sit under a Cloudflare Access application that
-lets every request through to the gate, so the gate token is what keeps them closed;
-the other computer needs no login and runs nothing from Cloudflare. Only a server
+lets every request through to the gate, so the gate token is what keeps them closed.
+Only a server
 whose Access application covers `/v3` too, set up by hand, also needs an Access
 service token, in `HONCHO_CF_ACCESS_CLIENT_ID` and `HONCHO_CF_ACCESS_CLIENT_SECRET`
 (both, or neither).
@@ -479,7 +478,7 @@ A personal server listens only on `127.0.0.1`. Sharing puts it behind a Cloudfla
 - **`mcp`**, honcho-selfhost's MCP bridge, answers `chat` only, as `HONCHO_TEAM_PEER` in `HONCHO_TEAM_WORKSPACE`, and records each call with the caller's email.
 - **`tunnel`**, `cloudflared` in a container, runs the tunnel whose token is `HONCHO_TUNNEL_TOKEN`. Its ingress, set in Cloudflare, is `http://gate:8010`.
 
-In Cloudflare the server's hostname has two Access applications. One covers `/v3` and `/health` and lets every request through to the gate, where the gate token is the lock. The other covers the rest of the hostname: it sends people to Google login and lets in only the emails on the team list, and MCP clients log in to it through Access's Managed OAuth. There is no Tailscale, WARP or Mesh path.
+In Cloudflare the server's hostname has two Access applications. One covers `/v3` and `/health` and lets every request through to the gate, where the gate token is the lock. The other covers the rest of the hostname: it sends people to Google login and lets in only the emails on the team list, and MCP clients log in to it through Access's Managed OAuth.
 
 ### What the owner needs in Cloudflare
 
@@ -541,7 +540,7 @@ node scripts/cli.mjs teammates unshare <name>
 node scripts/cli.mjs server share join --invite-file <file>      # or the code in HONCHO_SHARE_INVITE
 ```
 
-`join` needs no Cloudflare account and no API token. It writes the invite's values into the installed `.env` the way `enable --cloudflare` does, starts the same three services, and keeps the team's server list in `runtime/share.json`, which `teammates connect` there offers.
+`join` needs only the invite. It writes the invite's values into the installed `.env` the way `enable --cloudflare` does, starts the same three services, and keeps the team's server list in `runtime/share.json`, which `teammates connect` there offers.
 
 ### Turning it on by hand
 
@@ -550,7 +549,7 @@ node scripts/cli.mjs server share join --invite-file <file>      # or the code i
 HONCHO_TUNNEL_TOKEN='<token>' node scripts/cli.mjs server share enable --public-url https://<name>.<your domain>
 ```
 
-This is for a tunnel made in the dashboard (Networks → Tunnels → Create a tunnel → Cloudflared; copy the token from the install command, and do not run that command). Its public hostname's service must be `http://gate:8010`, since cloudflared runs beside the gate in Compose. The Access applications are the owner's to make: the gate token still covers `/v3`, and `/mcp` answers 404 until `HONCHO_ACCESS_TEAM_DOMAIN` and `HONCHO_ACCESS_AUD` are in the `.env`. An address on another host than before clears those two. The tunnel token is needed the first time only.
+This is for a tunnel made in the dashboard (Networks → Tunnels → Create a tunnel → Cloudflared; copy the token from the install command shown there; the Compose `tunnel` service runs the connector). Its public hostname's service must be `http://gate:8010`, since cloudflared runs beside the gate in Compose. The Access applications are the owner's to make: the gate token still covers `/v3`, and `/mcp` answers 404 until `HONCHO_ACCESS_TEAM_DOMAIN` and `HONCHO_ACCESS_AUD` are in the `.env`. An address on another host than before clears those two. The tunnel token is needed the first time only.
 
 ### On each other computer
 
@@ -564,7 +563,7 @@ The Team Memory app offers all of this on 서버 → 공유: "Cloudflare로 공�
 
 ## Asking a teammate's memory / 팀원 기억 연결
 
-A teammate's shared server is a remote MCP server at `https://<host>/mcp`. Claude Code and Codex each keep it as `team-<name>` and log in to it themselves, so no token is written anywhere.
+A teammate's shared server is a remote MCP server at `https://<host>/mcp`. Claude Code and Codex each keep it as `team-<name>` and log in to it themselves, each keeping its own login.
 
 ```sh
 node scripts/cli.mjs teammates connect <name> <host|https://host/mcp>

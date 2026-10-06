@@ -42,7 +42,7 @@ port.
 
 `tunnel` is `cloudflared` (pinned image tag). It runs the tunnel whose token is
 `HONCHO_TUNNEL_TOKEN` in `.env`, and the tunnel's ingress, set in Cloudflare, is
-`http://gate:8010`. No cloudflared runs on the host.
+`http://gate:8010`.
 
 `env.personal.example` is the personal profile's template. Every chat model
 points at the subscription gateway's router (`host.docker.internal:11400`) and
