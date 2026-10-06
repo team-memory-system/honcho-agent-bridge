@@ -3,10 +3,18 @@
 import { h, clear } from "./dom.js";
 import { icon } from "./icons.js";
 
-export function pageHead({ title, subtitle, actions = [] }) {
-  return h("header", { class: "page-head" },
-    h("div", {}, h("h1", {}, title), subtitle ? h("p", {}, subtitle) : null),
+/**
+ * The top of a screen. `back` ({ href, label }) leads to the menu a page sits in;
+ * `subnav` ([href, label, current] each) switches between screens of one menu item.
+ */
+export function pageHead({ title, subtitle, actions = [], back, subnav }) {
+  return h("header", { class: subnav ? "page-head has-subnav" : "page-head" },
+    h("div", {},
+      back ? h("a", { class: "back-link", href: back.href }, icon("back"), h("span", {}, back.label)) : null,
+      h("h1", {}, title),
+      subtitle ? h("p", {}, subtitle) : null),
     actions.length ? h("div", { class: "actions" }, actions) : null,
+    subnav ? h("nav", { class: "subnav" }, subnav.map(([href, label, current]) => h("a", { href, "aria-current": current ? "page" : null }, label))) : null,
   );
 }
 
@@ -33,6 +41,10 @@ export function empty(title, text, ...actions) {
 
 export function tag(text, kind = "") {
   return h("span", { class: `tag ${kind}` }, text);
+}
+
+export function statusTag(on, labels = ["실행 중", "멈춤"]) {
+  return on ? tag(labels[0], "ok") : tag(labels[1]);
 }
 
 export function light(state) {

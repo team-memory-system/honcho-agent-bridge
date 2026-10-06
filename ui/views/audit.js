@@ -1,6 +1,6 @@
-// 기록: every call that reached the memory server's MCP bridge, newest first, with
-// what was asked. The dashboard reads at most 1000 rows at a time and has no
-// cursor, so "더 보기" asks again with a larger limit up to that cap.
+// 팀 → 조회 기록: every call that reached the memory server's MCP bridge, newest
+// first, with what was asked. The dashboard reads at most 1000 rows at a time and
+// has no cursor, so "더 보기" asks again with a larger limit up to that cap.
 import { get } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { fullDate, number } from "../lib/format.js";
@@ -37,8 +37,9 @@ function rowKey(row) {
 }
 
 export default {
-  title: "기록",
-  async mount(page) {
+  title: "조회 기록",
+  /** Drawn under the header its menu gives it. */
+  async mount(page, head) {
     const filters = { hours: "24", status: "", tool: "", caller: "" };
     let limit = STEP;
     let rows = [];
@@ -70,7 +71,7 @@ export default {
     const more = h("div", { class: "audit-more" });
 
     page.append(
-      pageHead({ title: "기록", subtitle: "기억 서버의 MCP 브리지로 들어온 호출을 물은 말 그대로 남깁니다. 거부된 호출도 보입니다.", actions: [refresh] }),
+      pageHead({ ...head, actions: [refresh] }),
       h("div", { class: "audit-filters" }, period, result, tool, caller, callers),
       h("div", { class: "page-body" }, h("div", { class: "pad wide" }, stats, list, more)),
     );

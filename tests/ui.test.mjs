@@ -418,7 +418,7 @@ test("sharing has the six share routes, and the screen closes it with a plain di
   const routes = server.match(/const SHARE_ROUTES = \{([\s\S]*?)\n\};/)[1];
   assert.deepEqual([...routes.matchAll(/"\/api\/server\/share\/([^"]+)"/g)].map((match) => match[1]), ["status", "enable", "join", "disable", "token", "rotate"]);
   assert.match(routes, /"\/api\/server\/share\/disable": async \(\) => runCli\(\["server", "share", "disable"\]/);
-  const screen = await fsp.readFile(path.join(ROOT, "ui", "views", "server.js"), "utf8");
+  const screen = await fsp.readFile(path.join(ROOT, "ui", "views", "share.js"), "utf8");
   assert.match(screen, /cli\("\/api\/server\/share\/disable", \{\}\)/);
 });
 
@@ -466,13 +466,27 @@ test("the app installs no prerequisite itself: the install route is gone", async
   assert.equal(server.includes("/api/app/prereqs/install"), false);
 });
 
-test("every screen a link opens exists, and the 연결 pages other screens link to are there", async () => {
+test("every screen a link opens exists, and so does every page of 내 컴퓨터 and 팀 it names", async () => {
   const screens = await uiSources();
   const shell = await fsp.readFile(path.join(ROOT, "ui", "app.js"), "utf8");
   const views = shell.match(/const VIEWS = \{([^}]*)\}/)[1].split(",").map((name) => name.trim()).filter(Boolean);
   const connect = await fsp.readFile(path.join(ROOT, "ui", "views", "connect.js"), "utf8");
   const tasks = [...connect.matchAll(/\{ key: "([a-z]+)", title:/g)].map((match) => match[1]).sort();
   assert.deepEqual(tasks, ["collect", "import", "share", "targets"]);
+  // A menu's pages are its own entries and the 연결 tasks it spreads in, unless it renames one.
+  const pages = {};
+  for (const menu of ["computer", "team"]) {
+    const source = await fsp.readFile(path.join(ROOT, "ui", "views", `${menu}.js`), "utf8");
+    pages[menu] = [
+      ...[...source.matchAll(/\bkey: "([a-z]+)"/g)].map((match) => match[1]),
+      ...[...source.matchAll(/\{ \.\.\.task\("([a-z]+)"\), (?!key:)/g)].map((match) => match[1]),
+    ].sort();
+  }
+  assert.deepEqual(pages, { computer: ["collect", "import", "share", "tools"], team: ["audit", "memories", "share", "targets", "tools"] });
+  const hub = await fsp.readFile(path.join(ROOT, "ui", "lib", "hub.js"), "utf8");
+  const tabbed = [...hub.match(/const TABS = \{([\s\S]*?)\n\};/)[1].matchAll(/\["([a-z]+)", "/g)].map((match) => match[1]);
+  assert.deepEqual(tabbed, ["memory", "ask", "server", "models"]);
+  const moved = Object.fromEntries([...shell.match(/const MOVED = \{([\s\S]*?)\n\};/)[1].matchAll(/"?([a-z/]+)"?: "([a-z/]+)"/g)].map((match) => [match[1], match[2]]));
 
   const links = [
     ...screens.matchAll(/go\("([a-z/]+)"\)/g),
@@ -481,14 +495,15 @@ test("every screen a link opens exists, and the 연결 pages other screens link 
     ...screens.matchAll(/fix: \[[^\]]*"([a-z/]+)"\]/g),
   ].map((match) => match[1]);
   assert.ok(links.length >= 20, `only ${links.length} links were found`);
-  for (const link of links) {
+  for (const link of [...links, ...tabbed, ...Object.values(moved)]) {
     const [view, page] = link.split("/");
     assert.ok(views.includes(view), `a link opens #/${link}, which no screen serves`);
-    if (view === "connect" && page) assert.ok(tasks.includes(page), `#/${link} is not one of the 연결 pages`);
+    if (pages[view] && page) assert.ok(pages[view].includes(page), `#/${link} is not one of the pages under ${view}`);
   }
-  // The audit log left 도구 for its own screen; the old address still reaches it.
-  assert.ok(views.includes("audit"));
-  assert.match(shell, /name === "tools" && params\[0\] === "audit"/);
+  // Addresses from before the menus were regrouped, as an older skill or a saved link opens them.
+  for (const old of ["connect", "connect/collect", "connect/share", "tools", "tools/audit", "audit"]) {
+    assert.ok(moved[old], `#/${old} no longer leads anywhere`);
+  }
 });
 
 test("the setup steps send the one form, so a secret never leaves it except to the setup routes", async () => {

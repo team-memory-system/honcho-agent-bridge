@@ -39,11 +39,15 @@ question and gets an answer, without reading the underlying messages.
 2. **Install.** `scripts/cli.mjs` detects agents, previews changes, backs up what it
    edits, and writes the hook.
 3. **The Team Memory app.** `scripts/ui.mjs` serves `ui/`, one screen over all three
-   programs: read and search the memories, ask Honcho or a gateway model, log
-   subscription accounts in, set up collection, run the server, switch MCP tools and
-   read the audit log. Setup steps run the same CLI a terminal would; memories, the
-   gateway and the server's tool switches are relayed to those programs' own APIs
-   by `scripts/app-api.mjs`, which adds the Honcho token so the page never holds it.
+   programs, in five menus. 기억 reads and searches the memories and asks Honcho or
+   a gateway model. 내 컴퓨터 sets up collection, switches this computer's MCP tools,
+   opens the server to the owner's other computers and imports ChatGPT. 팀 shares
+   the memory with teammates, switches the tools they get, reads the audit log, and
+   connects teammates' memories and company targets. 서버 runs the server and logs
+   subscription accounts in to the gateway, and 백업 copies the raw conversations.
+   Setup steps run the same CLI a terminal would; memories, the gateway and the
+   server's tool switches are relayed to those programs' own APIs by
+   `scripts/app-api.mjs`, which adds the Honcho token so the page never holds it.
    `cli.mjs ui open` starts it detached (default `http://127.0.0.1:4180`) and opens
    the browser, which is how `/memory-setup` shows it.
 4. **Run the local stack.** `server ...` drives the Honcho Docker stack;
@@ -306,7 +310,7 @@ Cross-device database synchronization is intentionally deferred until the person
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
 - For sharing, the team's owner only: a Cloudflare account with a domain on it, Zero Trust with a Google login method, and an API token (see [What the owner needs in Cloudflare](#what-the-owner-needs-in-cloudflare)). Teammates need only a Google account.
 
-`prereqs [--features server,sync]` reports Node.js and git for both, and Docker and Ollama for `server`. The app's 시작하기 first asks where the memory server is: on this computer (`server,sync`) or on another of the user's computers (`sync`). Asking a teammate's memory is set up later, from 연결 → 팀원 기억 연결.
+`prereqs [--features server,sync]` reports Node.js and git for both, and Docker and Ollama for `server`. The app's 시작하기 first asks where the memory server is: on this computer (`server,sync`) or on another of the user's computers (`sync`). Asking a teammate's memory is set up later, from 팀 → 팀원 기억 연결.
 
 The `personal` profile also requires macOS or Windows, git, and a Codex and/or Claude subscription. Docker Desktop and Ollama are fetched by the app when this computer has neither (see [Docker Desktop and Ollama](#docker-desktop-and-ollama)). `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
 
@@ -456,7 +460,7 @@ For a portable install, replace `personal` with `portable`. `server prepare` rep
 
 ### Logging in to a gateway on another computer
 
-The app's 게이트웨이 screen (`ui open --screen models`) can finish a gateway login when
+The app's 서버 → 구독 게이트웨이 screen (`ui open --screen models`) can finish a gateway login when
 the browser is on a different computer from the gateway, such as a server without a
 screen. This needs subscription-gateway `03aa85d` or newer.
 
@@ -584,9 +588,9 @@ Install the plugin, then run setup against the public address with the gate toke
 HONCHO_API_TOKEN='<gate token>' node scripts/cli.mjs setup apply --agents codex,claude --user-peer <id> --honcho-url https://<name>.<your domain>
 ```
 
-In the app on that computer, 연결 → 대화 보내기 does the same: the address and the gate token go into its form. `/memory-setup` opens that screen for a server on another computer.
+In the app on that computer, 내 컴퓨터 → 대화 보내기 does the same: the address and the gate token go into its form. `/memory-setup` opens that screen for a server on another computer.
 
-The Team Memory app offers all of this on 서버 → 공유: "Cloudflare로 공유 켜기" (the API token, the owner's email, and the zone and name under "token 권한과 주소"), "초대 코드로 공유 켜기", the folded "직접 만든 통로로 켜기", and, for the owner, the 팀원 list with "팀원 더하기", "공유 빼기" and "팀 주소 복사". A token typed there goes to the app's own server only, and no token or invite is logged.
+The Team Memory app offers all of this on two pages over the same switch. 내 컴퓨터 → 다른 컴퓨터 붙이기 has "Cloudflare로 공유 켜기" (the API token, the owner's email, and the zone and name under "token 권한과 주소"), "초대 코드로 공유 켜기", the folded "직접 만든 통로로 켜기", and the gate token ("서버 token 복사", "서버 token 바꾸기"). 팀 → 내 기억 공유 has the same two ways to turn it on and, for the owner, the 팀원 list with "팀원 더하기", "공유 빼기" and "팀 주소 복사". A token typed there goes to the app's own server only, and no token or invite is logged.
 
 ## Asking a teammate's memory / 팀원 기억 연결
 
@@ -601,7 +605,7 @@ node scripts/cli.mjs teammates disconnect <name>
 - `connect` runs `claude mcp add --transport http --scope user team-<name> https://<host>/mcp` and `codex mcp add team-<name> --url https://<host>/mcp`. The same address again changes nothing, and another address replaces the entry. A client that is not installed is reported, and the other is still done.
 - Log in once in each client. In Claude Code, run `/mcp`, choose `team-<name>` and Authenticate; for Codex, run `codex mcp login team-<name>`. Either one opens Google login through Cloudflare Access, and only an email on the team list gets in. The agent then has that server's `chat`.
 - `connected` lists every team server this computer knows and whether each client has it. It reads the invite's team list, the owner's `team-access.json`, and the `team-*` entries already in `~/.claude.json` and `~/.codex/config.toml`. This computer's own shared server is left out: its agents use their own memory directly.
-- The app's 연결 → 팀원 기억 연결 page does the same: paste the 팀 주소 and press "Claude Code·Codex에 연결"; "Codex 로그인" starts the Codex login.
+- The app's 팀 → 팀원 기억 연결 page does the same: paste the 팀 주소 and press "Claude Code·Codex에 연결"; "Codex 로그인" starts the Codex login.
 - `bridge disconnect` only removes the shared-bridge settings that 0.3.28 and before saved.
 
 ## Also sending some folders to another server (e.g. your company's)
@@ -699,7 +703,7 @@ HONCHO_USER_NAME=<your peer> node scripts/collector.mjs --provider chatgpt \
   - Running the same export again sends nothing, and a newer export sends only new messages.
   - The dedupe state is kept per server and workspace, so a different workspace gets everything.
 - **`--dry-run`** sends nothing. It prints a `summary`: the files read, turns by role, the first and last time, and what was skipped and why.
-- **In the app**, 연결 → ChatGPT 기록 가져오기 runs the same import. It takes uploads up to 256 MB and always uses the configured workspace and peer. Use the command for anything bigger or for another workspace.
+- **In the app**, 내 컴퓨터 → ChatGPT 기록 가져오기 runs the same import. It takes uploads up to 256 MB and always uses the configured workspace and peer. Use the command for anything bigger or for another workspace.
 
 ## Backing up the conversation originals / 대화 원본 백업
 

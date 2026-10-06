@@ -6,6 +6,7 @@
 import { cli, gateway } from "../lib/api.js";
 import { accountGroups, backendName, loginEnded, loginPanelText, loginPrompt, loginSubmission, modelGroups, pendingLogin, sharedGroups, signInLink } from "../lib/accounts.js";
 import { h, clear, copyText } from "../lib/dom.js";
+import { screenTabs } from "../lib/hub.js";
 import { ago, number } from "../lib/format.js";
 import { app, go, refreshStatus } from "../lib/state.js";
 import { button, busy, confirmSheet, empty, errorNotice, notice, pageHead, section, segmented, spinner, tag, toast } from "../lib/ui.js";
@@ -23,8 +24,9 @@ export default {
     const refresh = button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침" });
     page.append(
       pageHead({
-        title: "구독 게이트웨이",
+        title: "서버",
         subtitle: "Codex·Claude 구독 계정을 모델 API로 바꿔 줍니다. 계정을 넣고 나눠 쓰는 방식을 정하고, 모델을 써 봅니다.",
+        subnav: screenTabs("models"),
         actions: [
           app.context?.gatewayUiUrl ? h("a", { class: "btn quiet", href: app.context.gatewayUiUrl, target: "_blank", rel: "noreferrer" }, "게이트웨이 화면") : null,
           refresh,
@@ -102,7 +104,7 @@ export default {
             await draw();
             refreshStatus();
           }, { done: "게이트웨이를 켰습니다" }) }),
-          button("서버 화면으로", { onClick: () => go("server") }),
+          button("기억 서버로", { onClick: () => go("server") }),
         ),
         error && !error.unreachable ? h("div", { style: { marginTop: "12px" } }, errorNotice(error)) : null,
       );
@@ -457,7 +459,7 @@ export default {
           ))
           : empty("쓸 수 있는 모델이 없습니다", "계정을 로그인하고 연결하면 모델이 보입니다."),
         app.context?.localServer
-          ? h("p", { class: "gw-foot" }, "기억 서버가 쓰는 모델은 서버 화면에서 바꿉니다. ", button("서버 화면으로", { kind: "small quiet gw-go", iconName: "arrow", onClick: () => go("server") }))
+          ? h("p", { class: "gw-foot" }, "기억 서버가 쓰는 모델은 기억 서버 탭에서 바꿉니다. ", button("기억 서버로", { kind: "small quiet gw-go", iconName: "arrow", onClick: () => go("server") }))
           : null,
       );
     }

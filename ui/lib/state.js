@@ -17,6 +17,8 @@ export const app = {
     gateway: { state: "idle", text: "확인 중", report: null, pending: true },
     collector: { state: "idle", text: "확인 중" },
   },
+  // Whether the audit log answers on this computer even without a server installed here.
+  auditAnswers: false,
   listeners: new Set(),
 };
 

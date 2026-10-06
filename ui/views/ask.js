@@ -6,6 +6,7 @@
 // the draft, and a footer whose chips describe the next turn, ending in send.
 import { gateway, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
+import { screenTabs } from "../lib/hub.js";
 import { icon } from "../lib/icons.js";
 import { markdown } from "../lib/markdown.js";
 import { LEVEL_NOTES, REASONING_HINT, REASONING_LEVELS, askCopy, askRoute, mergeEvidence, oneLine, pickMessages, sessionCount, sessionTitle } from "../lib/ask.js";
@@ -68,7 +69,7 @@ export default {
       input.focus();
     });
     page.append(
-      pageHead({ title: "묻기", subtitle: "쌓인 기억을 바탕으로 답하게 하거나, 모델에게 바로 묻습니다.", actions: [
+      pageHead({ title: "기억", subtitle: "쌓인 기억을 바탕으로 답하게 하거나, 모델에게 바로 묻습니다.", subnav: screenTabs("ask"), actions: [
         modeSwitch,
         button("새로 시작", { kind: "quiet", onClick: () => { controller?.abort(); state.turns = []; drawThread(); input.focus(); } }),
       ] }),
@@ -205,7 +206,7 @@ export default {
         ledeNodes.push(h("div", { class: "composer-note" },
           icon("warn"),
           h("span", {}, state.gatewayError ? "구독 게이트웨이가 꺼져 있어 모델을 쓸 수 없습니다." : "쓸 수 있는 모델이 없습니다."),
-          button("게이트웨이로", { kind: "small", onClick: () => go("models") })));
+          button("구독 게이트웨이로", { kind: "small", onClick: () => go("models") })));
       }
       clear(lede, ledeNodes);
       clear(lead, chips);

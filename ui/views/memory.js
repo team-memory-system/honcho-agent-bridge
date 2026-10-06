@@ -3,6 +3,7 @@
 // right, and one search box that looks through all of it.
 import { get } from "../lib/api.js";
 import { h, clear, copyText, debounce } from "../lib/dom.js";
+import { screenTabs } from "../lib/hub.js";
 import { icon } from "../lib/icons.js";
 import { markdown } from "../lib/markdown.js";
 import { SOURCE_FILTERS, cardLine, fullDate, isAssistant, number, peerKind, relativeDay, sourceLabel, speakerLabel, time } from "../lib/format.js";
@@ -51,7 +52,7 @@ export default {
     };
 
     const subtitle = h("p", {});
-    const head = pageHead({ title: "기억", actions: [button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침", onClick: () => reload() })] });
+    const head = pageHead({ title: "기억", actions: [button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침", onClick: () => reload() })], subnav: screenTabs("memory") });
     head.querySelector("div").append(subtitle);
 
     const search = h("input", { id: "memory-search", class: "input", type: "search", placeholder: "대화와 기억에서 찾기 (Enter)", "aria-label": "기억에서 찾기" });
@@ -274,7 +275,7 @@ export default {
         foot.textContent = `“${state.query.trim()}” 대화 속 ${number(state.hits.length)}곳`;
       } else if (state.tab === "talks") {
         nodes.push(state.sessions.map(sessionItem));
-        if (!state.sessions.length && !state.error && !state.loading) nodes.push(h("div", { style: { padding: "0 16px" } }, empty("아직 모인 대화가 없습니다", "연결 화면에서 대화 보내기를 켜면 대화가 끝날 때마다 여기에 쌓입니다.", button("대화 보내기 설정", { onClick: () => go("connect/collect") }))));
+        if (!state.sessions.length && !state.error && !state.loading) nodes.push(h("div", { style: { padding: "0 16px" } }, empty("아직 모인 대화가 없습니다", "내 컴퓨터 → 대화 보내기를 켜면 대화가 끝날 때마다 여기에 쌓입니다.", button("대화 보내기 설정", { onClick: () => go("computer/collect") }))));
         if (state.sessionPage < state.sessionPages) nodes.push(h("div", { class: "more-messages" }, state.loading ? spinner() : button("더 보기", { kind: "small", onClick: () => moreSessions() })));
         foot.textContent = state.sessionTotal === null ? "" : `${number(state.sessionTotal)}개 중 ${number(state.sessions.length)}개 · 최근 순`;
       } else if (state.tab === "notes") {

@@ -1,5 +1,6 @@
-// 연결: what this computer is connected to, as four tasks. #/connect lists them
-// with where each stands; each opens its own page (#/connect/<task>). 대화 보내기
+// What this computer is connected to, as four tasks. 내 컴퓨터 lists 대화 보내기
+// and ChatGPT 기록 가져오기, and 팀 lists 팀원 기억 연결 and 회사 서버에도 보내기
+// (views/computer.js, views/team.js); each opens here as its own page. 대화 보내기
 // is a few steps over the one setup form in index.html, sent whole at the end, so
 // the fields the CLI reads stay the ones the tests check. 팀원 기억 연결 puts a
 // teammate's server into Claude Code and Codex as a remote MCP server (team-<name>);
@@ -7,7 +8,6 @@
 // action is the same CLI command a terminal would run.
 import { cli, get, post } from "../lib/api.js";
 import { h, clear, $ } from "../lib/dom.js";
-import { icon } from "../lib/icons.js";
 import { ago, number } from "../lib/format.js";
 import { app, go, loadContext, me, refreshStatus, savePrefs, workspace } from "../lib/state.js";
 import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, spinner, tag, toast } from "../lib/ui.js";
@@ -72,16 +72,16 @@ function sameServer(a, b) {
   }
 }
 
-const TASKS = [
+export const TASKS = [
   { key: "collect", title: "대화 보내기", why: "이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 모으고, 에이전트가 내 기억을 꺼내 쓰게 합니다." },
   { key: "targets", title: "회사 서버에도 보내기", why: "정한 폴더에서 한 대화만 회사 서버 같은 다른 기억 서버에도 보냅니다. 내 서버에는 그대로 모두 갑니다." },
   { key: "share", title: "팀원 기억 연결", why: "팀원이 공유한 기억을 Claude Code와 Codex에 원격 MCP 서버로 연결합니다. 에이전트는 원문을 보지 않고 chat으로 답만 받습니다." },
   { key: "import", title: "ChatGPT 기록 가져오기", why: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다. 한 번 해 두면 됩니다." },
 ];
 
-// ── The landing: four tasks and where each stands ─────────
+// ── Where each task stands, for the menus that list them ──
 
-function taskState(key) {
+export function taskState(key) {
   const context = app.context || {};
   if (key === "collect") {
     return context.configured
@@ -114,39 +114,12 @@ function taskState(key) {
     : { label: "", detail: "이 앱에서 가져온 적 없음" };
 }
 
-function landing(page) {
-  const stateOf = new Map();
-  const rows = TASKS.map((task) => {
-    const state = taskState(task.key);
-    const detail = h("small", {}, state.detail);
-    stateOf.set(task.key, { detail, state });
-    return h("a", { class: "task", href: `#/connect/${task.key}` },
-      h("div", { class: "task-main" }, h("b", {}, task.title), h("span", { class: "why" }, task.why)),
-      h("div", { class: "task-state" }, state.label ? tag(state.label, state.kind || "") : null, detail),
-      icon("arrow"),
-    );
-  });
-  page.append(
-    pageHead({ title: "연결", subtitle: "이 컴퓨터가 무엇과 이어질지 정합니다. 필요한 것만 켜면 됩니다." }),
-    h("div", { class: "page-body" }, h("div", { class: "pad" }, h("nav", { class: "tasks", "aria-label": "연결 작업" }, rows))),
-  );
-  // Not imported from this browser: say how many ChatGPT conversations the memory holds.
-  const chatgpt = stateOf.get("import");
-  if (!app.prefs.chatgptImport?.at && app.context?.configured) {
-    get(`/api/app/sessions?${new URLSearchParams({ workspace: workspace(), size: "1", source: "chatgpt" })}`)
-      .then((result) => { if (result?.total) chatgpt.detail.textContent = `기억에 ChatGPT 대화 ${number(result.total)}개`; })
-      .catch(() => {});
-  }
-}
-
-function subHead(task) {
-  return h("header", { class: "page-head" },
-    h("div", {},
-      h("a", { class: "back-link", href: "#/connect" }, icon("back"), h("span", {}, "연결")),
-      h("h1", {}, task.title),
-      h("p", {}, task.why),
-    ),
-  );
+/** Not imported from this browser: say how many ChatGPT conversations the memory holds. */
+export function chatgptCount(update) {
+  if (app.prefs.chatgptImport?.at || !app.context?.configured) return;
+  get(`/api/app/sessions?${new URLSearchParams({ workspace: workspace(), size: "1", source: "chatgpt" })}`)
+    .then((result) => { if (result?.total) update({ detail: `기억에 ChatGPT 대화 ${number(result.total)}개` }); })
+    .catch(() => {});
 }
 
 // ── 대화 보내기 ───────────────────────────────────────────
@@ -295,7 +268,7 @@ function collectFlow(body) {
   if (localUrl) {
     form.querySelector("[data-slot=\"server-choice\"]").append(h("div", { class: "choices two" },
       card("local", "이 컴퓨터 서버", "주소와 token 없이 바로 보냅니다.", h("code", { class: "mono" }, localUrl)),
-      card("remote", "다른 컴퓨터 서버", "그 컴퓨터의 서버 → 공유에서 주소와 서버 token을 받아 넣습니다.")));
+      card("remote", "다른 컴퓨터 서버", "그 컴퓨터의 다른 컴퓨터 붙이기에서 주소와 서버 token을 받아 넣습니다.")));
   }
   setMode(mode);
 
@@ -466,7 +439,7 @@ function targetsPage(container) {
     const items = list.targets || [];
     if (!app.context?.configured) {
       clear(container, notice("", "먼저 대화 보내기를 켜세요. 그다음에 다른 서버를 더할 수 있습니다."),
-        h("div", { class: "form-actions" }, button("대화 보내기 설정", { kind: "primary", onClick: () => go("connect/collect") })));
+        h("div", { class: "form-actions" }, button("대화 보내기 설정", { kind: "primary", onClick: () => go("computer/collect") })));
       return;
     }
     clear(container,
@@ -739,7 +712,7 @@ function sharePage(share) {
         h("label", { class: "field wide" },
           h("span", {}, "팀 주소"),
           pasteBox,
-          h("small", {}, "팀을 연 사람의 앱에서 서버 → 공유 → 팀 주소를 복사해 받습니다. 주소 하나(memory-alice.example.com)만 넣어도 됩니다. 비밀이 아닌 주소라서 token은 없습니다."),
+          h("small", {}, "팀을 연 사람의 앱에서 팀 → 내 기억 공유 → 팀 주소를 복사해 받습니다. 주소 하나(memory-alice.example.com)만 넣어도 됩니다. 비밀이 아닌 주소라서 token은 없습니다."),
         ),
         h("div", { class: "form-actions" }, button("Claude Code·Codex에 연결", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
           const { found, bad } = parseTeamAddresses(pasteBox.value);
@@ -809,7 +782,7 @@ function importPage(importer) {
     ),
     context.configured
       ? h("p", { class: "muted dest" }, "넣을 곳: ", sameServer(context.honcho?.url, context.localServer?.apiUrl) ? "이 컴퓨터 서버 · " : "", h("code", { class: "mono" }, context.honcho?.url || ""), ` · workspace ${context.workspace || "memory"}`)
-      : notice("warn", "대화 보내기를 아직 켜지 않았습니다. 먼저 켜면 내 기억 서버로 들어갑니다.", " ", h("a", { href: "#/connect/collect" }, "대화 보내기 설정")),
+      : notice("warn", "대화 보내기를 아직 켜지 않았습니다. 먼저 켜면 내 기억 서버로 들어갑니다.", " ", h("a", { href: "#/computer/collect" }, "대화 보내기 설정")),
     h("div", { class: "panel", style: { marginTop: "12px" } }, h("div", { class: "upload-line" }, file, upload), result),
     last?.at ? h("p", { class: "muted dest" }, `이 앱에서 마지막으로 가져온 때 ${ago(last.at)} · 대화 ${number(last.conversations || 0)}개 · 새 메시지 ${number(last.newMessages || 0)}개`) : null,
   );
@@ -817,19 +790,9 @@ function importPage(importer) {
 
 const PAGES = { collect: collectPage, targets: targetsPage, share: sharePage, import: importPage };
 
-export default {
-  title: "연결",
-  async mount(page, params) {
-    const render = (next = []) => {
-      const task = TASKS.find((item) => item.key === next[0]);
-      if (next[0] && !task) history.replaceState(null, "", "#/connect");
-      clear(page);
-      if (!task) return landing(page);
-      const body = h("div", { class: "pad" });
-      page.append(subHead(task), h("div", { class: "page-body" }, body));
-      return PAGES[task.key](body);
-    };
-    await render(params);
-    return { update: (next) => { render(next); } };
-  },
-};
+/** One task as its own page, under the header its menu gives it. */
+export async function openTask(page, key, head) {
+  const body = h("div", { class: "pad" });
+  page.append(pageHead(head), h("div", { class: "page-body" }, body));
+  await PAGES[key](body);
+}
