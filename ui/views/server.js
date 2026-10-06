@@ -450,9 +450,14 @@ export default {
       };
       const node = h("div", {},
         (share.issues || []).length ? h("div", { style: { marginBottom: "12px" } }, notice("warn", h("ul", {}, share.issues.map((issue) => h("li", {}, issue))))) : null,
-        h("div", { class: "choices two" },
+        h("div", { class: "choices three" },
           card("cloudflare", "Cloudflare로 공유 켜기", "팀을 처음 여는 사람이 씁니다. 내 Cloudflare 계정에 통로, 주소, Google 로그인(Access)을 이 앱이 만듭니다."),
           card("invite", "초대 코드로 공유 켜기", "팀을 연 사람에게 받은 초대 코드를 넣습니다. Cloudflare 계정은 필요 없습니다."),
+          // Shown so the option is known; the gate runs only with the Cloudflare tunnel today.
+          h("button", { type: "button", class: "choice", disabled: true },
+            h("small", { class: "tag" }, "추후 업데이트"),
+            h("b", {}, "Tailscale·SSH로 열기"),
+            h("span", {}, "Cloudflare 없이 내 다른 컴퓨터만 연결합니다. 서버 token으로 들어옵니다.")),
         ),
         body,
         h("details", { class: "raw", style: { marginTop: "16px" } }, h("summary", { class: "muted" }, "직접 만든 통로로 켜기"), h("div", { style: { marginTop: "12px" } }, manualForm(share, redraw))),

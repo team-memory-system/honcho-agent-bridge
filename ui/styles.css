@@ -860,6 +860,10 @@ details.group[open] > summary::before { content: "▾"; }
 .choice.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .choice b { font-size: 14.5px; font-weight: 600; }
 .choice span { color: var(--ink-3); font-size: 13px; line-height: 1.5; }
+.choice .tag { align-self: flex-start; }
+.choice:disabled { cursor: default; background: var(--sunk); }
+.choice:disabled:hover { border-color: var(--line); }
+.choice:disabled b { color: var(--ink-2); }
 @media (max-width: 860px) { .choices { grid-template-columns: 1fr; } }
 .item .p.snippet { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .reader-head .actions { flex-wrap: wrap; }
@@ -1006,6 +1010,7 @@ details.group[open] > summary::before { content: "▾"; }
 .stage h3 { margin: 0 0 4px; font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
 .stage p { margin: 0 0 16px; color: var(--ink-3); font-size: 13px; max-width: 64ch; }
 .choices.two { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 16px; }
+.choices.three { margin-bottom: 16px; }
 .choices.two .choice .mono { margin-top: 2px; color: var(--ink-2); }
 .agent-picks { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
 .agent-pick { display: flex; align-items: center; gap: 10px; padding: 12px 2px; border-bottom: 1px solid var(--line); font-weight: 550; cursor: pointer; }
