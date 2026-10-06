@@ -10,7 +10,7 @@ Use the deterministic CLI bundled at `<plugin-root>/scripts/cli.mjs`. Resolve `<
 
 Speak to the user in the language they wrote in: progress notes, questions, warnings and summaries alike (Korean for a Korean request). This file and the CLI's JSON are in English; translate what you pass on and never switch to English mid-setup.
 
-The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버, with 공유), `models` (게이트웨이), `connect` (대화 보내기), `connect/share` (팀원 기억 연결). Do not send them to the gateway's own page at 11450.
+The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `start` (시작하기), `server` (서버, with 공유), `models` (게이트웨이), `connect` (연결), `connect/share` (팀원 기억 연결). Do not send them to the gateway's own page at 11450.
 
 ## Fixed lines
 
@@ -18,8 +18,8 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 
 | When | Say |
 |---|---|
-| Start | 팀 메모리 설치를 시작합니다. 먼저 이 컴퓨터에서 쓸 기능을 고르세요. 여러 개를 같이 골라도 됩니다. |
-| Feature question | Question "이 컴퓨터에서 쓸 기능을 고르세요." with the three options in "First: which features" |
+| Start | 팀 메모리 설치를 시작합니다. |
+| Server question | Question "기억 서버를 어디에 둘까요?" with the two options in "First: where the memory server is" |
 | Prerequisites all present | 필요한 프로그램이 모두 있습니다. |
 | A required program missing | <프로그램>이 없습니다. 공식 설치 방법(<install.command 또는 install.url>)으로 설치할까요? |
 | Server plan confirmation | Question "서버를 이렇게 설치합니다. 진행할까요?" whose text lists, one line each and only those in the plan: Docker Desktop 설치 (첫 실행 때 약관 동의와 Mac 암호 필요) / Ollama와 임베딩 모델(Qwen3-Embedding 4B, 약 2.5GB) 받기 / 구독 게이트웨이 설치 (로그인하면 자동으로 켜짐) / 기억 서버 설치 (주소 <apiUrl>), then the Docker license warning: 회사 직원이 250명 이상이거나 매출이 1천만 달러 이상이면 Docker 유료 구독이 필요합니다. Options "진행", "취소" |
@@ -41,33 +41,34 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | Share with an invite (a teammate) | 방금 연 앱의 서버 → 공유 화면(<url>)에서 "초대 코드로 공유 켜기"를 고르고, 팀 관리자에게 받은 초대 코드를 넣어 주세요. 초대 코드는 채팅에 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
 | Before adding a teammate | 지금은 등록한 사람이 내 기억 전체에 chat으로 물을 수 있습니다 (프로젝트별 제한은 아직 없음). |
 | Stopped on an error | <단계>에서 멈췄습니다. <오류를 사용자의 말로 옮긴 것> |
-| Done | 설치가 끝났습니다. 켠 기능: <기능들>. 필요하면 나중에 팀 메모리 앱에서 더 켤 수 있습니다: <켠 기능에 해당하는 것만: 공유(서버 화면) / 회사 서버에도 보내기, ChatGPT 기록 가져오기(대화 보내기 화면)>. 문제가 생기면 `/memory-doctor`를 입력하세요. |
+| Done | 설치가 끝났습니다. 필요하면 나중에 팀 메모리 앱의 연결 화면에서 팀원 기억 연결, 회사 서버에도 보내기, ChatGPT 기록 가져오기를 켤 수 있습니다. <이 컴퓨터에 서버를 만들었을 때만: 내 다른 컴퓨터와 팀원에게 여는 공유는 서버 화면에서 켭니다.> 문제가 생기면 `/memory-doctor`를 입력하세요. |
 
 Use the detected default data directory without asking; ask about it only when the user brings it up.
 
-## First: which features
+## First: where the memory server is
 
-Ask one question before anything else: which of these three features this computer should have. They are independent and combine; ask it as a multi-select. Use these labels and descriptions as written, in the user's language (Korean shown). Do not rename them, do not present them as mutually exclusive paths, do not add options (no "plugin only", "later" or "skip"; the question tool already lets the user answer otherwise), and never name a particular computer in them. Present the three neutrally: do not recommend, discourage or presume any of them, do not say what people "usually" pick or how many servers a person has, and never describe the user's setup from examples in this file or the docs; anything you add beyond the labels below is noise. Prefer the host's structured question tool. Skip the question when the request already says which.
+Ask one question before anything else: where this computer's memory server is. Ask it as a single choice, with the host's structured question tool when there is one, using these two labels and descriptions as written, in the user's language (Korean shown). Skip it when the request already says which.
 
-- **서버 설치** — 이 컴퓨터에 기억 서버를 설치합니다. 내 다른 컴퓨터의 대화도 이 서버로 모을 수 있습니다. → "Own memory workflow" below, step 1 (the server).
-- **대화 보내기** — 이 컴퓨터의 Claude Code·Codex 대화를 내 기억 서버로 보내고, 에이전트가 내 기억을 꺼내 쓰게 합니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다. → "Own memory workflow" below, steps 2–10, with "Own server on another computer" when the server is elsewhere.
-- **팀원 기억에 묻기** — 에이전트가 팀원이 열어 준 기억에 질문합니다. 팀원에게 받은 팀 주소와, 팀에 등록된 내 Google 계정이 필요합니다. → "Asking someone else's memory" below.
+- **이 컴퓨터에 기억 서버 만들기** — 이 컴퓨터에 기억 서버를 설치하고, 이 컴퓨터의 Claude Code·Codex 대화를 모읍니다. 내 다른 컴퓨터의 대화도 나중에 이 서버로 모을 수 있습니다. → "Own memory workflow" below: the server (step 1), then the hooks (steps 2–10).
+- **다른 컴퓨터의 기억 서버에 연결하기** — 내 기억 서버가 있는 다른 컴퓨터로 이 컴퓨터의 Claude Code·Codex 대화를 보냅니다. 주소와 서버 token은 그 컴퓨터의 앱 서버 → 공유에서 받습니다. → "Own server on another computer" below: this computer gets the collector only.
 
-With 서버 설치 but not 대화 보내기, install and start the server and skip the hooks. With 대화 보내기 but not 서버 설치, never install a server here; ask for the address of the server they already have. Do them in this order: server, then sync, then chat.
+Only the user knows which of their computers should hold the server, so present the two neutrally: no recommendation, no "most people", nothing about their setup taken from the examples in this file or the docs (those are other people's computers), and no computer named. Offer only these two. The question tool already lets the user answer otherwise, and anything added beyond the labels is noise.
 
-Opening the server to the user's other computers and teammates (공유), sending some folders to a company server as well, and importing past ChatGPT conversations are not features of this question. Do not ask about them or set them up during the first setup; the "Done" line names them once. Set one up only when the user asks for it: opening the server in "Own server on another computer", a company server in "Also sending some folders to another server", a ChatGPT import on the app's `connect/import` screen. The one exception: 대화 보내기 to a server on another computer needs that server opened first, as "Own server on another computer" describes.
+Asking a teammate's memory (팀원 기억 연결) works on any computer with the plugin, whichever option was chosen, so it waits until the user asks for it, at first setup or later, and then follows "Asking someone else's memory". The same goes for opening the server to the user's other computers and teammates (공유, in "Own server on another computer"), sending some folders to a company server as well ("Also sending some folders to another server") and importing past ChatGPT conversations (the app's `connect/import` screen); the "Done" line names them once. The one exception is the second option: it needs the server on the other computer shared first, as "Own server on another computer" describes.
 
 ## Then: required software, before anything else
 
-Once the features are chosen, check the software they need and get it installed first. Do not start the plugin's setup, `server plan` or `teammates connect` while something required is missing.
+Once the user has chosen, check the software that choice needs and get it installed first. Do not start the plugin's setup or `server plan` while something required is missing.
 
 1. Node.js 18 or later must exist before the plugin's CLI can run. Check it with the shell (`node --version`). If it is missing, install it from nodejs.org (the LTS installer), or with `brew install node` when Homebrew is already there (macOS), or with `winget install --id OpenJS.NodeJS.LTS -e` (Windows).
-2. Then run `node <plugin-root>/scripts/cli.mjs prereqs --features <chosen,features>`. It reports each item as `required` or `app-installs`, with its `install.command`/`install.url`: Node.js and git for every feature, and Docker and Ollama for 서버 설치.
+2. Then run `node <plugin-root>/scripts/cli.mjs prereqs --features server,sync` for a server on this computer, or `--features sync` for one on another computer. It reports each item as `required` or `app-installs`, with its `install.command`/`install.url`: Node.js and git for both, and Docker and Ollama for a server here.
    - git missing: offer the reported official command, as its own confirmation. Never pipe a downloaded script into a shell. Rerun `prereqs` after.
-   - `app-installs` (Docker Desktop and Ollama for 서버 설치): nothing to do now; `server prepare` installs them.
+   - `app-installs` (Docker Desktop and Ollama, for a server here): nothing to do now; `server prepare` installs them.
 3. The app's 시작하기 screen shows the same check as its first step.
 
 ## Asking someone else's memory
+
+Use this whenever the user asks to connect a teammate's memory, at first setup or any time after; it needs only the plugin on this computer.
 
 A teammate's shared memory is a remote MCP server at `https://<host>/mcp`. The user needs the team's 팀 주소, one `<name> https://<host>/mcp` line per server, which the team's owner copies from 서버 → 공유 ("팀 주소 복사") and which holds no secret. They also need a Google account whose email the owner has put on the team list.
 

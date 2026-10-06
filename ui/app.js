@@ -70,7 +70,7 @@ function setupDone() {
 
 /** A server here, one about to be installed here, or a gateway answering here. */
 function serverHere() {
-  const picked = Array.isArray(app.prefs.startFeatures) && app.prefs.startFeatures.includes("server");
+  const picked = app.prefs.startChoice === "here";
   return Boolean(app.context?.localServer || picked || app.status.gateway.report);
 }
 

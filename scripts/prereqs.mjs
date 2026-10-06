@@ -1,9 +1,10 @@
 // What a computer needs before setup, for the features chosen on it.
 //
-// A computer takes any combination of three features:
+// Two features:
 //   server  the memory server runs here (Docker and Ollama).
 //   sync    this computer's agent conversations go to the user's server.
-//   chat    ask a teammate's shared bridge.
+// The start screen asks for both when the server goes on this computer, and for
+// sync alone when the server is on another of the user's computers.
 //
 // Everyone needs Node (this runs in it) and Git (the plugin marketplace install and
 // `server prepare` both clone with it).
@@ -28,7 +29,7 @@ import {
   runCommand,
 } from "./runtime-installer.mjs";
 
-export const FEATURES = Object.freeze(["server", "sync", "chat"]);
+export const FEATURES = Object.freeze(["server", "sync"]);
 export const MIN_NODE_MAJOR = 18;
 const COMMAND_TIMEOUT_MS = 5_000;
 const GIT_TIMEOUT_MS = 10_000;

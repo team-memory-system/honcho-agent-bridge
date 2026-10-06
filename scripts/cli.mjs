@@ -1580,7 +1580,7 @@ function usage() {
     version: VERSION,
     usage: [
       "detect",
-      "prereqs [--features server,sync,chat]",
+      "prereqs [--features server,sync]",
       "server plan [--profile portable|personal]",
       "server prepare [--profile portable|personal] [--model <id>]",
       "server start [--profile portable|personal] [--no-build] [--model <id>]",
@@ -1713,7 +1713,7 @@ async function teammatesCommand(args) {
 }
 
 /**
- * `prereqs [--features server,sync,chat]`: what this computer needs before setup,
+ * `prereqs [--features server,sync]`: what this computer needs before setup,
  * for the features chosen on it.
  */
 async function prereqs(options = {}) {

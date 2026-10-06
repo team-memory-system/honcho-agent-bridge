@@ -1,41 +1,42 @@
 // 시작하기: the first run, as a checklist that reads the real state. First pick
-// how this computer takes part, then each step says whether it is done and opens
-// the screen that does it.
+// where the memory server lives: on this computer, or on another of the user's
+// computers. Either way this computer's Claude Code and Codex conversations go to
+// it. Then each step says whether it is done and opens the screen that does it.
 import { get, post } from "../lib/api.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { ago } from "../lib/format.js";
 import { app, go, loadContext, refreshStatus, savePrefs, workspace } from "../lib/state.js";
 import { button, busy, pageHead, spinner, tag, toast } from "../lib/ui.js";
 
-// Three features, not three exclusive paths: a computer turns on what it needs.
-const FEATURES = [
+// One of two: the memory server goes on this computer, or it is already on another
+// of the user's computers. Each carries the prereqs features it needs; conversations
+// from here go to the server either way. Teammate memory is not asked here.
+const CHOICES = [
   {
-    key: "server",
-    title: "서버 설치",
-    text: "이 컴퓨터에 기억 서버를 설치합니다. 내 다른 컴퓨터의 대화도 이 서버로 모을 수 있습니다. Docker와 Ollama는 없으면 앱이 설치하고, Codex나 Claude 구독이 필요합니다.",
+    key: "here",
+    title: "이 컴퓨터에 기억 서버 만들기",
+    text: "이 컴퓨터에 기억 서버를 설치하고, 이 컴퓨터의 Claude Code·Codex 대화를 모읍니다. 내 다른 컴퓨터의 대화도 나중에 이 서버로 모을 수 있습니다. Codex나 Claude 구독이 필요하고, Docker와 Ollama는 없으면 앱이 설치합니다.",
+    features: ["server", "sync"],
   },
   {
-    key: "sync",
-    title: "대화 보내기",
-    text: "이 컴퓨터에서 Claude Code·Codex와 나눈 대화를 내 기억 서버로 보내고, 에이전트가 내 기억을 꺼내 쓰게 합니다. 서버가 이 컴퓨터에 있으면 그리로, 다른 컴퓨터에 있으면 그 주소와 서버 토큰으로 보냅니다.",
-  },
-  {
-    key: "chat",
-    title: "팀원 기억에 묻기",
-    text: "에이전트가 팀원이 열어 준 기억에 질문하게 합니다. 원문은 보지 않고 답만 받습니다. 팀원에게 받은 팀 주소와, 팀에 등록된 내 Google 계정이 필요합니다.",
+    key: "remote",
+    title: "다른 컴퓨터의 기억 서버에 연결하기",
+    text: "내 기억 서버가 있는 다른 컴퓨터로 이 컴퓨터의 Claude Code·Codex 대화를 보냅니다. 주소와 서버 token은 그 컴퓨터의 앱 서버 → 공유에서 받습니다.",
+    features: ["sync"],
   },
 ];
 
 // Turned on after setup, from the screen that does it, never in the first question.
+// An item with a `feature` shows only when the choice carries that feature.
 const LATER = [
+  { title: "팀원 기억 연결", text: "팀원에게 받은 팀 주소를 넣고, 에이전트가 팀원 기억에 묻게 합니다.", screen: "connect/share" },
   { feature: "server", title: "공유", text: "내 다른 컴퓨터가 이 서버로 대화를 보내고, 팀원이 이 기억에 묻게 엽니다.", screen: "server" },
-  { feature: "sync", title: "회사 서버에도 보내기", text: "정한 폴더의 대화만 다른 기억 서버에도 보냅니다.", screen: "connect/targets" },
-  { feature: "sync", title: "ChatGPT 기록 가져오기", text: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다.", screen: "connect/import" },
+  { title: "회사 서버에도 보내기", text: "정한 폴더의 대화만 다른 기억 서버에도 보냅니다.", screen: "connect/targets" },
+  { title: "ChatGPT 기록 가져오기", text: "ChatGPT에서 내보낸 대화를 내 기억 서버에 넣습니다.", screen: "connect/import" },
 ];
 
-function chosenFeatures() {
-  const picked = Array.isArray(app.prefs.startFeatures) ? app.prefs.startFeatures : [];
-  return FEATURES.map((feature) => feature.key).filter((key) => picked.includes(key));
+function chosen() {
+  return CHOICES.find((choice) => choice.key === app.prefs.startChoice) || null;
 }
 
 const NEEDED = { required: ["꼭 필요", ""], "app-installs": ["없으면 앱이 설치", "accent"], optional: ["있으면 좋음", ""] };
@@ -63,43 +64,32 @@ export default {
   async mount(page) {
     const body = h("div", { class: "pad" });
     page.append(
-      pageHead({ title: "시작하기", subtitle: "이 컴퓨터가 팀 메모리에 어떻게 참여할지 고르고, 차례대로 준비합니다." }),
+      pageHead({ title: "시작하기", subtitle: "기억 서버를 어디에 둘지 고르고, 차례대로 준비합니다." }),
       h("div", { class: "page-body" }, body),
     );
 
     function drawChoice() {
-      const picked = new Set(chosenFeatures());
-      const go_ = button("이대로 준비하기", { kind: "primary", onClick: () => { savePrefs({ startFeatures: [...picked] }); drawSteps(); } });
-      const sync = () => { go_.disabled = picked.size === 0; };
+      const current = chosen();
       clear(body,
-        h("p", { class: "section-note", style: { margin: "0 0 16px" } }, "이 컴퓨터에서 쓸 기능을 고르세요. 여러 개를 같이 켤 수 있고, 나중에 더 켤 수도 있습니다."),
-        h("div", { class: "choices" }, FEATURES.map((feature) => {
-          const card = h("button", {
-            class: `choice ${picked.has(feature.key) ? "picked" : ""}`,
-            type: "button",
-            "aria-pressed": picked.has(feature.key) ? "true" : "false",
-            onclick: () => {
-              if (picked.has(feature.key)) picked.delete(feature.key); else picked.add(feature.key);
-              card.classList.toggle("picked", picked.has(feature.key));
-              card.setAttribute("aria-pressed", picked.has(feature.key) ? "true" : "false");
-              sync();
-            },
-          }, h("b", {}, feature.title), h("span", {}, feature.text));
-          return card;
-        })),
-        h("div", { class: "form-actions" }, go_),
+        h("p", { class: "section-note", style: { margin: "0 0 16px" } }, "기억 서버를 어디에 둘지 고르세요. 팀원 기억 연결은 준비를 마친 뒤 연결 화면에서 언제든 할 수 있습니다."),
+        h("div", { class: "choices two" }, CHOICES.map((choice) => h("button", {
+          class: `choice ${choice === current ? "picked" : ""}`,
+          type: "button",
+          "aria-pressed": choice === current ? "true" : "false",
+          onclick: () => { savePrefs({ startChoice: choice.key }); drawSteps(); },
+        }, h("b", {}, choice.title), h("span", {}, choice.text)))),
       );
-      sync();
     }
 
     async function drawSteps() {
-      const features = chosenFeatures();
-      if (!features.length) { drawChoice(); return; }
+      const choice = chosen();
+      if (!choice) { drawChoice(); return; }
+      const features = choice.features;
       const list = h("div", { class: "steps" }, h("div", { class: "empty" }, spinner()));
       clear(body,
         h("div", { style: { display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px", flexWrap: "wrap" } },
-          features.map((key) => tag(FEATURES.find((feature) => feature.key === key).title, "accent")),
-          button("기능 바꾸기", { kind: "small quiet", onClick: drawChoice }),
+          tag(choice.title, "accent"),
+          button("다시 고르기", { kind: "small quiet", onClick: drawChoice }),
         ),
         list,
       );
@@ -117,7 +107,7 @@ export default {
         done: Boolean(prereqs.ok),
         text: prereqs.error
           ? `확인하지 못했습니다: ${prereqs.error}`
-          : prereqs.ok ? "고른 기능에 필요한 프로그램이 모두 있습니다." : `${missing.map((item) => item.label).join(", ")}부터 설치하세요. 설치한 뒤 다시 확인을 누릅니다.`,
+          : prereqs.ok ? "필요한 프로그램이 모두 있습니다." : `${missing.map((item) => item.label).join(", ")}부터 설치하세요. 설치한 뒤 다시 확인을 누릅니다.`,
         body: prereqList(prereqs.items || []),
         action: prereqs.ok ? null : ["다시 확인", "recheck"],
       });
@@ -131,39 +121,30 @@ export default {
           { title: "기억 서버 시작", done: Boolean(server?.running && server?.health?.ok), text: server?.running ? "답하는 중입니다." : "로그인 뒤 서버 화면에서 준비를 한 번 더 누르고 시작합니다.", action: ["서버 화면으로", () => go("server")] },
         );
       }
-      if (features.includes("sync")) {
-        steps.push({
-          title: "대화 보내기 설정",
-          done: Boolean(context?.configured),
-          text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "기억 서버로 이 컴퓨터 서버를 고르고, 보낼 에이전트와 내 이름을 정합니다." : "서버를 둔 컴퓨터의 서버 → 공유에서 주소와 서버 token을 받아 넣고, 모을 에이전트를 고릅니다. 서버가 Cloudflare Access 뒤에 있으면 Access 서비스 토큰도 받아 넣습니다.",
-          action: ["연결 화면에서 설정", () => go("connect/collect")],
-        });
-        // Only a conversation from an agent this computer collects, after setup, proves it works.
-        let latest = null;
-        if (context?.configured) {
-          const since = context.installedAt ? new Date(context.installedAt) : null;
-          const sources = ["claude", "codex"].filter((name) => context.agents[name]);
-          const recent = await Promise.all(sources.map((source) => get(`/api/app/sessions?${new URLSearchParams({ workspace: workspace(), size: "1", source })}`).catch(() => null)));
-          latest = recent.map((page) => page?.items?.[0]).filter((item) => item && (!since || new Date(item.createdAt) > since))
-            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
-        }
-        const fresh = Boolean(latest);
-        steps.push({
-          title: "첫 기억 확인",
-          done: Boolean(fresh),
-          text: fresh ? `${ago(latest.createdAt)}에 모인 대화: ${latest.title || "제목 없음"}` : "에이전트를 다시 시작하고 아무 말이나 한 번 주고받은 뒤 확인하세요. Codex는 새 세션에서 훅 승인을 묻습니다.",
-          action: fresh ? ["기억 보기", () => go("memory")] : ["다시 확인", "recheck"],
-        });
+      steps.push({
+        title: "대화 보내기 설정",
+        done: Boolean(context?.configured),
+        text: context?.configured ? `${[context.agents.claude && "Claude Code", context.agents.codex && "Codex"].filter(Boolean).join("·") || "에이전트 없음"} → ${context.honcho.url}` : serverHere ? "기억 서버로 이 컴퓨터 서버를 고르고, 보낼 에이전트와 내 이름을 정합니다." : "서버를 둔 컴퓨터의 앱 서버 → 공유에서 주소와 서버 token을 받아 넣고, 모을 에이전트를 고릅니다.",
+        action: ["연결 화면에서 설정", () => go("connect/collect")],
+      });
+      // Only a conversation from an agent this computer collects, after setup, proves it works.
+      let latest = null;
+      if (context?.configured) {
+        const since = context.installedAt ? new Date(context.installedAt) : null;
+        const sources = ["claude", "codex"].filter((name) => context.agents[name]);
+        const recent = await Promise.all(sources.map((source) => get(`/api/app/sessions?${new URLSearchParams({ workspace: workspace(), size: "1", source })}`).catch(() => null)));
+        latest = recent.map((page) => page?.items?.[0]).filter((item) => item && (!since || new Date(item.createdAt) > since))
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
       }
-      if (features.includes("chat")) {
-        const connected = Number(context?.teamMemory?.connected || 0);
-        steps.push(
-          { title: "팀원 기억 연결", done: connected > 0, text: connected ? `팀원 기억 ${connected}곳이 Claude Code·Codex에 연결돼 있습니다.` : "팀원에게 받은 팀 주소를 넣고 Claude Code와 Codex에 연결합니다.", action: ["연결 화면에서 하기", () => go("connect/share")] },
-          { title: "한 번 로그인", done: false, optional: true, text: "Claude Code는 /mcp 에서 team-로 시작하는 서버를 골라 Authenticate, Codex는 연결 화면의 Codex 로그인을 누릅니다. 팀에 등록된 Google 계정으로 로그인하면 에이전트가 그 기억의 chat 도구로 묻습니다.", action: null },
-        );
-      }
+      const fresh = Boolean(latest);
+      steps.push({
+        title: "첫 기억 확인",
+        done: Boolean(fresh),
+        text: fresh ? `${ago(latest.createdAt)}에 모인 대화: ${latest.title || "제목 없음"}` : "에이전트를 다시 시작하고 아무 말이나 한 번 주고받은 뒤 확인하세요. Codex는 새 세션에서 훅 승인을 묻습니다.",
+        action: fresh ? ["기억 보기", () => go("memory")] : ["다시 확인", "recheck"],
+      });
 
-      const firstOpen = steps.findIndex((step) => !step.done && !step.optional);
+      const firstOpen = steps.findIndex((step) => !step.done);
       clear(list, steps.map((step, index) => h("div", { class: `step ${step.done ? "done" : index === firstOpen ? "current" : ""}` },
         h("span", { class: "step-num" }),
         h("div", {},
@@ -177,9 +158,9 @@ export default {
         ),
       )));
       if (firstOpen === -1 && steps.length) {
-        const later = LATER.filter((item) => features.includes(item.feature));
+        const later = LATER.filter((item) => !item.feature || features.includes(item.feature));
         list.after(
-          h("div", { class: "notice ok", style: { marginTop: "16px" } }, h("div", {}, h("b", {}, "준비가 끝났습니다. "), features.includes("sync") ? "이제 대화가 끝날 때마다 기억이 쌓입니다." : "")),
+          h("div", { class: "notice ok", style: { marginTop: "16px" } }, h("div", {}, h("b", {}, "준비가 끝났습니다. "), "이제 대화가 끝날 때마다 기억이 쌓입니다.")),
           later.length ? h("div", { class: "rows", style: { marginTop: "16px" } },
             h("p", { class: "section-note", style: { margin: "0 0 8px" } }, "필요하면 나중에 더 켤 수 있습니다."),
             later.map((item) => h("div", { class: "row" },

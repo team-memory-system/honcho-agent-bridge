@@ -306,7 +306,7 @@ Cross-device database synchronization is intentionally deferred until the person
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
 - For sharing, the team's owner only: a Cloudflare account with a domain on it, Zero Trust with a Google login method, and an API token (see [What the owner needs in Cloudflare](#what-the-owner-needs-in-cloudflare)). Teammates need only a Google account.
 
-`prereqs [--features server,sync,chat]` reports Node.js and git for every feature, and Docker and Ollama for `server`.
+`prereqs [--features server,sync]` reports Node.js and git for both, and Docker and Ollama for `server`. The app's 시작하기 first asks where the memory server is: on this computer (`server,sync`) or on another of the user's computers (`sync`). Asking a teammate's memory is set up later, from 연결 → 팀원 기억 연결.
 
 The `personal` profile also requires macOS or Windows, git, and a Codex and/or Claude subscription. Docker Desktop and Ollama are fetched by the app when this computer has neither (see [Docker Desktop and Ollama](#docker-desktop-and-ollama)). `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
 

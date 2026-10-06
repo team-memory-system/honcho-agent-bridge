@@ -551,7 +551,7 @@ async function importChatGpt(req, res) {
 }
 
 /**
- * `?features=server,sync` as `cli.mjs prereqs` arguments. Only the three
+ * `?features=server,sync` as `cli.mjs prereqs` arguments. Only the two
  * feature names pass.
  */
 export function prereqsInvocation(query) {

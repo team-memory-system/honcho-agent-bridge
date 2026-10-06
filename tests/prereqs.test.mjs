@@ -74,10 +74,11 @@ function item(result, key) {
   return result.items.find((entry) => entry.key === key);
 }
 
-test("features are the three names, each once", () => {
+test("features are the two names, each once", () => {
   assert.deepEqual(parseFeatures("server, sync,server"), { features: ["server", "sync"], invalid: [] });
   assert.deepEqual(parseFeatures(""), { features: [], invalid: [] });
-  assert.deepEqual(parseFeatures("chat,docker").invalid, ["docker"]);
+  assert.deepEqual(parseFeatures("sync,docker").invalid, ["docker"]);
+  assert.deepEqual(parseFeatures("sync,chat"), { features: ["sync"], invalid: ["chat"] }, "chat is no longer a feature");
 });
 
 test("node and git are always reported, and nothing else without a feature", async () => {
@@ -137,12 +138,10 @@ test("git missing fails the check on macOS and Windows", async () => {
 });
 
 test("Docker and Ollama are checked only with server, and the app installs them", async () => {
-  for (const features of [["sync"], ["chat"], ["sync", "chat"]]) {
-    const calls = [];
-    const result = await mac({ features, calls, which: { docker: "/usr/local/bin/docker", ollama: "/usr/local/bin/ollama" } });
-    assert.ok(!item(result, "docker") && !item(result, "ollama"), features.join(","));
-    assert.ok(!calls.some((call) => /docker|ollama/.test(call)), features.join(","));
-  }
+  const calls = [];
+  const synced = await mac({ features: ["sync"], calls, which: { docker: "/usr/local/bin/docker", ollama: "/usr/local/bin/ollama" } });
+  assert.ok(!item(synced, "docker") && !item(synced, "ollama"));
+  assert.ok(!calls.some((call) => /docker|ollama/.test(call)));
 
   const missing = await mac({ features: ["server"] });
   assert.deepEqual(missing.items.map((entry) => entry.key), ["node", "git", "docker", "ollama"]);
@@ -197,23 +196,20 @@ test("Docker and Ollama are checked only with server, and the app installs them"
   assert.equal(item(win, "ollama").ok, true);
 });
 
-test("sync and chat need only Node and Git, and run nothing else", async () => {
-  for (const features of [["sync"], ["chat"], ["sync", "chat"]]) {
-    const label = features.join(",");
-    const calls = [];
-    const result = await mac({ features, calls });
-    assert.deepEqual(result.items.map((entry) => entry.key), ["node", "git"], label);
-    assert.equal(result.ok, true, label);
-    assert.deepEqual(calls, ["xcode-select -p", "/usr/bin/git --version"], label);
-    const win = await windows({ features });
-    assert.deepEqual(win.items.map((entry) => entry.key), ["node", "git"], label);
-    assert.equal(win.ok, true, label);
-  }
+test("sync needs only Node and Git, and runs nothing else", async () => {
+  const calls = [];
+  const result = await mac({ features: ["sync"], calls });
+  assert.deepEqual(result.items.map((entry) => entry.key), ["node", "git"]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, ["xcode-select -p", "/usr/bin/git --version"]);
+  const win = await windows({ features: ["sync"] });
+  assert.deepEqual(win.items.map((entry) => entry.key), ["node", "git"]);
+  assert.equal(win.ok, true);
 });
 
 test("a command that throws or hangs up is a failed check, never a throw", async () => {
   const result = await checkPrereqs({
-    features: ["server", "sync", "chat"],
+    features: ["server", "sync"],
     platform: "darwin",
     env: { PATH: "/usr/bin" },
     homeDir: "/Users/test",
@@ -229,7 +225,7 @@ test("a command that throws or hangs up is a failed check, never a throw", async
 test("the CLI refuses unknown features and lists prereqs in its help", async () => {
   const { stdout } = await execFileAsync(process.execPath, [CLI, "help"]);
   const usage = JSON.parse(stdout).usage;
-  assert.ok(usage.includes("prereqs [--features server,sync,chat]"));
+  assert.ok(usage.includes("prereqs [--features server,sync]"));
   assert.ok(!usage.some((line) => line.startsWith("prereqs install")), "nothing is installed from prereqs");
   await assert.rejects(execFileAsync(process.execPath, [CLI, "prereqs", "--features", "server,docker"]), (error) => {
     const output = JSON.parse(String(error.stdout));
@@ -239,10 +235,10 @@ test("the CLI refuses unknown features and lists prereqs in its help", async () 
   });
 });
 
-test("the UI route takes only the three feature names", () => {
+test("the UI route takes only the two feature names", () => {
   assert.deepEqual(prereqsInvocation(new URLSearchParams("features=server,sync")), { args: ["prereqs", "--features=server,sync"] });
   assert.deepEqual(prereqsInvocation(new URLSearchParams("")), { args: ["prereqs", "--features="] });
   assert.match(prereqsInvocation(new URLSearchParams("features=server,--force")).error, /unknown feature/);
   assert.match(prereqsInvocation(new URLSearchParams("features=sync;rm")).error, /unknown feature/);
-  assert.match(prereqsInvocation(new URLSearchParams("features=sync&features=chat")).error, /once/);
+  assert.match(prereqsInvocation(new URLSearchParams("features=sync&features=server")).error, /once/);
 });
