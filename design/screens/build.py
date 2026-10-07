@@ -393,8 +393,9 @@ def team(mates=None, granted=None, granted_title="내 기억을 여는 팀원"):
 
 
 SWITCH_ON = '<span class="switch on"></span>'
+SWITCH_OFF = '<span class="switch"></span>'
 MATE_ALICE = item("alice", "", "Claude Code·Codex · 열린 프로젝트 2개", SWITCH_ON)
-MATE_DAVE = item("dave", " " + tag("승인됨", "ok"), "열린 프로젝트 2개", btn("연결", "pri", sm=True))
+MATE_DAVE = item("dave", "", "꺼 둠 · 열린 프로젝트 2개", SWITCH_OFF)
 MATE_CAROL = item("carol", "", "서버 없음")
 GRANT_ALICE = lambda hit=False: item("alice", " " + tag("chat"), "열린 프로젝트: honcho · web-app", btn("수정", sm=True, hit=hit))
 
@@ -624,8 +625,11 @@ def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past_label="�
 
 def w3_matrix():
     head_row = ('<div class="pr m h"><span>폴더</span><span class="c">대화</span><span class="ch">이 컴퓨터 서버</span>'
-                '<span class="ch">회사<br>' + tag("승인 요청", "warn") + "</span></div>")
-    rows = [head_row]
+                '<span class="ch">회사 서버<br>' + tag("승인 요청", "warn") + "</span></div>")
+    group = ('<div class="pr m h" style="padding-bottom:0;border-bottom:0"><span></span><span></span>'
+             '<span style="grid-column:3 / -1;text-align:center;padding-bottom:6px;border-bottom:1px solid #d8d3c8;'
+             'color:#57534b;font-weight:600">쌓을 곳</span></div>')
+    rows = [group, head_row]
     for name, path, n in PROJECTS:
         company = name == "honcho"
         rows.append('<div class="pr m' + (" fresh" if company else "") + '"><span class="pn"><b>' + name + "</b><small>" + path
@@ -633,7 +637,7 @@ def w3_matrix():
                     '<span class="cc"><span class="box' + (" on" if company else "") + '"></span></span></div>')
     rows.append('<div class="pr m"><span class="pn"><b>새로 생기는 폴더</b></span><span></span>'
                 '<span class="cc"><span class="box on"></span></span><span class="cc"><span class="box"></span></span></div>')
-    return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">서버마다 쌓을 폴더를 고르세요.</p>"
+    return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">서버마다 쌓을 폴더를 고르세요. 고른 서버마다 칸이 하나씩 생깁니다.</p>"
             '<div class="pt">' + "".join(rows) + "</div>"
             '<div class="row2"><span style="color:#57534b;margin-right:4px">새로 고른 폴더의 지난 대화</span>'
             '<span class="seg"><span class="on">전부</span><span>날짜부터</span><span>안 함</span></span>'
@@ -771,8 +775,9 @@ def scr_w4(steps, items):
     return BLANK + (wizard(START, steps, "done", body, ""),)
 
 
-def scr_w5(steps, items, button="대시보드 열기", title=None):
-    body = "<h3>" + (title or "에이전트에서 할 일 " + str(len(items)) + "개") + "</h3>" + todo(items)
+def scr_w5(steps, items, button="대시보드 열기", title=None, lead=None):
+    body = ("<h3>" + (title or "에이전트에서 할 일 " + str(len(items)) + "개") + "</h3>"
+            + ('<p class="lead">' + lead + "</p>" if lead else "") + todo(items))
     return BLANK + (wizard(START, steps, "done", body, foot("", btn(button, "pri", hit=True))),)
 
 
@@ -857,8 +862,8 @@ case("1-4", "내 서버 없음 · 쌓지 않고 팀원 기억만", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
     ("W1", "서버 · 쌓지 않기 (단계가 팀원으로 바뀜)", scr_w1(CHATONLY, 1, "skip")),
     ("WT", "팀원 · 적용", scr_wt()),
-    ("W5", "할 일", scr_w5(CHATONLY, [("팀 화면", "팀원이 승인하면 그 팀원 줄의 연결을 누르세요.")],
-                         button="팀 화면 열기", title="팀원이 승인하면 할 일")),
+    ("W5", "승인 기다리는 중", scr_w5(CHATONLY, [("알림", "팀원이 승인하면 오른쪽 위 종에 알림이 뜹니다. 그 알림에서 연결을 누르세요.")],
+                               button="팀 화면 열기", title="승인 기다리는 중", lead="alice와 bob에게 chat 요청을 보냈습니다.")),
     ("T1", "팀 · 승인 기다리는 중", page("chat", "팀", team(
         mates=[item("alice", " " + tag("승인 기다리는 중", "warn"), "memory-alice.example.com", btn("요청 취소", "quiet", sm=True)),
                item("bob", " " + tag("승인 기다리는 중", "warn"), "memory-bob.example.com", btn("요청 취소", "quiet", sm=True)),
@@ -983,7 +988,7 @@ case("3-7", "기억 서버가 쓰는 모델 바꾸기", [
 cat("4. 팀 · 팀원 기억에 묻기")
 TEAM_A = [MATE_ALICE, MATE_DAVE, item("bob", "", "memory-bob.example.com", btn("chat 요청", sm=True, hit=True)), MATE_CAROL]
 TEAM_B = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("승인 기다리는 중", "warn"), "방금 요청", btn("요청 취소", "quiet", sm=True)), MATE_CAROL]
-TEAM_C = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("승인됨", "ok"), "열린 프로젝트 1개", btn("연결", "pri", sm=True, hit=True)), MATE_CAROL]
+TEAM_C = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("승인됨", "ok"), "열린 프로젝트 1개", btn("연결", "pri", sm=True)), MATE_CAROL]
 TEAM_D = [MATE_ALICE, MATE_DAVE, item("bob", "", "Claude Code·Codex · 열린 프로젝트 1개", SWITCH_ON), MATE_CAROL]
 BOB_MATES = [item("alice", "", "Claude Code · 열린 프로젝트 1개", SWITCH_ON),
              item("dave", "", "memory-dave.example.com", btn("chat 요청", sm=True)),
@@ -991,6 +996,7 @@ BOB_MATES = [item("alice", "", "Claude Code · 열린 프로젝트 1개", SWITCH
 BOB_DASH = page("member", "대시보드", dashboard([ROW_LOCAL], share=("켜짐", "memory-bob.example.com")))
 BOB_ASK = item("me", "", "내 기억에 chat으로 물으려 합니다 · 방금",
                btn("승인", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True))
+BOB_OK = item("bob", "", "chat 요청을 승인했습니다 · 열린 프로젝트 1개 · 방금", btn("연결", "pri", sm=True, hit=True))
 BOB_PROJECTS = [("mobile-app", "~/dev/mobile-app", 58, True), ("design-system", "~/dev/design-system", 21, False),
                 ("notes", "~/Documents/notes", 9, False)]
 
@@ -1012,14 +1018,15 @@ case("4-1", "팀원 기억에 chat 요청 → 승인 → 연결", [
                                          '<p class="lead" style="margin-top:4px">me가 chat으로 물을 때 답에 쓸 프로젝트를 고르세요.</p>'
                                          + project_boxes(BOB_PROJECTS),
                                          foot("", btn("취소", "quiet") + btn("승인", "pri", hit=True))),))),
-    ("T1", "팀 · 승인됨 (내 앱)", ring(page("member", "팀", team(mates=TEAM_C, granted=[GRANT_ALICE()])))),
-    ("T3", "연결 창 (내 앱)", (side("member", "팀"), team(mates=[m.replace(" hit", "") for m in TEAM_C], granted=[GRANT_ALICE()]),
+    ("N1", "알림 · bob이 승인함 (내 앱)", ring(page("member", "팀", team(mates=TEAM_C, granted=[GRANT_ALICE()])), items=[BOB_OK])),
+    ("T3", "연결 창 (내 앱)", (side("member", "팀"), team(mates=TEAM_C, granted=[GRANT_ALICE()]),
                              simple("bob의 기억 연결",
-                                    '<p class="lead" style="margin-top:4px">bob의 기억을 내 에이전트에 붙였습니다. 에이전트마다 한 번 로그인하세요.</p>'
+                                    '<p class="lead" style="margin-top:4px">알림에서 연결을 눌러 bob의 기억을 이 컴퓨터의 Claude Code와 Codex에 도구로 넣었습니다. '
+                                    "bob의 서버는 팀 Google 계정으로만 열려서, 에이전트마다 한 번 로그인하면 끝납니다.</p>"
                                     '<div class="opts">'
-                                    '<div class="agent"><span class="src">C</span><div class="ab"><div class="t">Claude Code ' + tag("추가함", "ok")
+                                    '<div class="agent"><span class="src">C</span><div class="ab"><div class="t">Claude Code ' + tag("로그인 필요", "warn")
                                     + '</div><div class="s">열린 세션에서 <span class="mono">/mcp</span> 를 열고 <span class="mono">team-bob</span> 을 골라 Authenticate를 누르고, 브라우저가 열리면 팀 Google 계정으로 로그인하세요.</div></div></div>'
-                                    '<div class="agent"><span class="src x">X</span><div class="ab"><div class="t">Codex ' + tag("추가함", "ok")
+                                    '<div class="agent"><span class="src x">X</span><div class="ab"><div class="t">Codex ' + tag("로그인 필요", "warn")
                                     + '</div><div class="s">Codex 로그인을 누르고, 브라우저가 열리면 팀 Google 계정으로 로그인하세요.</div></div>'
                                     + btn("Codex 로그인", sm=True, hit=True) + "</div></div>",
                                     foot("", btn("닫기"))))),
