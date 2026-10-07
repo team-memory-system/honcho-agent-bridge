@@ -595,15 +595,17 @@ Google as a login method; and an API token with these permissions:
 - Account → Cloudflare Tunnel → Edit
 - Account → Access: Apps and Policies → Edit
 - Account → Access: Organizations, Identity Providers, and Groups → Read
-- Account → Workers Scripts → Edit
-- Zone → DNS → Edit, and Zone → Zone → Read, on that zone
+- Account → Workers → Admin (making the hub's Worker; the legacy Workers Scripts → Edit does the same)
+- Zone → DNS → Edit, Zone → Zone → Read, and Zone → Workers Routes → Edit, on that zone
 
 Then, in the app's first setup (새 팀 만들기) or in a terminal:
 
 ```sh
 # The API token goes in the environment, never on the command line.
-CLOUDFLARE_API_TOKEN='<api token>' node scripts/cli.mjs team make --name '<team name>' --email <admin's Google email> [--zone <zone>] [--hub team]
+CLOUDFLARE_API_TOKEN='<api token>' node scripts/cli.mjs team make --name '<team name>' --email <admin's Google email> [--zone <zone>] [--hub team] [--idp <id|name>]
 ```
+
+`--idp` is needed only when Zero Trust has more than one Google login.
 
 `team make` keeps the roster in the reusable Access policy "Team Memory people" (the
 admin's email first), makes the policy "Team Memory everyone" and the hub's Access

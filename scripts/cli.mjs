@@ -1800,7 +1800,7 @@ function usage() {
       "server share disable",
       "server share token",
       "server share rotate",
-      "team make --name <team name> --email <admin Google email> [--zone <zone>] [--hub <label>] (the Cloudflare API token in CLOUDFLARE_API_TOKEN; it needs Workers Scripts: Edit as well)",
+      "team make --name <team name> --email <admin Google email> [--zone <zone>] [--hub <label>] [--idp <Google login name|id>] (the Cloudflare API token in CLOUDFLARE_API_TOKEN; it needs Workers: Admin and the zone's Workers Routes: Edit as well)",
       "team status",
       "team share [--label <name>] [--replace] (after logging in to the team in the app)",
       "team scopes",

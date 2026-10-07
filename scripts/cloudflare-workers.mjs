@@ -8,8 +8,12 @@
 //   HUB           the Durable Object namespace, made by the first upload's migration
 //   TEAM          plain-text JSON naming the team's Cloudflare side; no secret
 //   CF_API_TOKEN  the admin's API token, as a secret Cloudflare never shows again
-// so the token needs one permission more than sharing a server did:
-//   Account  Workers Scripts: Edit
+// so the token needs two permissions more than sharing a server did:
+//   Account  Workers: Admin                  making a Worker takes Admin since
+//                                            Cloudflare's granular Workers roles
+//                                            (2026-09); the legacy Workers
+//                                            Scripts: Edit does the same
+//   Zone     Workers Routes: Edit            on the zone, for the custom domain
 // The hub answers at https://<hubHost> through a Workers custom domain, and its
 // workers.dev address is turned off: nothing reaches it except through Access.
 //
@@ -29,7 +33,7 @@ export const HUB_BINDING = "HUB";
 export const HUB_COMPATIBILITY_DATE = "2026-09-01";
 export const HUB_IMPORT = "../../scripts/cloudflare-api.mjs";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const WORKERS_PERMISSION = " (the API token needs Account / Workers Scripts / Edit)";
+const WORKERS_PERMISSION = " (the API token needs Account / Workers / Admin, and Zone / Workers Routes / Edit on the zone)";
 
 /** The two modules of the hub as they are uploaded: the hub, its import pointed at its neighbour. */
 export async function hubModules({ serverSource = sourceServerDir(), scriptsDir = HERE } = {}) {

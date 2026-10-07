@@ -46,7 +46,7 @@ function openToken(made, onDone) {
   const problem = h("div", {});
   win.body(
     h("p", { class: "lead", style: { marginTop: "4px" } }, "새 token으로 팀 주소의 Worker를 다시 올리고 팀의 Cloudflare 설정을 확인합니다. 1~2분 걸립니다."),
-    field("새 API token", token, "Cloudflare에서 새로 만든 token을 여기에만 붙여 넣으세요. Workers Scripts: Edit 권한도 있어야 합니다."),
+    field("새 API token", token, "Cloudflare에서 새로 만든 token을 여기에만 붙여 넣으세요. Workers: Admin과 zone의 Workers Routes: Edit 권한도 있어야 합니다."),
     problem);
   win.foot(null, [
     button("취소", { kind: "quiet", onClick: () => win.close() }),

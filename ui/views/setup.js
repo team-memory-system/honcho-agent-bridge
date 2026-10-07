@@ -42,7 +42,7 @@ const LABELS = { team: "팀 주소", make: "팀 만들기", login: "로그인", 
 const BACKENDS = [["codex", "ChatGPT"], ["claude", "Claude"]];
 const TODO_BELL = { title: "알림", text: "팀원이 승인하면 오른쪽 위 종에 알림이 뜹니다. 그 알림에서 연결을 누르세요." };
 // The Cloudflare API token 새 팀 만들기 needs, in the words of Cloudflare's token screen.
-const TOKEN_PERMISSIONS = "Account의 Cloudflare Tunnel: Edit, Access: Apps and Policies: Edit, Access: Organizations, Identity Providers, and Groups: Read, Workers Scripts: Edit와, 쓸 zone의 DNS: Edit, Zone: Read";
+const TOKEN_PERMISSIONS = "Account의 Cloudflare Tunnel: Edit, Access: Apps and Policies: Edit, Access: Organizations, Identity Providers, and Groups: Read, Workers: Admin과, 쓸 zone의 DNS: Edit, Zone: Read, Workers Routes: Edit";
 
 // Where `server prepare` stopped for the person to do something, in this window's words.
 const NEXT_ACTIONS = {
