@@ -21,24 +21,47 @@ are not published to the host. Persistent memory lives in named Docker volumes.
 Sharing runs three services under the Compose profile `share`.
 
 `gate/gate.mjs` runs as the `gate` service on the dashboard image's Node. It
-publishes only `127.0.0.1:${HONCHO_GATE_PORT:-8010}` and has two ways through:
+publishes only `127.0.0.1:${HONCHO_GATE_PORT:-8010}`. Cloudflare Access covers the
+whole host, so everything the tunnel brings carries a person's login: the gate
+verifies `Cf-Access-Jwt-Assertion` against
+`https://<HONCHO_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` and `HONCHO_ACCESS_AUD`
+and requires an `email` claim. What that person may do is in `../runtime/gate`,
+mounted at `/gate-state`:
 
-- `GET /health` and `/v3/*`, for the owner's other computers, only with the gate
-  token (`HONCHO_GATE_TOKEN`).
-- `/mcp` and `/mcp/*`, for teammates, only with a person's Cloudflare Access login.
-  The gate verifies `Cf-Access-Jwt-Assertion` against
-  `https://<HONCHO_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` and
-  `HONCHO_ACCESS_AUD`, and requires an `email` claim. It drops the caller's own
-  credentials and `x-honcho-*` headers, then passes the request to `mcp` with
-  `HONCHO_TEAM_MCP_TOKEN` and the verified email. Until the team domain, the AUD
-  and the team MCP token are all set, `/mcp` answers 404. Each refused login
-  leaves an `mcp_refused` line with its reason in the gate's log.
+- `access.json`, written by the owner's app: the owners, the teammates who may
+  `chat` (with the projects opened to them) and those who collect into this
+  server. The gate reads it again when it changes; without it nobody gets in but
+  the gate token.
+- `devices.json`, written by the gate alone (owner-only): every computer that
+  writes here registers once with `POST /team-memory/devices` and then sends its
+  key in `X-Team-Memory-Device`. Only the key's hash is kept, and `access.json`
+  can revoke one computer.
+
+The doors:
+
+- `GET /team-memory/whoami` tells a person what they may do;
+  `DELETE /team-memory/devices/<id>` lets a computer remove its own key.
+- `GET /health` and `/v3/*` go to the API. The gate token (`HONCHO_GATE_TOKEN`)
+  opens both as before, and the Compose health check uses it. Through Access,
+  `/health` answers anyone this server lets in, and `/v3/*` takes an owner's
+  registered computer as it is and a collecting teammate's only to write and read
+  back their own conversations, whose session ids get the teammate's own `tm-…_`
+  prefix.
+- `/mcp` and `/mcp/*` go to `mcp` for an owner (every project) or a teammate
+  allowed to chat (their projects). The gate drops the caller's credentials,
+  `x-honcho-*` and `x-team-memory-*` headers and sends `HONCHO_TEAM_MCP_TOKEN`,
+  the verified email, `x-honcho-scope-mode` and `x-honcho-allowed-scopes`. Until
+  the team domain, the AUD and the team MCP token are all set, `/mcp` answers 404.
+
+Each refusal leaves a `refused` line with the door and its reason, never an email
+or a key, in the gate's log.
 
 `mcp` is honcho-selfhost's `local-mcp-bridge`, built from
 `honcho/local-mcp-bridge`. It answers `chat` only, pinned to
-`HONCHO_TEAM_WORKSPACE` (default `memory`) and `HONCHO_TEAM_PEER`. It records each
-call in the audit schema as bridge `team`, with the caller's email. It has no host
-port.
+`HONCHO_TEAM_WORKSPACE` (default `memory`) and `HONCHO_TEAM_PEER`; with
+`HONCHO_MCP_SCOPE_FROM_GATE` a teammate's `chat` answers only from the projects in
+the gate's scope headers. It records each call in the audit schema as bridge
+`team`, with the caller's email. It has no host port.
 
 `tunnel` is `cloudflared` (pinned image tag). It runs the tunnel whose token is
 `HONCHO_TUNNEL_TOKEN` in `.env`, and the tunnel's ingress, set in Cloudflare, is
