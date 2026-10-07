@@ -434,6 +434,15 @@ const BACKUP_ROUTES = {
   },
 };
 
+/**
+ * The CLI routes that only read. Every other one changes this computer, so it answers
+ * a JSON POST only: a page on another site can make a browser send a GET here (an
+ * image sends no Origin), but it cannot send a JSON POST without being refused.
+ */
+const READ_ROUTES = new Set([
+  "/api/targets", "/api/status", "/api/server/status", "/api/backup/status", "/api/backup/remotes", "/api/host/status",
+]);
+
 const ROUTES = {
   "/api/targets": async () => runCli(["target", "list"], { timeout: 30_000, env: secretEnvironment({}, TARGET_SECRET_FIELDS) }),
   ...TARGET_ROUTES,
@@ -678,7 +687,7 @@ export function createUiServer() {
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];
     if (!route && !hostRoute) return json(res, 404, { error: "Not found" });
-    if ([SHARE_ROUTES, TARGET_ROUTES, BACKUP_ROUTES, TEAM_ROUTES].some((routes) => Object.hasOwn(routes, url.pathname)) && req.method !== "POST") {
+    if (!READ_ROUTES.has(url.pathname) && req.method !== "POST") {
       return json(res, 405, { ok: false, error: "Method not allowed" });
     }
     let body = {};

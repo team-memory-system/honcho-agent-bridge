@@ -106,6 +106,13 @@ test("only a same-origin browser on this machine may drive the UI", async () => 
   );
   assert.equal((await send("/", { method: "POST", body: {} })).status, 405);
   assert.equal((await send("/api/nope")).status, 404);
+  // An image on another site sends a GET with no Origin, so nothing that changes
+  // this computer may run on one.
+  for (const route of ["/api/setup/apply", "/api/setup/plan", "/api/server/prepare", "/api/server/start", "/api/server/stop",
+    "/api/server/verify", "/api/host/start", "/api/gateway/open", "/api/targets/add", "/api/teammates/add"]) {
+    assert.equal((await send(route)).status, 405, `${route} must not run on a GET`);
+    assert.equal((await send(route, { method: "HEAD" })).status, 405, `${route} must not run on a HEAD`);
+  }
 });
 
 test("the host and origin checks are decided by the request, not by the route", () => {
