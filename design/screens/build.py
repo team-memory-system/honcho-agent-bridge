@@ -528,13 +528,13 @@ def peer_field(name="me"):
 NEW_SERVER_SUB = "ChatGPT나 Claude 구독이 필요합니다."
 
 
-def company_opts(on=False, hint=False):
+def company_opts(on=False):
     return ('<div class="label">함께 쌓을 서버</div><div class="opts">'
             + opt("box", on, '회사 <span class="mono muted">' + COMPANY + "</span>", end=tag("승인 요청", "warn"))
             + "</div>")
 
 
-def w1_body(kind):
+def w1_body(kind, company=False):
     """The server step. kind picks what this account has and what is chosen."""
     q = "<h3>어디에 쌓을까요?</h3>"
     if kind == "found":
@@ -543,7 +543,7 @@ def w1_body(kind):
                       tag("찾음", "ok"))
                 + opt("radio", False, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
                 + opt("radio", False, "쌓지 않기")
-                + "</div>" + company_opts())
+                + "</div>" + company_opts(company))
     if kind == "none":
         return (q + "<p class=\"lead\">" + ME + " 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", True, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
@@ -577,7 +577,7 @@ def w1_body(kind):
         return (q + '<div class="label">내 기억 서버</div><div class="opts">'
                 + opt("radio", True, '이 컴퓨터 서버 <span class="mono muted">' + LOCAL + "</span>", "", tag("지금 쌓는 중", "ok"))
                 + opt("radio", False, "쌓지 않기")
-                + "</div>" + company_opts(on, hint=on))
+                + "</div>" + company_opts(on))
     raise ValueError(kind)
 
 
@@ -623,8 +623,11 @@ def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past_label="�
             + ('<div class="hint">' + past_hint + "</div>" if past_hint else ""))
 
 
-def w3_matrix():
-    head_row = ('<div class="pr m h"><span>폴더</span><span class="c">대화</span><span class="ch">이 컴퓨터 서버</span>'
+def w3_matrix(mine="이 컴퓨터 서버", mine_on=("honcho", "web-app", "api-server", "notes"), fresh=("honcho",),
+              past_label="새로 고른 폴더의 지난 대화", past_note="회사에 33개", past_hint=""):
+    """Project step when the server step picked more than one server: one column per server.
+    The company column starts empty apart from what the user ticks (honcho here)."""
+    head_row = ('<div class="pr m h"><span>폴더</span><span class="c">대화</span><span class="ch">' + mine + "</span>"
                 '<span class="ch">회사 서버<br>' + tag("승인 요청", "warn") + "</span></div>")
     group = ('<div class="pr m h" style="padding-bottom:0;border-bottom:0"><span></span><span></span>'
              '<span style="grid-column:3 / -1;text-align:center;padding-bottom:6px;border-bottom:1px solid #d8d3c8;'
@@ -632,16 +635,18 @@ def w3_matrix():
     rows = [group, head_row]
     for name, path, n in PROJECTS:
         company = name == "honcho"
-        rows.append('<div class="pr m' + (" fresh" if company else "") + '"><span class="pn"><b>' + name + "</b><small>" + path
-                    + '</small></span><span class="c">' + str(n) + '개</span><span class="cc"><span class="box on"></span></span>'
+        rows.append('<div class="pr m' + (" fresh" if name in fresh else "") + '"><span class="pn"><b>' + name + "</b><small>" + path
+                    + '</small></span><span class="c">' + str(n) + '개</span><span class="cc"><span class="box'
+                    + (" on" if name in mine_on else "") + '"></span></span>'
                     '<span class="cc"><span class="box' + (" on" if company else "") + '"></span></span></div>')
     rows.append('<div class="pr m"><span class="pn"><b>새로 생기는 폴더</b></span><span></span>'
                 '<span class="cc"><span class="box on"></span></span><span class="cc"><span class="box"></span></span></div>')
     return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">서버마다 쌓을 폴더를 고르세요. 고른 서버마다 칸이 하나씩 생깁니다.</p>"
             '<div class="pt">' + "".join(rows) + "</div>"
-            '<div class="row2"><span style="color:#57534b;margin-right:4px">새로 고른 폴더의 지난 대화</span>'
+            '<div class="row2"><span style="color:#57534b;margin-right:4px">' + past_label + "</span>"
             '<span class="seg"><span class="on">전부</span><span>날짜부터</span><span>안 함</span></span>'
-            '<span class="muted" style="font-size:12.5px">회사에 33개</span></div>')
+            '<span class="muted" style="font-size:12.5px">' + past_note + "</span></div>"
+            + ('<div class="hint">' + past_hint + "</div>" if past_hint else ""))
 
 
 def progress(items):
@@ -688,6 +693,15 @@ PROG_CONNECT_GROK = [
     ("ok", "Claude Code에 플러그인 설치", "", ""),
     ("run", "Codex에 플러그인 설치", "", ""),
     ("wait", "Grok CLI에 훅 설치", "", ""),
+    ("wait", "지난 대화 수집 시작", "", ""),
+]
+PROG_CONNECT_COMPANY = [
+    SERVER_STEPS,
+    ("ok", "내 서버 연결", MY_SERVER, ""),
+    ("ok", "회사 서버에 승인 요청", COMPANY + " · 승인 기다리는 중", ""),
+    AGENT_STEPS,
+    ("ok", "Claude Code에 플러그인 설치", "", ""),
+    ("run", "Codex에 플러그인 설치", "", ""),
     ("wait", "지난 대화 수집 시작", "", ""),
 ]
 PROG_LAN = [
@@ -757,17 +771,17 @@ def scr_not_in_list():
                            foot(btn("다른 계정으로 로그인", "quiet"), btn("이메일 복사") + btn("다시 로그인", "pri"))),)
 
 
-def scr_w1(steps, at, kind, back=False):
+def scr_w1(steps, at, kind, back=False, company=False):
     left = btn("이전", "quiet") if back else ""
-    return BLANK + (wizard(START, steps, at, w1_body(kind), foot(left, btn("다음", "pri", hit=True))),)
+    return BLANK + (wizard(START, steps, at, w1_body(kind, company), foot(left, btn("다음", "pri", hit=True))),)
 
 
 def scr_w2(steps, at, agents=AGENTS_FOUND):
     return BLANK + (wizard(START, steps, at, w2_body(agents=agents), foot(btn("이전", "quiet"), btn("다음", "pri", hit=True))),)
 
 
-def scr_w3(steps, at):
-    return BLANK + (wizard(START, steps, at, w3_body(), foot(btn("이전", "quiet"), btn("적용", "pri", hit=True))),)
+def scr_w3(steps, at, body=None):
+    return BLANK + (wizard(START, steps, at, body or w3_body(), foot(btn("이전", "quiet"), btn("적용", "pri", hit=True))),)
 
 
 def scr_w4(steps, items):
@@ -869,6 +883,16 @@ case("1-4", "내 서버 없음 · 쌓지 않고 팀원 기억만", [
                item("bob", " " + tag("승인 기다리는 중", "warn"), "memory-bob.example.com", btn("요청 취소", "quiet", sm=True)),
                MATE_CAROL]))),
 ], ("gray", "끝. 승인된 뒤 연결은 4-1 줄 6번째 화면부터 같습니다."))
+case("1-5", "내 서버가 이미 있음 · 회사 서버에도 쌓기", [
+    ("L1", "로그인 중", scr_login(TEAM, 0)),
+    ("W1", "서버 · 회사도 고름", scr_w1(TEAM, 1, "found", company=True)),
+    ("W2", "에이전트", scr_w2(TEAM, 2)),
+    ("W3", "프로젝트 · 서버마다 고르기 · 적용", scr_w3(TEAM, 3, w3_matrix(
+        "내 서버", ("honcho", "web-app", "api-server"), fresh=(), past_label="지난 대화",
+        past_note="내 서버에 429개 · 회사에 33개", past_hint=PAST_HINT))),
+    ("W4", "적용 중 · 회사에 승인 요청", scr_w4(TEAM, PROG_CONNECT_COMPANY)),
+    ("W5", "에이전트에서 할 일", scr_w5(TEAM, TODO_AGENTS)),
+], ("green", "끝. 회사 서버 주인이 승인하면 따로 누를 것 없이 회사에도 쌓입니다. 승인하는 쪽은 3-2 줄 5번째 화면부터 같습니다."))
 
 cat("2. 처음 설정 · 팀 링크 없이 열었을 때")
 case("2-1", "팀에 들어가기", [
@@ -1081,7 +1105,7 @@ RULES = [
     "팀으로 쓸 때 peer 이름은 Google 이메일의 @ 앞부분이라 묻지 않습니다. 혼자 쓰기만 직접 넣습니다.",
     "에이전트 단계는 이 컴퓨터에서 찾은 에이전트 폴더를 한 줄씩 보여 줍니다. 계정마다 폴더가 따로 있으면 줄도 따로 나옵니다.",
     "구독 계정이 여럿이면 모델 단계에서 수를 늘리고, 적용 중에 계정마다 로그인합니다.",
-    "서버를 여럿 고르면 프로젝트 단계 표에 서버마다 열이 하나씩 생깁니다.",
+    "서버를 여럿 고르면 프로젝트 단계가 서버마다 열이 있는 표로 바뀝니다 (1-5, 3-2 줄). 함께 쌓을 서버의 열은 비어 있고, 고른 폴더만 그 서버에 쌓입니다.",
     "새 대화는 적용한 뒤부터 자동으로 쌓이고, 지난 대화는 프로젝트 단계에서 고른 만큼만 쌓입니다.",
     "서버에 넣는 쪽은 '쌓다', 에이전트와 폴더에서 가져오는 쪽은 '수집'이라고 씁니다.",
     "적용 뒤 알림은 화면 아래에 떴다가 사라지고 페이지를 밀지 않습니다. 적용 중 목록도 줄 높이가 그대로입니다.",
