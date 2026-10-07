@@ -62,6 +62,11 @@ a.hit{box-shadow:0 0 0 3px #f0a868 !important}
 .notice.warn{border-color:#e2c48f;background:#fbf1de;color:#5e3d08}
 .toast{position:absolute;left:756px;bottom:28px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:10px 18px 10px 12px;border-radius:10px;background:#2b2a26;color:#fff;font-size:13.5px;box-shadow:0 8px 24px rgba(20,18,14,.25)}
 .toast .ic.ok{background:#3b7449;color:#fff}
+.bell{position:absolute;top:22px;right:32px;width:36px;height:36px;border:1px solid #e3dfd6;border-radius:9px;background:#fff;display:flex;align-items:center;justify-content:center;color:#57534b}
+.bell svg{width:18px;height:18px}
+.bell b{position:absolute;top:-7px;right:-7px;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#b5412a;color:#fff;font-size:11px;font-weight:700;line-height:18px;text-align:center}
+.pop{position:absolute;top:66px;right:24px;width:460px;background:#fff;border:1px solid #e3dfd6;border-radius:12px;box-shadow:0 16px 40px rgba(20,18,14,.18);overflow:hidden}
+.pop-h{padding:12px 16px;border-bottom:1px solid #ece8e0;font-weight:700}
 .switch{width:34px;height:20px;border-radius:10px;background:#c9c3b6;position:relative;flex:none;display:inline-block}
 .switch.on{background:#3b7449}
 .switch:after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)}
@@ -71,11 +76,6 @@ h2.sec{margin:0 0 10px;font-size:13px;font-weight:600;color:#57534b}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#3b7449;flex:none}
 .dot.warn{background:#9a6410}
 .dot.idle{background:#c9c3b6}
-.summary{padding:14px 16px;border-color:#dcc89f;background:#fbf5e8}
-.summary-head{display:flex;align-items:center;gap:10px}
-.summary-head b{font-size:15px;font-weight:650}
-.summary-head small{margin-left:auto;color:#6f6a60;font-size:12.5px}
-.summary ul{margin:8px 0 0;padding-left:19px;color:#57534b;font-size:13.5px}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th{padding:9px 16px;border-bottom:1px solid #e3dfd6;color:#6f6a60;font-size:12.5px;font-weight:500;text-align:left}
 td{padding:12px 16px;border-bottom:1px solid #e3dfd6}
@@ -106,7 +106,6 @@ tr:last-child td{border-bottom:0}
 .list{border:1px solid #e3dfd6;border-radius:12px;background:#fff;overflow:hidden}
 .item{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid #f0ece4}
 .item:last-child{border-bottom:0}
-.item.req{background:#fbf5e8}
 .item.new{background:#f2f7f0}
 .item .v{flex:1;min-width:0}
 .item .end{display:flex;align-items:center;gap:6px}
@@ -228,6 +227,7 @@ ICON = {
     "서버": '<rect x="2.5" y="2.5" width="11" height="4.5" rx="1"/><rect x="2.5" y="9" width="11" height="4.5" rx="1"/><path d="M5 4.75h.01M5 11.25h.01"/>',
     "백업": '<path d="M8 2.5v7M5 7l3 3 3-3"/><path d="M2.5 10.5v3h11v-3"/>',
     "관리자": '<path d="M8 1.75l5 2v4.1c0 3-2.1 5.1-5 6.4-2.9-1.3-5-3.4-5-6.4v-4.1z"/><path d="M5.75 8l1.5 1.5 3-3"/>',
+    "알림": '<path d="M4.25 7a3.75 3.75 0 017.5 0v3l1.25 2H3l1.25-2z"/><path d="M6.5 13.5a1.5 1.5 0 003 0"/>',
 }
 NAVS = {
     "member": ["대시보드", "기억", "기억 설정", "팀", "서버", "백업"],
@@ -276,12 +276,27 @@ def tag(text, kind=""):
     return '<span class="tag' + (" " + kind if kind else "") + '">' + text + "</span>"
 
 
+def bell():
+    return '<span class="bell">' + svg("알림") + "</span>"
+
+
+def ring(screen, n=1, hit=False, items=None):
+    """The page's bell with a count, and with its list open when items are given."""
+    side_html, main_html, modal_html = screen
+    b = '<span class="bell' + (" hit" if hit else "") + '">' + svg("알림") + "<b>" + str(n) + "</b></span>"
+    if items:
+        b += '<div class="pop"><div class="pop-h">알림</div>' + "".join(items) + "</div>"
+    if bell() not in main_html:
+        raise ValueError("no bell on this page")
+    return side_html, main_html.replace(bell(), b, 1), modal_html
+
+
 def head(title, desc, tabs=None, tab_on=None):
     t = ""
     if tabs:
         t = '<div class="tabs">' + "".join(
             '<span class="on">' + x + "</span>" if x == tab_on else "<span>" + x + "</span>" for x in tabs) + "</div>"
-    return '<header class="head"><h1>' + title + "</h1><p>" + desc + "</p>" + t + "</header>"
+    return '<header class="head">' + bell() + "<h1>" + title + "</h1><p>" + desc + "</p>" + t + "</header>"
 
 
 # ---------------------------------------------------------------- pages
@@ -294,12 +309,7 @@ ME = "me@example.com"
 TEAM_ADDR = "team.example.com"
 
 
-def dashboard(rows, notices=None, queue="77% · 남은 일 312개 · 지금 4개", pct=77, share=("켜짐", MY_SERVER)):
-    n = ""
-    if notices:
-        n = ('<div class="card summary"><div class="summary-head"><span class="dot warn"></span><b>확인할 것 '
-             + str(len(notices)) + "개</b><small>방금</small></div><ul>"
-             + "".join("<li>" + x + "</li>" for x in notices) + "</ul></div>")
+def dashboard(rows, queue="77% · 남은 일 312개 · 지금 4개", pct=77, share=("켜짐", MY_SERVER)):
     trs = ""
     for state, name, addr, status, pending, last, total in rows:
         dot = {"on": "dot", "warn": "dot warn", "idle": "dot idle"}[state]
@@ -308,7 +318,7 @@ def dashboard(rows, notices=None, queue="77% · 남은 일 312개 · 지금 4개
                 + '</td><td class="num">' + total + "</td></tr>")
     share_dot = "dot" if share[0] == "켜짐" else "dot idle"
     return (head("대시보드", "이 컴퓨터의 기억이 지금 어떻게 돌고 있는지 봅니다.")
-            + '<div class="body">' + n
+            + '<div class="body">'
             + '<section><h2 class="sec">동기화 현황</h2><div class="card"><table><thead><tr><th>서버</th><th>상태</th>'
               '<th class="num">남은 대화</th><th>마지막 동기화</th><th class="num">서버의 대화</th></tr></thead><tbody>'
             + trs + "</tbody></table></div>"
@@ -374,33 +384,27 @@ def section(title, items, right="", empty=None):
             '<div class="list">' + body + "</div></section>")
 
 
-def team(received=None, mates=None, granted=None, granted_title="내 기억을 여는 팀원"):
-    parts = []
-    if received:
-        parts.append(section("받은 요청 " + str(len(received)) + "개", received))
-    parts.append(section("팀원 기억", mates or []))
+def team(mates=None, granted=None, granted_title="내 기억을 여는 팀원"):
+    parts = [section("팀원 기억", mates or [])]
     if granted is not None:
         parts.append(section(granted_title, granted, empty="아직 없습니다."))
-    return (head("팀", "팀원의 기억에 chat으로 묻고, 내 기억에 온 chat 요청을 승인합니다.")
+    return (head("팀", "팀원의 기억에 chat으로 묻고, 내 기억을 누구에게 열었는지 봅니다.")
             + '<div class="body">' + "".join(parts) + "</div>")
 
 
-MATE_ALICE = item("alice", " " + tag("연결됨", "ok"), "Claude Code·Codex · 열린 프로젝트 2개", btn("끊기", "danger", sm=True))
+SWITCH_ON = '<span class="switch on"></span>'
+MATE_ALICE = item("alice", "", "Claude Code·Codex · 열린 프로젝트 2개", SWITCH_ON)
 MATE_DAVE = item("dave", " " + tag("승인됨", "ok"), "열린 프로젝트 2개", btn("연결", "pri", sm=True))
 MATE_CAROL = item("carol", "", "서버 없음")
 GRANT_ALICE = lambda hit=False: item("alice", " " + tag("chat"), "열린 프로젝트: honcho · web-app", btn("수정", sm=True, hit=hit))
 
 
-def share_page(server, computers, request=None):
-    reqs = []
-    if request:
-        reqs = [request]
+def share_page(server, computers):
     return (head("서버", "내 다른 컴퓨터와 팀원이 이 서버에 닿게 엽니다.", ["기억 서버", "모델", "공유"], "공유")
             + '<div class="body">'
             + '<section class="blk"><div class="blk-h"><h2>공유</h2>' + tag("켜짐", "ok")
             + '<span class="sp"></span>' + btn("공유 끄기") + "</div>"
             + kv("이 서버의 주소", '<span class="mono">https://' + server + "</span>") + "</section>"
-            + (section("받은 요청 " + str(len(reqs)) + "개", reqs) if reqs else "")
             + section("이 서버에 쌓는 컴퓨터", computers) + "</div>")
 
 
@@ -907,20 +911,18 @@ case("3-1", "대화 수집 설정 바꾸기", [
                                   hit_btn="적용")),
     ("D2", "기억 설정 · 적용 뒤", (side("member", "기억 설정"), settings(COLLECT_NOTES, toast="적용했습니다."), "")),
 ], ("gray", "끝. 수정 창은 처음 설정 창과 같습니다. 단계 이름을 눌러 바로 옮겨 갈 수도 있습니다."))
+COMPANY_DASH = page("admin", "대시보드", dashboard([("on", "이 컴퓨터 서버", LOCAL, "최신", "0개", "1분 전", "52,118개")],
+                                                 share=("켜짐", COMPANY)))
 case("3-2", "회사 서버에도 쌓기", [
     ("D2", "기억 설정", (side("member", "기억 설정"), settings(COLLECT_NOTES, hit="collect"), "")),
     ("W1", "서버 · 회사 고름 (수정)", scr_edit(0, w1_body("edit-company"), hit_step=2, collect=COLLECT_NOTES)),
     ("W3", "프로젝트 · 서버마다 고르기 · 적용", scr_edit(2, w3_matrix(), hit_btn="적용", collect=COLLECT_NOTES)),
     ("D2", "기억 설정 · 승인 기다리는 중", (side("member", "기억 설정"),
                                        settings(COLLECT_COMPANY, toast="적용했습니다."), "")),
-    ("D1", "회사 서버 주인 앱 · 대시보드", page("admin", "대시보드", dashboard(
-        [("on", "이 컴퓨터 서버", LOCAL, "최신", "0개", "1분 전", "52,118개")],
-        notices=["이 서버에 대화를 쌓으려는 요청 1개가 있습니다. 서버 → 공유에서 승인하세요."], share=("켜짐", COMPANY)), hit="서버")),
-    ("V1", "회사 서버 주인 앱 · 서버 → 공유", page("admin", "서버", share_page(COMPANY, [
-        item("이 컴퓨터", "", "1분 전에 쌓음"),
-        item("dave의 Windows PC", "", "어제 쌓음", btn("끊기", "danger", sm=True)),
-    ], request=item("me의 MacBook", "", "honcho 폴더의 대화를 쌓으려 합니다 · 방금",
-                    btn("승인", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True), cls="req")))),
+    ("D1", "회사 서버 주인 앱 · 대시보드", ring(COMPANY_DASH, hit=True)),
+    ("N1", "회사 서버 주인 앱 · 알림", ring(COMPANY_DASH, items=[
+        item("me의 MacBook", "", "honcho 폴더의 대화를 쌓으려 합니다 · 방금",
+             btn("승인", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True))])),
     ("D1", "내 대시보드 · 회사 줄 생김", page("member", "대시보드", dashboard(
         [ROW_LOCAL, ("warn", "회사", COMPANY, "동기화 중", "33개", "방금", "-")]))),
 ], ("green", "끝. 승인되면 따로 누를 것 없이 회사 서버에도 쌓이기 시작합니다."))
@@ -982,12 +984,13 @@ cat("4. 팀 · 팀원 기억에 묻기")
 TEAM_A = [MATE_ALICE, MATE_DAVE, item("bob", "", "memory-bob.example.com", btn("chat 요청", sm=True, hit=True)), MATE_CAROL]
 TEAM_B = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("승인 기다리는 중", "warn"), "방금 요청", btn("요청 취소", "quiet", sm=True)), MATE_CAROL]
 TEAM_C = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("승인됨", "ok"), "열린 프로젝트 1개", btn("연결", "pri", sm=True, hit=True)), MATE_CAROL]
-TEAM_D = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("연결됨", "ok"), "Claude Code·Codex · 열린 프로젝트 1개", btn("끊기", "danger", sm=True)), MATE_CAROL]
-BOB_MATES = [item("alice", " " + tag("연결됨", "ok"), "Claude Code · 열린 프로젝트 1개", btn("끊기", "danger", sm=True)),
+TEAM_D = [MATE_ALICE, MATE_DAVE, item("bob", "", "Claude Code·Codex · 열린 프로젝트 1개", SWITCH_ON), MATE_CAROL]
+BOB_MATES = [item("alice", "", "Claude Code · 열린 프로젝트 1개", SWITCH_ON),
              item("dave", "", "memory-dave.example.com", btn("chat 요청", sm=True)),
              item("me", "", MY_SERVER, btn("chat 요청", sm=True)), MATE_CAROL]
-BOB_REQ = item("me", " " + tag("chat"), "내 기억에 chat으로 물으려 합니다 · 방금",
-               btn("승인", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True), cls="req")
+BOB_DASH = page("member", "대시보드", dashboard([ROW_LOCAL], share=("켜짐", "memory-bob.example.com")))
+BOB_ASK = item("me", "", "내 기억에 chat으로 물으려 합니다 · 방금",
+               btn("승인", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True))
 BOB_PROJECTS = [("mobile-app", "~/dev/mobile-app", 58, True), ("design-system", "~/dev/design-system", 21, False),
                 ("notes", "~/Documents/notes", 9, False)]
 
@@ -1003,18 +1006,16 @@ def project_boxes(rows):
 case("4-1", "팀원 기억에 chat 요청 → 승인 → 연결", [
     ("T1", "팀 (내 앱)", page("member", "팀", team(mates=TEAM_A, granted=[GRANT_ALICE()]))),
     ("T1", "팀 · 요청 보냄 (내 앱)", page("member", "팀", team(mates=TEAM_B, granted=[GRANT_ALICE()]))),
-    ("D1", "대시보드 (bob 앱)", page("member", "대시보드", dashboard(
-        [ROW_LOCAL], notices=["승인할 chat 요청 1개가 있습니다. 팀에서 승인하세요."], share=("켜짐", "memory-bob.example.com")),
-        hit="팀")),
-    ("T1", "팀 · 받은 요청 (bob 앱)", page("member", "팀", team(received=[BOB_REQ], mates=BOB_MATES, granted=[]))),
-    ("T2", "chat 승인 창 (bob 앱)", (side("member", "팀"), team(received=[BOB_REQ.replace(" hit", "")], mates=BOB_MATES, granted=[]),
-                                  simple("me에게 내 기억 열기",
+    ("D1", "대시보드 (bob 앱)", ring(BOB_DASH, hit=True)),
+    ("N1", "알림 (bob 앱)", ring(BOB_DASH, items=[BOB_ASK])),
+    ("T2", "chat 승인 창 (bob 앱)", ring(BOB_DASH[:2] + (simple("me에게 내 기억 열기",
                                          '<p class="lead" style="margin-top:4px">me가 chat으로 물을 때 답에 쓸 프로젝트를 고르세요.</p>'
                                          + project_boxes(BOB_PROJECTS),
-                                         foot("", btn("취소", "quiet") + btn("승인", "pri", hit=True))))),
-    ("T1", "팀 · 승인됨 (내 앱)", page("member", "팀", team(mates=TEAM_C, granted=[GRANT_ALICE()]))),
+                                         foot("", btn("취소", "quiet") + btn("승인", "pri", hit=True))),))),
+    ("T1", "팀 · 승인됨 (내 앱)", ring(page("member", "팀", team(mates=TEAM_C, granted=[GRANT_ALICE()])))),
     ("T3", "연결 창 (내 앱)", (side("member", "팀"), team(mates=[m.replace(" hit", "") for m in TEAM_C], granted=[GRANT_ALICE()]),
                              simple("bob의 기억 연결",
+                                    '<p class="lead" style="margin-top:4px">bob의 기억을 내 에이전트에 붙였습니다. 에이전트마다 한 번 로그인하세요.</p>'
                                     '<div class="opts">'
                                     '<div class="agent"><span class="src">C</span><div class="ab"><div class="t">Claude Code ' + tag("추가함", "ok")
                                     + '</div><div class="s">열린 세션에서 <span class="mono">/mcp</span> 를 열고 <span class="mono">team-bob</span> 을 골라 Authenticate를 누르고, 브라우저가 열리면 팀 Google 계정으로 로그인하세요.</div></div></div>'
@@ -1023,7 +1024,7 @@ case("4-1", "팀원 기억에 chat 요청 → 승인 → 연결", [
                                     + btn("Codex 로그인", sm=True, hit=True) + "</div></div>",
                                     foot("", btn("닫기"))))),
     ("T1", "팀 · 연결됨 (내 앱)", page("member", "팀", team(mates=TEAM_D, granted=[GRANT_ALICE()]))),
-], ("green", "끝. 에이전트가 bob 기억의 chat 도구로 묻고, bob이 연 프로젝트의 대화에서만 답을 받습니다."))
+], ("green", "끝. 에이전트가 bob 기억의 chat 도구로 묻고, bob이 연 프로젝트의 대화에서만 답을 받습니다. 잠시 끄려면 bob 줄의 스위치를 끕니다."))
 case("4-2", "내 기억을 연 팀원 바꾸기", [
     ("T1", "팀", page("member", "팀", team(mates=[m.replace(" hit", "") for m in TEAM_A], granted=[GRANT_ALICE(hit=True)]))),
     ("T4", "연 프로젝트 창", (side("member", "팀"), team(mates=[m.replace(" hit", "") for m in TEAM_A], granted=[GRANT_ALICE()]),
@@ -1056,7 +1057,7 @@ CODES = [
     ("S1", "처음 화면 (세 갈래)"), ("S2", "팀 주소"), ("S3", "새 팀 만들기"), ("L1", "로그인 중"), ("L2", "명단에 없음"),
     ("W1", "서버 단계"), ("WM", "모델 단계"), ("W2", "에이전트 단계"), ("W3", "프로젝트 단계 · 적용"), ("WT", "팀원 단계 · 적용"),
     ("W4", "적용 중"), ("W5", "할 일"), ("D1", "대시보드"), ("D2", "기억 설정"), ("M1", "MCP 도구 창"),
-    ("M2", "ChatGPT 기록 창"), ("T1", "팀"), ("T2", "chat 승인 창"), ("T3", "연결 창"), ("T4", "연 프로젝트 창"),
+    ("M2", "ChatGPT 기록 창"), ("N1", "알림 (종)"), ("T1", "팀"), ("T2", "chat 승인 창"), ("T3", "연결 창"), ("T4", "연 프로젝트 창"),
     ("V1", "서버 → 공유"), ("V2", "끊기 확인 창"), ("B1", "백업"), ("B2", "백업 설정 창"), ("G1", "서버 → 모델"),
     ("G2", "모델 창"), ("A1", "관리자"), ("A2", "팀원 더하기 창"), ("A3", "빼기 확인 창"),
 ]
@@ -1066,7 +1067,8 @@ RULES = [
     "단계는 서버 → 에이전트 → 프로젝트입니다. 마지막 단계에 적용이 있고, 확인 화면은 따로 없습니다.",
     "서버 단계에서 고른 것이 뒤 단계를 정합니다. 새로 만들기를 고르면 모델(구독 계정) 단계가 붙고, 쌓지 않기를 고르면 팀원 단계로 바뀝니다.",
     "설치가 끝난 뒤 기억 설정의 수정은 같은 창을 같은 단계로 엽니다. 회사 서버도 이 창의 서버 단계에서 고릅니다.",
-    "메뉴 안의 설정은 모두 창으로 열립니다. 페이지는 지금 상태를 글로만 보여 줍니다.",
+    "메뉴 안의 설정은 모두 창으로 열립니다. 페이지는 지금 상태를 글로 보여 주고, 연결한 팀원 기억만 줄의 스위치로 바로 켜고 끕니다.",
+    "알림은 오른쪽 위 종에만 모입니다. 받은 요청이나 승인된 내 요청처럼 내가 눌러야 할 것만 들어가고, 처리하면 사라집니다.",
     "팀원 명단과 팀원 더하기는 관리자 탭에만 있습니다. 팀원은 Cloudflare라는 말을 보지 않습니다.",
     "쌓지 않기를 고른 사람의 메뉴에는 기억 · 서버 탭이 없습니다. 기억 설정의 수정에서 서버를 고르면 생깁니다.",
     "팀으로 쓸 때 peer 이름은 Google 이메일의 @ 앞부분이라 묻지 않습니다. 혼자 쓰기만 직접 넣습니다.",
