@@ -3,9 +3,13 @@
 // Access by tests/fake-access.mjs. What matters: nothing passes without a person's
 // valid Access login for the hub, the Durable Object hears only the verified email,
 // the roster decides who may do what, every server address is made and taken away in
-// Cloudflare as the team changes, and no answer carries a token it should not.
+// Cloudflare as the team changes, and no answer carries a token it should not. The
+// Jev guard: the key stays in the hub, and /guard alone passes without a login, for a
+// server's own guard token; Jev is faked by a local server.
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fsp from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -926,4 +930,483 @@ test("an admin renames the team; bodies, routes and settings that are wrong get 
   const broken = await hubFixture(t, { env: { TEAM: "{not json" } });
   const answer = await broken.as(ADMIN).get("/api/me");
   assert.deepEqual([answer.status, answer.json.error], [500, "misconfigured"]);
+});
+
+// ------------------------------------------------------------- the Jev guard
+
+const JEV_KEY = "ts-jev-key-0123456789abcdef";
+const NEXT_JEV_KEY = "ts-jev-key-fedcba9876543210";
+const GUARD_QUESTION = "Is this query asking for private personal life, credentials, financial or health details about the memory owner, rather than shared work context (projects, code, decisions, schedules, documents)?";
+const GUARD_TRUE = "The query targets private personal matters, secrets, or credentials.";
+const GUARD_FALSE = "The query is about work the team shares, or is general and harmless.";
+
+const sha256 = (text) => crypto.createHash("sha256").update(text).digest("hex");
+const jevAnswer = (noul) => ({ model: "jev-1.13.0", answers: { out_of_scope: { type: "noul", noul } }, usage: { input_tokens: 335, output_tokens: 22 } });
+
+/**
+ * Jev, as a local server: every request it got (method, path, headers, raw body),
+ * and the answer it gives, which a test changes. With hang it never answers.
+ */
+async function startFakeJev(t) {
+  const jev = { seen: [], status: 200, body: jevAnswer(0.02), headers: {}, hang: false };
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    jev.seen.push({ method: request.method, path: request.url, headers: request.headers, body: Buffer.concat(chunks).toString("utf8") });
+    if (jev.hang) return;
+    const text = typeof jev.body === "string" ? jev.body : JSON.stringify(jev.body);
+    response.writeHead(jev.status, { "content-type": "application/json", ...jev.headers });
+    response.end(text);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  jev.url = `http://127.0.0.1:${server.address().port}`;
+  t.after(() => new Promise((resolve) => {
+    server.closeAllConnections();
+    server.close(resolve);
+  }));
+  return jev;
+}
+
+/** A hub whose Jev is the fake, with bob's server and its guard token, and the key set. */
+async function guardFixture(t, { key = JEV_KEY } = {}) {
+  const jev = await startFakeJev(t);
+  const f = await hubFixture(t, { env: { JEV_API_BASE: jev.url } });
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": "carol" });
+  const server = (await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE })).json.server;
+  const issued = await issueGuard(f, "bob@example.com");
+  assert.equal(issued.status, 200);
+  if (key) assert.equal((await f.as(ADMIN).put("/api/admin/jev", { key })).status, 200);
+  /** POST /guard as a server does: no Access login, the guard token as a bearer. */
+  const ask = (body, { token = issued.json.token, method = "POST", headers = {} } = {}) => f.send("/guard", {
+    method,
+    body,
+    headers: { ...(token === null ? {} : { authorization: `Bearer ${token}` }), ...headers },
+  });
+  return { ...f, jev, server, token: issued.json.token, ask };
+}
+
+/** Every value the hub keeps, as one string, to look for what must never be kept. */
+const kept = (f) => JSON.stringify([...f.data.entries()]);
+
+/** The tunnel `email`'s server runs now, as the hub keeps it; undefined without a server. */
+const ownTunnel = (f, email) => [...f.data.entries()].find(([key, value]) => key.startsWith("server:") && value.owner === email)?.[1].tunnelId;
+
+/** POST /api/me/guard from `email`'s computer, naming the tunnel it runs (its server's, unless `body` says otherwise). */
+const issueGuard = (f, email, body) => f.as(email).post("/api/me/guard", body ?? { tunnelId: ownTunnel(f, email) });
+
+test("an admin sets, replaces and clears the team's Jev key, and no answer carries it", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob" });
+  const answers = [];
+  const admin = async (method, body) => {
+    const answer = await f.send("/api/admin/jev", { method, as: ADMIN, body });
+    answers.push(answer.text);
+    return answer;
+  };
+
+  const none = await admin("GET");
+  assert.deepEqual([none.status, none.json], [200, { set: false, setAt: null, setBy: null }]);
+
+  const set = await admin("PUT", { key: `  ${JEV_KEY}\n` });
+  assert.equal(set.status, 200);
+  assert.deepEqual(Object.keys(set.json), ["set", "setAt", "setBy"]);
+  assert.equal(set.json.set, true);
+  assert.equal(set.json.setBy, ADMIN);
+  assert.ok(!Number.isNaN(Date.parse(set.json.setAt)));
+  assert.deepEqual(f.data.get("jev"), { key: JEV_KEY, setAt: set.json.setAt, setBy: ADMIN }, "kept trimmed");
+  assert.deepEqual((await admin("GET")).json, set.json);
+
+  const replaced = await admin("PUT", { key: NEXT_JEV_KEY });
+  assert.equal(replaced.status, 200);
+  assert.equal(f.data.get("jev").key, NEXT_JEV_KEY);
+
+  for (const key of ["", "   ", "short-7", "has a space", "tab\tin-it-here", "탭이없는한글키값입니다", "é".repeat(10), "x".repeat(1025), 12345678, null, ["x".repeat(10)]]) {
+    const refused = await admin("PUT", { key });
+    assert.deepEqual([refused.status, refused.json.error], [400, "bad_request"], JSON.stringify(key));
+  }
+  assert.equal((await admin("PUT", {})).status, 400);
+  assert.equal(f.data.get("jev").key, NEXT_JEV_KEY, "a refused key changes nothing");
+  // Every printable ASCII character but the space, from 8 to 1024 of them.
+  for (const key of ["x".repeat(8), "x".repeat(1024), `quote"dollar$hash#back\\slash'tick\`~!`]) {
+    assert.equal((await admin("PUT", { key })).status, 200, key.slice(0, 20));
+    assert.equal(f.data.get("jev").key, key);
+  }
+  assert.equal((await admin("PUT", { key: NEXT_JEV_KEY })).status, 200);
+
+  // Only an admin, with the same refusals as the other admin routes.
+  for (const [email, code] of [["bob@example.com", "not_admin"], ["stranger@example.com", "not_member"]]) {
+    for (const method of ["GET", "PUT", "DELETE"]) {
+      const answer = await f.send("/api/admin/jev", { method, as: email, body: method === "PUT" ? { key: JEV_KEY } : undefined });
+      assert.deepEqual([answer.status, answer.json.error], [403, code], `${method} ${email}`);
+      answers.push(answer.text);
+    }
+  }
+  assert.equal(f.data.get("jev").key, NEXT_JEV_KEY);
+  assert.equal((await f.send("/api/admin/jev")).status, 401);
+  assert.equal((await f.as(ADMIN).post("/api/admin/jev", { key: JEV_KEY })).status, 405);
+
+  // Nothing a member or an admin reads carries it either.
+  for (const pathname of ["/api/me", "/api/team", "/api/admin/people", "/"]) {
+    answers.push((await f.as(ADMIN).get(pathname)).text, (await f.as("bob@example.com").get(pathname)).text);
+  }
+  for (const pathname of ["/api/jev", "/api/me/jev"]) {
+    assert.equal((await f.as("bob@example.com").get(pathname)).status, 404, `${pathname}: no route hands the key out`);
+  }
+
+  const cleared = await admin("DELETE");
+  assert.deepEqual([cleared.status, cleared.json], [200, { set: false, setAt: null, setBy: null }]);
+  assert.equal(f.data.has("jev"), false);
+  assert.equal((await admin("DELETE")).status, 200, "clearing twice is fine");
+  assert.deepEqual((await admin("GET")).json, { set: false, setAt: null, setBy: null });
+
+  for (const text of answers) {
+    assert.equal(text.includes(JEV_KEY) || text.includes(NEXT_JEV_KEY), false, text.slice(0, 120));
+  }
+});
+
+test("POST /api/me/guard gives the caller's own server a guard token; a new one ends the old", async (t) => {
+  const jev = await startFakeJev(t);
+  const f = await hubFixture(t, { env: { JEV_API_BASE: jev.url } });
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": "carol" });
+
+  assert.deepEqual([(await f.send("/api/me/guard", { method: "POST" })).status], [401]);
+  const stranger = await issueGuard(f, "stranger@example.com");
+  assert.deepEqual([stranger.status, stranger.json.error], [403, "not_member"]);
+  const serverless = await issueGuard(f, "carol@example.com");
+  assert.deepEqual([serverless.status, serverless.json.error], [404, "no_server"]);
+  assert.equal((await f.as("bob@example.com").get("/api/me/guard")).status, 405);
+
+  const bobs = (await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE })).json.server;
+  // Another site's page cannot get one with bob's cookie.
+  const crossSite = await f.as("bob@example.com").post("/api/me/guard", {}, { headers: { origin: "https://evil.example" } });
+  assert.deepEqual([crossSite.status, crossSite.json.error], [403, "cross_site"]);
+
+  // Only the computer running the server's tunnel gets a token, and it has to say which.
+  const unnamed = await issueGuard(f, "bob@example.com", {});
+  assert.deepEqual([unnamed.status, unnamed.json.error], [400, "bad_request"]);
+  const elsewhere = await issueGuard(f, "bob@example.com", { tunnelId: "0b5e6f1c-0000-4000-8000-000000000000" });
+  assert.deepEqual([elsewhere.status, elsewhere.json.error], [409, "other_computer"]);
+  assert.equal(elsewhere.text.includes(bobs.tunnelId), false, "the answer does not name the right tunnel");
+  assert.equal("guardHash" in f.data.get(`server:${bobs.host}`), false);
+
+  const first = await issueGuard(f, "bob@example.com");
+  assert.equal(first.status, 200);
+  assert.deepEqual(Object.keys(first.json), ["url", "token", "host", "jev"]);
+  assert.deepEqual({ ...first.json, token: "t" }, { url: `https://${HUB_HOST}/guard`, token: "t", host: bobs.host, jev: { set: false } });
+  assert.match(first.json.token, /^[0-9a-f]{64}$/);
+  assert.equal(first.headers.get("cache-control"), "no-store");
+  const record = f.data.get(`server:${bobs.host}`);
+  assert.equal(record.guardHash, sha256(first.json.token));
+  assert.ok(!Number.isNaN(Date.parse(record.guardIssuedAt)));
+  assert.deepEqual({ ...record, guardHash: "h", guardIssuedAt: "i" }, { ...bobs, guardHash: "h", guardIssuedAt: "i" }, "nothing else of the server changes");
+  assert.deepEqual(f.data.get(`guard:${record.guardHash}`), { host: bobs.host });
+  assert.equal(kept(f).includes(first.json.token), false, "the hub keeps the hash, not the token");
+
+  // The owner sees when the token was made, never its hash, nor the token again.
+  const me = await f.as("bob@example.com").get("/api/me");
+  assert.deepEqual(me.json.servers, [{ ...bobs, guardIssuedAt: record.guardIssuedAt }]);
+  for (const answer of [me, await f.as("carol@example.com").get("/api/team"), await f.as(ADMIN).get("/api/admin/people")]) {
+    assert.equal(answer.text.includes(first.json.token) || answer.text.includes(record.guardHash), false);
+  }
+  const again = await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE });
+  assert.equal(again.json.error, "server_exists");
+  assert.equal("guardHash" in again.json.server, false);
+
+  assert.equal((await f.send("/guard", { method: "POST", body: { query: "회의록 요약" }, headers: { authorization: `Bearer ${first.json.token}` } })).status, 200);
+
+  // A new token: the old one stops, the new one works, and with a key the answer says so.
+  assert.equal((await f.as(ADMIN).put("/api/admin/jev", { key: JEV_KEY })).status, 200);
+  await pause(5);
+  const second = await issueGuard(f, "bob@example.com");
+  assert.equal(second.status, 200);
+  assert.notEqual(second.json.token, first.json.token);
+  assert.deepEqual(second.json.jev, { set: true });
+  assert.equal(second.text.includes(JEV_KEY), false);
+  const next = f.data.get(`server:${bobs.host}`);
+  assert.equal(next.guardHash, sha256(second.json.token));
+  assert.ok(next.guardIssuedAt > record.guardIssuedAt);
+  assert.equal(f.data.has(`guard:${record.guardHash}`), false, "the old index entry is gone");
+  assert.deepEqual([...f.data.keys()].filter((key) => key.startsWith("guard:")), [`guard:${next.guardHash}`]);
+  const old = await f.send("/guard", { method: "POST", body: { query: "회의록 요약" }, headers: { authorization: `Bearer ${first.json.token}` } });
+  assert.deepEqual([old.status, old.json.error], [401, "bad_token"]);
+  const fresh = await f.send("/guard", { method: "POST", body: { query: "회의록 요약" }, headers: { authorization: `Bearer ${second.json.token}` } });
+  assert.deepEqual([fresh.status, fresh.json.judged], [200, true]);
+  assert.equal(f.blocks.threw, 0);
+});
+
+test("POST /guard, with no Access login, asks Jev with the team's key and says whether the question may go on", async (t) => {
+  const f = await guardFixture(t);
+  const question = { tool: "chat", caller: "carol@example.com", workspace: WORKSPACE, query: "밥의 다음 주 배포 일정은?" };
+  const names = f.names.length;
+
+  const allowed = await f.ask(question);
+  assert.equal(allowed.status, 200);
+  assert.deepEqual(allowed.json, { judged: true, allowed: true, score: 0.02, threshold: 0.7 });
+  assert.equal(allowed.headers.get("cache-control"), "no-store");
+  assert.ok(f.names.length > names, "it reached the Durable Object without any assertion");
+
+  // What Jev got: the documented request, the key as a bearer, and nothing else of the team.
+  assert.equal(f.jev.seen.length, 1);
+  const [call] = f.jev.seen;
+  assert.equal(call.method, "POST");
+  assert.equal(call.path, "/v1/systemone");
+  assert.equal(call.headers.authorization, `Bearer ${JEV_KEY}`);
+  assert.equal(call.headers["content-type"], "application/json");
+  assert.equal(call.headers.accept, "application/json");
+  assert.equal(call.body, JSON.stringify({
+    state: { tool: "chat", caller: "carol@example.com", workspace: WORKSPACE, query: "밥의 다음 주 배포 일정은?" },
+    model: "jev-latest",
+    questions: { out_of_scope: { type: "noul", instructions: GUARD_QUESTION, criteria: { true: GUARD_TRUE, false: GUARD_FALSE } } },
+  }));
+
+  // The Durable Object heard x-hub-guard alone, whatever x-hub-* the caller sent.
+  const spoofed = await f.ask(question, { headers: { "x-hub-email": ADMIN, "x-hub-guard": "0", "X-Hub-Admin": "true" } });
+  assert.equal(spoofed.status, 200);
+  const heard = f.received.at(-1).headers;
+  assert.deepEqual([...heard.keys()].filter((name) => name.startsWith("x-hub-")), ["x-hub-guard"]);
+  assert.equal(heard.get("x-hub-guard"), "1");
+
+  // A score of 0.7 or more stops the question.
+  for (const [noul, verdict] of [[0.93, false], [0.7, false], [0.6999, true], [0, true]]) {
+    f.jev.body = jevAnswer(noul);
+    const judged = await f.ask(question);
+    assert.deepEqual([judged.status, judged.json], [200, { judged: true, allowed: verdict, score: noul, threshold: 0.7 }], String(noul));
+  }
+
+  // Only the query is needed; what is left out is left out of Jev's state too.
+  f.jev.body = jevAnswer(0.1);
+  assert.equal((await f.ask({ query: "이번 스프린트 결정 사항", tool: null })).status, 200);
+  assert.deepEqual(JSON.parse(f.jev.seen.at(-1).body).state, { query: "이번 스프린트 결정 사항" });
+  assert.equal((await f.ask({ query: "x".repeat(16_000), caller: "c".repeat(320), tool: "", workspace: "w" })).status, 200);
+  assert.deepEqual(JSON.parse(f.jev.seen.at(-1).body).state, { tool: "", caller: "c".repeat(320), workspace: "w", query: "x".repeat(16_000) });
+
+  // A server's call carries no browser cookie, so the cross-site check does not apply.
+  const fromPage = await f.ask(question, { headers: { origin: "https://evil.example", "sec-fetch-site": "cross-site" } });
+  assert.equal(fromPage.status, 200);
+
+  // The question is never kept, and no answer carries the key.
+  assert.equal(kept(f).includes("배포 일정"), false);
+  assert.equal(kept(f).includes("스프린트"), false);
+  for (const answer of [allowed, spoofed, fromPage]) assert.equal(answer.text.includes(JEV_KEY), false);
+});
+
+test("without a Jev key, /guard lets the question go on unjudged and asks no one", async (t) => {
+  const f = await guardFixture(t, { key: null });
+  const answer = await f.ask({ query: "회의록 요약해 줘" });
+  assert.deepEqual([answer.status, answer.json], [200, { judged: false, allowed: true, score: null, reason: "no_key" }]);
+  assert.equal(f.jev.seen.length, 0);
+
+  // A key cleared later is the same.
+  assert.equal((await f.as(ADMIN).put("/api/admin/jev", { key: JEV_KEY })).status, 200);
+  assert.equal((await f.ask({ query: "회의록 요약해 줘" })).json.judged, true);
+  assert.equal((await f.as(ADMIN).delete("/api/admin/jev")).status, 200);
+  assert.deepEqual((await f.ask({ query: "회의록 요약해 줘" })).json, { judged: false, allowed: true, score: null, reason: "no_key" });
+  assert.equal(f.jev.seen.length, 1);
+});
+
+test("/guard refuses another method, a missing or wrong token, and a wrong body", async (t) => {
+  const f = await guardFixture(t);
+  for (const method of ["GET", "PUT", "DELETE"]) {
+    const answer = await f.ask(method === "PUT" ? { query: "x" } : undefined, { method });
+    assert.deepEqual([answer.status, answer.json.error], [405, "method_not_allowed"], method);
+  }
+
+  const unknown = crypto.randomBytes(32).toString("hex");
+  for (const headers of [
+    {},
+    { authorization: "" },
+    { authorization: "Bearer" },
+    { authorization: `Basic ${f.token}` },
+    { authorization: `Bearer ${f.token.slice(1)}` },
+    { authorization: `Bearer ${f.token}x` },
+    { authorization: `Bearer ${unknown}` },
+    { authorization: `Bearer ${f.data.get(`server:${f.server.host}`).guardHash}` },
+  ]) {
+    const answer = await f.ask({ query: "x" }, { token: null, headers });
+    assert.deepEqual([answer.status, answer.json.error], [401, "bad_token"], JSON.stringify(headers).slice(0, 60));
+  }
+  assert.equal((await f.ask({ query: "x" }, { token: null, headers: { authorization: `bearer  ${f.token}` } })).status, 200, "the scheme in any case");
+
+  const seen = f.jev.seen.length;
+  for (const body of [
+    {},
+    { query: "" },
+    { query: "  \n " },
+    { query: 5 },
+    { query: ["x"] },
+    { query: "x".repeat(16_001) },
+    { query: "x", tool: 5 },
+    { query: "x", caller: "c".repeat(321) },
+    { query: "x", workspace: { name: "memory" } },
+    "[1, 2]",
+    "{",
+  ]) {
+    const answer = await f.ask(body);
+    assert.deepEqual([answer.status, answer.json.error], [400, "bad_request"], JSON.stringify(body).slice(0, 60));
+  }
+  assert.equal(f.jev.seen.length, seen, "nothing refused reached Jev");
+});
+
+test("a guard token stops with its server: removed, moved to another computer, or its owner off the roster", async (t) => {
+  const f = await guardFixture(t);
+  const ok = async (token) => (await f.ask({ query: "주간 회의 결정 사항" }, { token })).status;
+  assert.equal(await ok(f.token), 200);
+
+  // Moved: the replaced record has no guard token, and the old computer's stops.
+  const oldHash = sha256(f.token);
+  const moved = await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE, replace: true });
+  assert.equal(moved.status, 200);
+  assert.equal("guardHash" in moved.json.server || "guardIssuedAt" in moved.json.server, false);
+  const record = f.data.get(`server:${f.server.host}`);
+  assert.equal("guardHash" in record || "guardIssuedAt" in record, false);
+  assert.equal(f.data.has(`guard:${oldHash}`), false);
+  const stale = await f.ask({ query: "x" });
+  assert.deepEqual([stale.status, stale.json.error], [401, "bad_token"]);
+  const renewed = (await issueGuard(f, "bob@example.com")).json.token;
+  assert.equal(await ok(renewed), 200);
+  // The computer it left still names the old tunnel: no token, and the new one's stays.
+  assert.notEqual(moved.json.server.tunnelId, f.server.tunnelId);
+  const left = await issueGuard(f, "bob@example.com", { tunnelId: f.server.tunnelId });
+  assert.deepEqual([left.status, left.json.error], [409, "other_computer"]);
+  assert.equal(await ok(renewed), 200);
+
+  // Removed: the index entry goes with the record.
+  assert.equal((await f.as("bob@example.com").delete(`/api/servers/${f.server.host}`)).status, 200);
+  assert.deepEqual([...f.data.keys()].filter((key) => key.startsWith("guard:")), []);
+  assert.equal(await ok(renewed), 401);
+  assert.equal((await issueGuard(f, "bob@example.com")).json.error, "no_server");
+
+  // Carol taken off the team: her server goes, and with it her token.
+  const carols = (await f.as("carol@example.com").post("/api/servers", { workspace: WORKSPACE })).json.server;
+  const carolToken = (await issueGuard(f, "carol@example.com")).json.token;
+  assert.equal(await ok(carolToken), 200);
+  assert.equal((await f.as(ADMIN).delete("/api/admin/people/carol%40example.com")).status, 200);
+  assert.equal(f.data.has(`server:${carols.host}`), false);
+  assert.equal(await ok(carolToken), 401);
+
+  // A server whose owner is no longer on the roster (its record outlived them) is refused.
+  await f.addPeople({ "dave@example.com": "dave" });
+  await f.as("dave@example.com").post("/api/servers", { workspace: WORKSPACE });
+  const daveToken = (await issueGuard(f, "dave@example.com")).json.token;
+  f.data.delete("person:dave@example.com");
+  const orphan = await f.ask({ query: "x" }, { token: daveToken });
+  assert.deepEqual([orphan.status, orphan.json.error], [403, "not_member"]);
+  assert.equal(f.blocks.threw, 0);
+});
+
+test("a server asks /guard at most 120 times in any minute; others are not held back", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const f = await guardFixture(t, { key: null });
+  await f.as("carol@example.com").post("/api/servers", { workspace: WORKSPACE });
+  const carolToken = (await issueGuard(f, "carol@example.com")).json.token;
+
+  for (let index = 0; index < 120; index += 1) {
+    const answer = await f.ask({ query: `q${index}` });
+    assert.equal(answer.status, 200, `call ${index + 1}`);
+    if (index === 59) t.mock.timers.tick(30_000);
+  }
+  const limited = await f.ask({ query: "one more" });
+  assert.deepEqual([limited.status, limited.json.error], [429, "rate_limited"]);
+  assert.equal((await f.ask({ query: "x" }, { token: carolToken })).status, 200, "the count is per server");
+  // A new token is the same server.
+  const renewed = (await issueGuard(f, "bob@example.com")).json.token;
+  assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 429);
+
+  // Rolling: the first 60 calls leave the window a minute after they were made.
+  t.mock.timers.tick(30_001);
+  for (let index = 0; index < 60; index += 1) assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 200);
+  assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 429);
+  t.mock.timers.tick(30_000);
+  assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 200);
+});
+
+test("when Jev fails, /guard answers 502 jev_failed, and never with the key", async (t) => {
+  const f = await guardFixture(t);
+  const question = { query: "지난 회의 요약" };
+  const failed = async (pattern, label) => {
+    const answer = await f.ask(question);
+    assert.deepEqual([answer.status, answer.json.error], [502, "jev_failed"], label);
+    assert.match(answer.json.detail, pattern, label);
+    assert.equal(answer.text.includes(JEV_KEY), false, label);
+    return answer;
+  };
+
+  // Jev's own body is not passed on, even when it echoes the key.
+  f.jev.status = 500;
+  f.jev.body = { error: `invalid key ${JEV_KEY}` };
+  await failed(/^Jev answered HTTP 500$/, "500");
+  f.jev.status = 401;
+  await failed(/HTTP 401/, "401");
+
+  // A redirect is not followed, so the key goes nowhere else.
+  f.jev.status = 302;
+  f.jev.headers = { location: `${f.jev.url}/elsewhere` };
+  const seen = f.jev.seen.length;
+  await failed(/HTTP 302/, "redirect");
+  assert.equal(f.jev.seen.length, seen + 1);
+  f.jev.headers = {};
+
+  f.jev.status = 200;
+  for (const [body, label] of [
+    ["<html>busy</html>", "not JSON"],
+    [{ answers: {} }, "no answer"],
+    [{ answers: { out_of_scope: { type: "noul" } } }, "no score"],
+    [{ answers: { out_of_scope: { type: "noul", noul: "0.1" } } }, "a string"],
+    [{ answers: { out_of_scope: { type: "noul", noul: null } } }, "null"],
+    ['{"answers":{"out_of_scope":{"noul":1e999}}}', "infinite"],
+    ["null", "null body"],
+  ]) {
+    f.jev.body = body;
+    await failed(/^Jev's answer (was not JSON|held no score for the question)$/, label);
+  }
+
+  // Too slow: the hub waits 10 s (shortened here) and gives up.
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  const waits = [];
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    waits.push(ms);
+    return timeout(ms === 10_000 ? 100 : ms);
+  });
+  f.jev.hang = true;
+  await failed(/^Jev did not answer within 10 s$/, "timeout");
+  assert.ok(waits.includes(10_000));
+  f.jev.hang = false;
+  AbortSignal.timeout.mock.restore();
+
+  // Nothing listening.
+  f.env.JEV_API_BASE = "http://127.0.0.1:9";
+  await failed(/^Jev could not be reached$/, "unreachable");
+
+  // After all that, the question was never kept and a working Jev answers again.
+  f.env.JEV_API_BASE = f.jev.url;
+  f.jev.body = jevAnswer(0.01);
+  assert.equal((await f.ask(question)).json.allowed, true);
+  assert.equal(kept(f).includes("지난 회의"), false);
+  assert.equal(f.blocks.threw, 0);
+});
+
+test("only /guard itself passes without a login: anything beside or under it still needs Access", async (t) => {
+  const f = await guardFixture(t);
+  const before = f.names.length;
+  for (const pathname of ["/guard/", "/guard/x", "/guardx", "/Guard", "//guard", "/%67uard", "/api/me/guard", "/api/admin/jev", "/"]) {
+    for (const method of ["GET", "POST"]) {
+      const answer = await f.send(pathname, { method, headers: { authorization: `Bearer ${f.token}` }, body: method === "POST" ? { query: "x" } : undefined });
+      assert.equal(answer.status, 401, `${method} ${pathname}`);
+    }
+  }
+  assert.equal(f.names.length, before, "nothing without a login reached the Durable Object");
+
+  // With a login, what is under /guard is not a route of the hub.
+  const under = await f.as("bob@example.com").post("/guard/x", { query: "x" });
+  assert.deepEqual([under.status, under.json.error], [404, "not_found"]);
+  // A query string does not change the path.
+  assert.equal((await f.send("/guard?from=test", { method: "POST", body: { query: "x" }, headers: { authorization: `Bearer ${f.token}` } })).status, 200);
+
+  // Someone logged in cannot make another route look like /guard.
+  const me = await f.send("/api/me", { as: "bob@example.com", headers: { "x-hub-guard": "1" } });
+  assert.deepEqual([me.status, me.json.email], [200, "bob@example.com"]);
+  assert.deepEqual([...f.received.at(-1).headers.keys()].filter((name) => name.startsWith("x-hub-")), ["x-hub-email"]);
+  // Nor does a login make /guard take anything but a guard token.
+  const loggedIn = await f.send("/guard", { method: "POST", as: ADMIN, body: { query: "x" } });
+  assert.deepEqual([loggedIn.status, loggedIn.json.error], [401, "bad_token"]);
 });

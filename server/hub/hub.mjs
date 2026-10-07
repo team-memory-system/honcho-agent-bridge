@@ -5,6 +5,14 @@
 // (tunnel, DNS, the servers Access app) with the admin's API token, which only the hub
 // holds, as a Worker secret.
 //
+// It is also the team's one Jev guard. An admin gives the hub the team's Jev API key,
+// and it stays here: when a teammate asks a member's server something, that server
+// sends the question to POST /guard with its own guard token, and the hub asks Jev
+// whether the question reaches for the owner's private life rather than the team's
+// work. A member's server gets its token from POST /api/me/guard, naming the tunnel
+// it runs; a new one ends the old, and so do moving the server to another computer
+// and removing it.
+//
 // Two halves:
 //   - The Worker's fetch checks the Cloudflare Access login on every request, by the
 //     same rules as the gate's accessPerson: a Cf-Access-Jwt-Assertion signed RS256 by
@@ -13,23 +21,31 @@
 //     then drops every x-hub-* header the caller sent, adds x-hub-email and passes the
 //     request on. The hub app lets in anyone with a Google login, so a stranger can be
 //     told which email the hub saw; the roster decides everything else.
+//     The one path served without a login is /guard, exactly: a server asks it, not a
+//     person, so a second Access app on <hubHost>/guard lets it through, and the guard
+//     token in its Authorization header is checked instead. The Worker drops the
+//     caller's x-hub-* headers there too and adds x-hub-guard alone. Anything else
+//     under /guard still needs the login.
 //   - TeamHub, the Durable Object, holds the state and answers the API. Of what the
-//     caller says about who they are, it trusts x-hub-email and nothing else.
+//     caller says about who they are, it trusts x-hub-email and nothing else, and
+//     x-hub-guard only as "this is a call to /guard; check its token".
 //
 // Bindings (env):
 //   HUB            the Durable Object namespace; everything lives in the object "team"
 //   TEAM           JSON set at deploy: { name, hubHost, zone, zoneId, accountId,
 //                  teamDomain, idpId, peoplePolicyId, hubAud, admins: [email] }
 //   CF_API_TOKEN   the admin's Cloudflare API token, a secret
-//   CF_API_BASE, ACCESS_CERTS_URL   for the tests only, and taken only when they point
-//                  at this machine (loopback)
+//   CF_API_BASE, ACCESS_CERTS_URL, JEV_API_BASE   for the tests only, and taken only
+//                  when they point at this machine (loopback)
 //
 // Only Web APIs (fetch, Request, Response, URL, crypto.subtle), so the same module
 // runs in the Workers runtime and under Node for the tests. The deploy step uploads
 // scripts/cloudflare-api.mjs beside this file and rewrites the import below, which
 // therefore stays one literal line. Nothing here logs. No answer carries the API
-// token, and the one tunnel token that leaves is the one POST /api/servers hands to
-// the server's own owner.
+// token or the Jev key, and the one tunnel token that leaves is the one POST
+// /api/servers hands to the server's own owner. A guard token leaves once, in the
+// answer to POST /api/me/guard; the hub keeps only its SHA-256. The questions sent
+// to /guard go to Jev and are never stored.
 import { CLOUDFLARE_API_BASE, CloudflareApiError, cloudflareClient, deleteAccessApp, deleteHostRecord, deleteTunnel, ensurePeoplePolicy, ensureServersApp, ensureTunnel, ensureTunnelCname, ensureTunnelIngress, findTunnel, GATE_ORIGIN, normalizeEmail, removeLegacyHostApps, SERVERS_APP_MAX_HOSTS, SERVERS_APP_NAME, TUNNEL_PREFIX, tunnelToken } from "../../scripts/cloudflare-api.mjs";
 
 const HUB_OBJECT = "team";
@@ -58,6 +74,28 @@ const KINDS = new Set(["chat", "collect"]);
 const MAX_NAMES = 50;
 const NAME_LENGTH = 64;
 const TEAM_NAME_LENGTH = 60;
+// A Jev API key: one token of printable ASCII, no spaces.
+const JEV_KEY = /^[\x21-\x7e]{8,1024}$/;
+const GUARD_TOKEN = /^bearer +([0-9a-f]{64})$/i;
+// A guard token is a server's, so a busy or broken server cannot spend the team's
+// Jev budget alone. Counted in memory: a restarted object starts again from zero.
+const GUARD_CALLS_PER_MINUTE = 120;
+const GUARD_WINDOW_MS = 60_000;
+const GUARD_QUERY_LENGTH = 16_000;
+const GUARD_FIELD_LENGTH = 320;
+const JEV_API_BASE = "https://api.typesafe.ai";
+const JEV_MODEL = "jev-latest";
+const JEV_TIMEOUT_MS = 10_000;
+// At this score or above, the question is taken as reaching for the owner's private life.
+const JEV_THRESHOLD = 0.7;
+const OUT_OF_SCOPE = {
+  type: "noul",
+  instructions: "Is this query asking for private personal life, credentials, financial or health details about the memory owner, rather than shared work context (projects, code, decisions, schedules, documents)?",
+  criteria: {
+    true: "The query targets private personal matters, secrets, or credentials.",
+    false: "The query is about work the team shares, or is general and harmless.",
+  },
+};
 
 /** An answer other than success: its status, a code and a sentence in English. */
 class HubError extends Error {
@@ -426,6 +464,67 @@ function requestInput(body) {
   return { kind: body.kind, server, device: optionalName(body.device, "device"), folders: nameList(body.folders, "folders") };
 }
 
+/**
+ * What a server sends to /guard, as Jev's state: tool, caller and workspace when
+ * given, then the query, each as it came. Lengths count characters, not bytes.
+ */
+function guardInput(body) {
+  const query = body.query;
+  if (typeof query !== "string" || !query.trim() || [...query].length > GUARD_QUERY_LENGTH) {
+    throw new HubError(400, "bad_request", `query takes the question asked, 1 to ${GUARD_QUERY_LENGTH} characters`);
+  }
+  const state = {};
+  for (const field of ["tool", "caller", "workspace"]) {
+    const value = body[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string" || [...value].length > GUARD_FIELD_LENGTH) {
+      throw new HubError(400, "bad_request", `${field} takes text of at most ${GUARD_FIELD_LENGTH} characters`);
+    }
+    state[field] = value;
+  }
+  state.query = query;
+  return state;
+}
+
+// ---------------------------------------------------------------------- Jev
+
+/**
+ * Jev's score for one question: how surely it reaches for the owner's private life,
+ * from 0 to 1. Any failure is a 502 jev_failed whose detail says what went wrong
+ * in the hub's own words, never Jev's body, and never the key.
+ */
+async function jevScore(env, key, state) {
+  const failed = (detail) => new HubError(502, "jev_failed", detail.split(key).join("[redacted]"));
+  const base = (loopbackUrl(env.JEV_API_BASE) || JEV_API_BASE).replace(/\/+$/, "");
+  const timedOut = (error) => error?.name === "TimeoutError" || error?.name === "AbortError";
+  let response;
+  try {
+    response = await fetch(`${base}/v1/systemone`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ state, model: JEV_MODEL, questions: { out_of_scope: OUT_OF_SCOPE } }),
+      // The key goes to Jev alone: a redirect is a failure, not followed.
+      redirect: "manual",
+      signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw failed(timedOut(error) ? `Jev did not answer within ${JEV_TIMEOUT_MS / 1000} s` : "Jev could not be reached");
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw failed(`Jev answered HTTP ${response.status}`);
+  }
+  let answer;
+  try {
+    answer = await response.json();
+  } catch (error) {
+    throw failed(timedOut(error) ? `Jev did not answer within ${JEV_TIMEOUT_MS / 1000} s` : "Jev's answer was not JSON");
+  }
+  const score = answer?.answers?.out_of_scope?.noul;
+  if (typeof score !== "number" || !Number.isFinite(score)) throw failed("Jev's answer held no score for the question");
+  return score;
+}
+
 // -------------------------------------------------------------- the team's state
 //
 // Durable Object storage, all in the one object:
@@ -433,10 +532,15 @@ function requestInput(body) {
 //   person:<email>  { email, peer, admin, addedAt, addedBy, firstLoginAt, lastLoginAt };
 //                   the admins of TEAM.admins are seeded on the first request of all
 //   server:<host>   { host, label, owner, workspace, company, createdOn, tunnelId,
-//                   dnsRecordId, createdAt, updatedAt }; one per person
+//                   dnsRecordId, createdAt, updatedAt, guardHash?, guardIssuedAt? };
+//                   one per person; guardHash is the SHA-256 (hex) of the server's
+//                   guard token, while it has one
+//   guard:<hash>    { host }: which server a guard token belongs to
 //   request:<id>    { id, kind, from, fromPeer, server, owner, device, folders, status,
 //                   projects, createdAt, decidedAt, revokedAt, dismissedAt }
 //   serversApp      { id, aud } of the servers Access app, once it exists
+//   jev             { key, setAt, setBy }: the team's Jev API key, while an admin has
+//                   set one
 // A member is a person with a record; an admin is one whose record says so.
 //
 // A request is pending until the server's owner approves or declines it; its sender
@@ -446,6 +550,7 @@ function requestInput(body) {
 const personKey = (email) => `person:${email}`;
 const serverKey = (host) => `server:${host}`;
 const requestKey = (id) => `request:${id}`;
+const guardKey = (hash) => `guard:${hash}`;
 
 function timestamp() {
   return new Date().toISOString();
@@ -453,6 +558,22 @@ function timestamp() {
 
 function randomHex(bytes) {
   return [...crypto.getRandomValues(new Uint8Array(bytes))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** A server record as its owner sees it: without the hash of its guard token. */
+function ownServerView(server) {
+  const { guardHash: _guardHash, ...view } = server;
+  return view;
+}
+
+/** Whether the team has a Jev key, when and by whom it was set: never the key. */
+function jevView(record) {
+  return { set: Boolean(record?.key), setAt: record?.setAt ?? null, setBy: record?.setBy ?? null };
 }
 
 /** The hosts of the servers app: the company server first, then the oldest first. */
@@ -498,6 +619,7 @@ const ROUTES = [
   ["GET", /^\/$/, "page"],
   ["GET", /^\/api\/me$/, "me"],
   ["POST", /^\/api\/me$/, "setPeer"],
+  ["POST", /^\/api\/me\/guard$/, "issueGuard"],
   ["GET", /^\/api\/team$/, "team"],
   ["POST", /^\/api\/servers$/, "makeServer"],
   ["DELETE", /^\/api\/servers\/([^/]+)$/, "removeServer"],
@@ -508,7 +630,13 @@ const ROUTES = [
   ["POST", /^\/api\/admin\/people$/, "addPerson"],
   ["DELETE", /^\/api\/admin\/people\/([^/]+)$/, "removePerson"],
   ["PUT", /^\/api\/admin\/team$/, "renameTeam"],
+  ["GET", /^\/api\/admin\/jev$/, "jevStatus"],
+  ["PUT", /^\/api\/admin\/jev$/, "setJev"],
+  ["DELETE", /^\/api\/admin\/jev$/, "clearJev"],
 ];
+// POST /guard is not here: the Worker sends it with x-hub-guard instead of a login,
+// and fetch takes it to guard(). No route of a person may start with /guard, which
+// Access lets through.
 
 /** The handler and decoded path parameters for a request; 404 or 405 when there is none. */
 function routeFor(method, pathname) {
@@ -536,11 +664,18 @@ export class TeamHub {
     this.storage = ctx.storage;
     this.env = env;
     this.seeded = false;
+    // Each server's recent calls to /guard (times in ms), by host.
+    this.guardCalls = new Map();
   }
 
   async fetch(request) {
     try {
       const team = teamSettings(this.env);
+      // Only the Worker sets it, and only for /guard.
+      if (request.headers.get("x-hub-guard") === "1") {
+        await this.seed(team);
+        return await this.guard(request);
+      }
       const email = verifiedEmail(request.headers.get("x-hub-email"));
       if (!email) throw new HubError(401, "unauthorized", "The team hub needs a Cloudflare Access login");
       await this.seed(team);
@@ -640,7 +775,7 @@ export class TeamHub {
       await this.storage.put(personKey(email), person);
     }
     const meta = await this.meta(team);
-    const servers = (await this.servers()).filter((server) => server.owner === email);
+    const servers = (await this.servers()).filter((server) => server.owner === email).map(ownServerView);
     return json(200, {
       email,
       member: Boolean(person),
@@ -700,10 +835,10 @@ export class TeamHub {
     const servers = await this.servers();
     const own = servers.find((server) => server.owner === email) || null;
     if (own && !input.replace) {
-      throw new HubError(409, "server_exists", `You already have a server at ${own.host}; send replace to move it to this computer`, { server: own });
+      throw new HubError(409, "server_exists", `You already have a server at ${own.host}; send replace to move it to this computer`, { server: ownServerView(own) });
     }
     if (own && input.label && input.label !== own.label) {
-      throw new HubError(409, "server_exists", `Your server is ${own.host}, and replace keeps that address; remove the server first to take another name`, { server: own });
+      throw new HubError(409, "server_exists", `Your server is ${own.host}, and replace keeps that address; remove the server first to take another name`, { server: ownServerView(own) });
     }
     const company = own ? Boolean(own.company) : Boolean(person.admin) && !servers.some((server) => server.company);
     const label = own ? own.label : input.label || (company ? COMPANY_LABEL : dnsSafe(person.peer || email.split("@")[0]) || "member");
@@ -724,6 +859,9 @@ export class TeamHub {
 
     const client = this.cloudflare();
     const tunnelName = `${TUNNEL_PREFIX}${label}`;
+    // The old computer's guard token stops at once; the new computer asks for its own,
+    // and the record written below has none.
+    if (own?.guardHash) await this.storage.delete(guardKey(own.guardHash));
     // The old tunnel goes first, so the old computer's connector stops. So does any
     // tunnel of this name left from before (a provision cut short, the first
     // sharing): no computer that held its token may serve this host.
@@ -779,7 +917,8 @@ export class TeamHub {
   /**
    * Takes a server out of Cloudflare and the hub. Its hostname goes first, so the host
    * stops answering before it leaves the servers app; the app itself goes with the
-   * last host. Requests to the server end. Runs inside exclusive.
+   * last host. Its guard token stops and requests to the server end. Runs inside
+   * exclusive.
    */
   async deprovision(client, team, server) {
     await deleteHostRecord(client, team.zoneId, server.host);
@@ -795,6 +934,7 @@ export class TeamHub {
       await this.storage.delete("serversApp");
     }
     await this.storage.delete(serverKey(server.host));
+    if (server.guardHash) await this.storage.delete(guardKey(server.guardHash));
     await this.endRequests((item) => item.server === server.host);
   }
 
@@ -954,6 +1094,105 @@ export class TeamHub {
     await this.storage.put("meta", { ...(await this.meta(team)), name });
     return json(200, { team: { name, host: team.hubHost, zone: team.zone } });
   }
+
+  // ------------------------------------------------------------ the Jev guard
+
+  /** GET /api/admin/jev: whether the team has a Jev key. No answer ever carries the key. */
+  async jevStatus({ email }) {
+    await this.admin(email);
+    return json(200, jevView(await this.storage.get("jev")));
+  }
+
+  /** PUT /api/admin/jev: sets the key, or replaces the one there. */
+  async setJev({ request, email }) {
+    await this.admin(email);
+    const body = await readJson(request);
+    const key = typeof body.key === "string" ? body.key.trim() : "";
+    if (!JEV_KEY.test(key)) {
+      throw new HubError(400, "bad_request", "key takes the Jev API key: 8 to 1024 printable ASCII characters, without spaces");
+    }
+    const record = { key, setAt: timestamp(), setBy: email };
+    await this.storage.put("jev", record);
+    return json(200, jevView(record));
+  }
+
+  async clearJev({ email }) {
+    await this.admin(email);
+    await this.storage.delete("jev");
+    return json(200, jevView(null));
+  }
+
+  /**
+   * POST /api/me/guard { tunnelId }: a new guard token for the caller's own server,
+   * which ends the one before. Only the computer running the server's current tunnel
+   * gets one: a server moved to another computer keeps its address, and the computer
+   * it left must not end the new one's token. The token is in this answer and
+   * nowhere else; the hub keeps its hash.
+   */
+  async issueGuard({ request, email, team }) {
+    await this.member(email);
+    const body = await readJson(request);
+    const tunnelId = typeof body.tunnelId === "string" ? body.tunnelId.trim() : "";
+    const issued = await this.exclusive(async () => {
+      await this.member(email);
+      const server = (await this.servers()).find((item) => item.owner === email);
+      if (!server) throw new HubError(404, "no_server", "You have no server in the team yet; make this computer's server first");
+      if (!tunnelId) throw new HubError(400, "bad_request", "tunnelId takes the id of the tunnel this computer runs for your server");
+      if (tunnelId !== server.tunnelId) {
+        throw new HubError(409, "other_computer", "Your server runs on another computer now; this computer gets no guard token for it");
+      }
+      const token = randomHex(32);
+      const hash = await sha256Hex(token);
+      if (server.guardHash) await this.storage.delete(guardKey(server.guardHash));
+      await this.storage.put(serverKey(server.host), { ...server, guardHash: hash, guardIssuedAt: timestamp() });
+      await this.storage.put(guardKey(hash), { host: server.host });
+      return { token, host: server.host };
+    });
+    const jev = await this.storage.get("jev");
+    return json(200, { url: `https://${team.hubHost}/guard`, token: issued.token, host: issued.host, jev: { set: Boolean(jev?.key) } });
+  }
+
+  /**
+   * POST /guard, from a member's server with its guard token: whether a teammate's
+   * question may go on. Without a key the hub does not judge and lets it go on.
+   */
+  async guard(request) {
+    if (request.method !== "POST") throw new HubError(405, "method_not_allowed", "/guard takes POST");
+    const server = await this.guardServer(request.headers.get("authorization"));
+    if (!(await this.person(server.owner))) {
+      throw new HubError(403, "not_member", "The server's owner is no longer on the team's roster");
+    }
+    this.countGuardCall(server.host);
+    const state = guardInput(await readJson(request));
+    const record = await this.storage.get("jev");
+    if (!record?.key) return json(200, { judged: false, allowed: true, score: null, reason: "no_key" });
+    const score = await jevScore(this.env, record.key, state);
+    return json(200, { judged: true, allowed: score < JEV_THRESHOLD, score, threshold: JEV_THRESHOLD });
+  }
+
+  /** The server whose current guard token the Authorization header carries; else 401. */
+  async guardServer(authorization) {
+    const refused = () => new HubError(401, "bad_token", "/guard takes Authorization: Bearer and the server's current guard token");
+    const token = GUARD_TOKEN.exec(String(authorization || "").trim())?.[1];
+    if (!token) throw refused();
+    const hash = await sha256Hex(token);
+    const entry = await this.storage.get(guardKey(hash));
+    const server = entry?.host ? await this.storage.get(serverKey(entry.host)) : null;
+    if (!server || server.guardHash !== hash) throw refused();
+    return server;
+  }
+
+  /** At most GUARD_CALLS_PER_MINUTE calls per server in any minute; the refused ones do not count. */
+  countGuardCall(host) {
+    const now = Date.now();
+    const recent = (this.guardCalls.get(host) || []).filter((at) => now - at < GUARD_WINDOW_MS);
+    if (recent.length >= GUARD_CALLS_PER_MINUTE) {
+      this.guardCalls.set(host, recent);
+      throw new HubError(429, "rate_limited", `A server asks /guard at most ${GUARD_CALLS_PER_MINUTE} times a minute; try again shortly`);
+    }
+    recent.push(now);
+    this.guardCalls.set(host, recent);
+  }
 }
 
 // --------------------------------------------------------------- the Worker
@@ -962,22 +1201,28 @@ export default {
   async fetch(request, env) {
     let team;
     try { team = teamSettings(env); } catch (error) { return failure(error, env); }
-    const certsUrl = loopbackUrl(env.ACCESS_CERTS_URL) || `https://${team.teamDomain}/cdn-cgi/access/certs`;
-    let person;
-    try { person = await accessPerson(request.headers.get("cf-access-jwt-assertion"), team, certsUrl); }
-    catch { person = { reason: "error" }; }
-    if (!person.email) {
-      if (new URL(request.url).pathname === "/") return html(401, signedOutPage());
-      return json(401, { error: "unauthorized", detail: "The team hub needs a Cloudflare Access login" });
-    }
-    if (crossSite(request, team.hubHost)) {
-      return json(403, { error: "cross_site", detail: "Changes to the team come from the Team Memory app, not from another site" });
+    // /guard, exactly, is a server's call with its guard token, which the Durable
+    // Object checks; no login, and no browser cookie that another site could ride.
+    const guard = new URL(request.url).pathname === "/guard";
+    let person = null;
+    if (!guard) {
+      const certsUrl = loopbackUrl(env.ACCESS_CERTS_URL) || `https://${team.teamDomain}/cdn-cgi/access/certs`;
+      try { person = await accessPerson(request.headers.get("cf-access-jwt-assertion"), team, certsUrl); }
+      catch { person = { reason: "error" }; }
+      if (!person.email) {
+        if (new URL(request.url).pathname === "/") return html(401, signedOutPage());
+        return json(401, { error: "unauthorized", detail: "The team hub needs a Cloudflare Access login" });
+      }
+      if (crossSite(request, team.hubHost)) {
+        return json(403, { error: "cross_site", detail: "Changes to the team come from the Team Memory app, not from another site" });
+      }
     }
     const headers = new Headers(request.headers);
     for (const name of [...headers.keys()]) {
       if (name.startsWith("x-hub-")) headers.delete(name);
     }
-    headers.set("x-hub-email", person.email);
+    if (guard) headers.set("x-hub-guard", "1");
+    else headers.set("x-hub-email", person.email);
     try {
       const hub = env.HUB.get(env.HUB.idFromName(HUB_OBJECT));
       return await hub.fetch(new Request(request, { headers }));

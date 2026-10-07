@@ -1204,11 +1204,15 @@ test("the dashboard reads 조회 기록 from mcp's /audit with the token mcp che
   assert.equal(mcpSeen.length, before, "no /audit reached the bridge");
 });
 
-test("mcp takes the Jev gate's settings from the private .env, off while they are empty, and the repository holds no key", async () => {
+test("mcp takes the Jev gate's settings from the private .env, off while they are empty, and the repository holds no key or guard token", async () => {
   const compose = await fsp.readFile(COMPOSE, "utf8");
   const mcp = composeService(compose, "mcp");
   const settings = {
     HONCHO_JEV_GATE: "${HONCHO_JEV_GATE:-}",
+    // In a team: the hub's guard and this server's own token for it, which the app
+    // writes to the .env; the key stays in the hub.
+    HONCHO_JEV_GUARD_URL: "${HONCHO_JEV_GUARD_URL:-}",
+    HONCHO_JEV_GUARD_TOKEN: "${HONCHO_JEV_GUARD_TOKEN:-}",
     TYPESAFE_API_KEY: "${TYPESAFE_API_KEY:-}",
     TYPESAFE_BASE_URL: "${TYPESAFE_BASE_URL:-}",
     HONCHO_JEV_MODEL: "${HONCHO_JEV_MODEL:-}",
@@ -1219,7 +1223,7 @@ test("mcp takes the Jev gate's settings from the private .env, off while they ar
     HONCHO_JEV_TOOLS: "${HONCHO_JEV_TOOLS:-chat}",
   };
   for (const [name, value] of Object.entries(settings)) assert.equal(composeSetting(mcp, name), value, name);
-  for (const service of ["dashboard", "gate", "tunnel"]) assert.doesNotMatch(composeService(compose, service), /JEV|TYPESAFE/, service);
+  for (const service of ["dashboard", "gate", "tunnel"]) assert.doesNotMatch(composeService(compose, service), /JEV|TYPESAFE|GUARD/, service);
 
   const example = await fsp.readFile(path.join(ROOT, "server", ".env.example"), "utf8");
   for (const name of Object.keys(settings)) {

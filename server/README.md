@@ -65,11 +65,13 @@ call in the audit schema as bridge `team`, with the caller's email, and with
 dashboard reads it there (`HONCHO_MCP_AUDIT_URL=http://mcp:8765/audit`) for the
 app's 조회 기록. The gate passes only `/mcp` and `/mcp/*` on, so `/audit` stays inside
 Compose, and `mcp` has no host port. Without the share profile there is no `mcp`,
-and the dashboard's audit read answers 502. The Jev judgment gate
-(`HONCHO_JEV_GATE`, `TYPESAFE_API_KEY`, and the optional `TYPESAFE_BASE_URL`,
-`HONCHO_JEV_MODEL`, `HONCHO_JEV_THRESHOLD`, `HONCHO_JEV_FAIL_MODE`,
-`HONCHO_JEV_TOOLS`) comes from the private `.env` and is off while
-`HONCHO_JEV_GATE` is empty; `.env.example` describes each.
+and the dashboard's audit read answers 502. The Jev judgment gate comes from
+the private `.env` and is off while `HONCHO_JEV_GATE` is empty. In a team the app
+writes `HONCHO_JEV_GUARD_URL` and `HONCHO_JEV_GUARD_TOKEN` there, and the bridge
+asks the team hub's guard, which holds the team's Jev key; outside a team
+`TYPESAFE_API_KEY` (with the optional `TYPESAFE_BASE_URL`, `HONCHO_JEV_MODEL`,
+`HONCHO_JEV_THRESHOLD`, `HONCHO_JEV_FAIL_MODE`, `HONCHO_JEV_TOOLS`) has it call
+Jev itself. `.env.example` describes each.
 
 `tunnel` is `cloudflared` (pinned image tag). It runs the tunnel whose token is
 `HONCHO_TUNNEL_TOKEN` in `.env`, and the tunnel's ingress, set in Cloudflare, is

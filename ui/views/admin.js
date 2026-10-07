@@ -3,10 +3,13 @@
 // send someone new, and, on the computer that made the team, the Cloudflare API
 // token it runs on. Adding someone takes their Google email and nothing else: they
 // log in at the team's address, and make a server of their own if they want one.
-// This is the one screen that names Cloudflare.
+// The team's Jev key is set here too: the hub keeps it and judges teammates'
+// questions with it for every shared server of the team, which holds only its own
+// token for the hub's guard. The key never leaves the hub, and the page never sees
+// it again once saved. This is the one screen that names Cloudflare.
 import { post } from "../lib/api.js";
 import { h, clear, copyText } from "../lib/dom.js";
-import { number } from "../lib/format.js";
+import { fullDate, number } from "../lib/format.js";
 import { block, confirmWindow, field, kv, list, listItem, modal } from "../lib/kit.js";
 import { teamCall, teamErrorNotice } from "../lib/team.js";
 import { app, loadContext } from "../lib/state.js";
@@ -69,6 +72,41 @@ function openToken(made, onDone) {
   win.open();
 }
 
+/** Jev 키: saved to the team hub and cleared there; the field is emptied either way. */
+function jevRow(jev, redraw) {
+  const key = h("input", { class: "input mono", type: "password", autocomplete: "off", spellcheck: "false", placeholder: jev?.set ? "새 키로 바꾸기" : "Jev API 키", "aria-label": "Jev 키", style: { flex: "1 1 220px", minWidth: "0" } });
+  const status = !jev ? tag("확인하지 못함", "warn")
+    : jev.set ? h("span", { title: fullDate(jev.setAt) }, tag(`설정됨 · ${jev.setAt ? `${new Date(jev.setAt).getMonth() + 1}월 ${new Date(jev.setAt).getDate()}일` : "-"}`, "ok"))
+    : tag("없음");
+  const save = button("저장", { kind: "small primary", onClick: (event) => busy(event.currentTarget, async () => {
+    const value = key.value.trim();
+    if (!value) { toast("Jev 키를 넣으세요.", "bad"); return; }
+    try {
+      await teamCall("/api/team/admin/jev/set", { key: value });
+    } finally {
+      key.value = "";
+    }
+    toast("Jev 키를 저장했습니다.", "ok");
+    await redraw();
+  }) });
+  const remove = jev?.set ? button("지우기", { kind: "small danger", onClick: async (event) => {
+    const target = event.currentTarget;
+    const ok = await confirmWindow({
+      title: "Jev 키를 지울까요?",
+      text: "지우면 바로 팀 서버들이 팀원 질문을 Jev로 살피지 않습니다.",
+      confirm: "지우기",
+      danger: true,
+    });
+    if (!ok) return;
+    await busy(target, async () => { await teamCall("/api/team/admin/jev/clear", {}); await redraw(); }, { done: "Jev 키를 지웠습니다" });
+  } }) : null;
+  return kv("Jev 키", [
+    status,
+    h("div", { class: "s" }, "팀원이 묻는 말을 허브가 Jev로 먼저 살핍니다. 키는 허브에만 있고 팀 서버로 나가지 않습니다."),
+    h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "8px" } }, key, save, remove),
+  ]);
+}
+
 export default {
   title: "관리자",
   async mount(page) {
@@ -83,8 +121,13 @@ export default {
     async function draw() {
       const team = app.context?.team || {};
       let roster;
+      let jev;
       try {
-        roster = await teamCall("/api/team/admin/people", {});
+        [roster, jev] = await Promise.all([
+          teamCall("/api/team/admin/people", {}),
+          // A hub deployed before the Jev key cannot say; the rest of the page still shows.
+          teamCall("/api/team/admin/jev", {}).then((answer) => answer.jev, () => null),
+        ]);
       } catch (error) {
         clear(body, teamErrorNotice(error, { onDone: draw }));
         return;
@@ -96,7 +139,8 @@ export default {
         block({ title: "팀" },
           kv("팀 이름", roster.team?.name || team.name || "-"),
           kv("팀 주소", [h("span", { class: "mono" }, address || "-"), h("div", { class: "s" }, "새 팀원에게 이 주소를 보내세요.")],
-            button("복사", { kind: "small", onClick: async () => { await copyText(address); toast("팀 주소를 복사했습니다"); } }))),
+            button("복사", { kind: "small", onClick: async () => { await copyText(address); toast("팀 주소를 복사했습니다"); } })),
+          jevRow(jev, draw)),
         list({
           title: `팀원 ${number(people.length)}명`,
           actions: [button("팀원 더하기", { kind: "primary small", onClick: () => openAdd((email) => { fresh.add(email); draw(); }) })],

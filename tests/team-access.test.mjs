@@ -33,6 +33,10 @@ import {
 } from "../scripts/team-access.mjs";
 import { API_TOKEN, connectorToken, startFakeCloudflare, TEAM_DOMAIN } from "./fake-cloudflare.mjs";
 
+// Sharing a server asks the team hub for its Jev guard token with this computer's
+// team login; no test here reaches a real one.
+process.env.HONCHO_AGENT_TEAM_AUTH = path.join(os.tmpdir(), `no-team-login-${process.pid}`, "team-auth.json");
+
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = path.join(ROOT, "scripts", "cli.mjs");

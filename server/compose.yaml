@@ -186,8 +186,15 @@ services:
       HONCHO_MCP_SCOPE_FROM_GATE: "1"
       # Jev judges each teammate's `chat` question first and refuses one about the
       # owner's private life rather than shared work. Off while HONCHO_JEV_GATE is
-      # empty; on with 1 and a TYPESAFE_API_KEY, both only in the private .env.
+      # empty. In a team the bridge asks the team hub's guard instead
+      # (HONCHO_JEV_GUARD_URL): the Jev key stays in the hub, and this server holds
+      # only its own token for the guard, which the hub can revoke; the app writes
+      # both and HONCHO_JEV_GATE=1 into the private .env. Outside a team the bridge
+      # uses TYPESAFE_API_KEY directly, also only in the private .env; with a guard
+      # address set it does not.
       HONCHO_JEV_GATE: ${HONCHO_JEV_GATE:-}
+      HONCHO_JEV_GUARD_URL: ${HONCHO_JEV_GUARD_URL:-}
+      HONCHO_JEV_GUARD_TOKEN: ${HONCHO_JEV_GUARD_TOKEN:-}
       TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
       TYPESAFE_BASE_URL: ${TYPESAFE_BASE_URL:-}
       HONCHO_JEV_MODEL: ${HONCHO_JEV_MODEL:-}

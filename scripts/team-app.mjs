@@ -8,8 +8,8 @@
 // of that server's sessions for the projects to open (scope-sync.mjs). What starts
 // or stops a server still goes through the CLI.
 //
-// No route ever returns a token or a device key. A route that changes something is
-// a JSON POST, as every other route of the app.
+// No route ever returns a token, a device key or the team's Jev key. A route that
+// changes something is a JSON POST, as every other route of the app.
 import { loadConfig } from "./config.mjs";
 import { gateDevices, gateGrants, gateStatePaths, grantChat, grantCollect, revokeDevice, revokePerson } from "./gate-access.mjs";
 import { serverProjects } from "./scope-sync.mjs";
@@ -32,6 +32,11 @@ function projectsFrom(value) {
 async function context() {
   const config = await loadConfig().catch(() => null);
   return { config, paths: teamAuthPaths(config), gate: gateStatePaths(config ? { serverDirectory: config.paths?.serverDir } : {}) };
+}
+
+/** The hub's answer about the Jev key, cut to what the page may see. */
+function jevStatus(answer) {
+  return { set: Boolean(answer?.set), setAt: answer?.setAt ?? null, setBy: answer?.setBy ?? null };
 }
 
 /** Where the browser comes back to: this app's own address, as the request reached it. */
@@ -215,6 +220,25 @@ const ROUTES = {
   "/api/team/admin/rename": async (body) => {
     const { paths } = await context();
     return { ok: true, ...(await hubCall("PUT", "/api/admin/team", { name: String(body.name || "") }, { paths })) };
+  },
+
+  /** Whether the team's hub keeps a Jev key: set, when, by whom. Never the key. */
+  "/api/team/admin/jev": async () => {
+    const { paths } = await context();
+    return { ok: true, jev: jevStatus(await hubCall("GET", "/api/admin/jev", undefined, { paths })) };
+  },
+
+  /** Sets or replaces the team's Jev key (`key`); it goes to the hub and is not kept here. */
+  "/api/team/admin/jev/set": async (body) => {
+    const { paths } = await context();
+    const key = typeof body.key === "string" ? body.key.trim() : "";
+    if (!key) return { ok: false, error: "Jev 키를 넣으세요." };
+    return { ok: true, jev: jevStatus(await hubCall("PUT", "/api/admin/jev", { key }, { paths })) };
+  },
+
+  "/api/team/admin/jev/clear": async () => {
+    const { paths } = await context();
+    return { ok: true, jev: jevStatus(await hubCall("DELETE", "/api/admin/jev", undefined, { paths })) };
   },
 
   "/api/team/logout": async () => {

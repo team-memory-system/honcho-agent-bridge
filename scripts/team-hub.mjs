@@ -5,11 +5,12 @@
 // the zone, the Zero Trust team and its Google login, keeps the people list (the
 // reusable "Team Memory people" policy: the roster every server's Access checks),
 // makes the hub's Access app (open to any Google login, so the hub can tell someone
-// which email it saw and that it is not on the list) and deploys the hub Worker
-// (cloudflare-workers.mjs) at https://team.<zone>. What it made is added to
-// team-access.json beside what sharing keeps there; the token stays in
-// <runtime>/cloudflare/api-token and, as a secret, in the hub, which uses it to make
-// each member's server address.
+// which email it saw and that it is not on the list) and its guard app (<hub>/guard,
+// which Access lets through for members' servers and their guard tokens), and
+// deploys the hub Worker (cloudflare-workers.mjs) at https://team.<zone>. What it
+// made is added to team-access.json beside what sharing keeps there; the token stays
+// in <runtime>/cloudflare/api-token and, as a secret, in the hub, which uses it to
+// make each member's server address.
 //
 // Everything else is a request to the hub over HTTPS with this computer's team login
 // (team-auth.mjs): who this is, the team's people and servers, a server address for
@@ -20,9 +21,11 @@ import os from "node:os";
 import {
   accessTeamDomain,
   ensureAccessApp,
+  ensureBypassPolicy,
   ensureEveryonePolicy,
   ensurePeoplePolicy,
   hubAppBody,
+  hubGuardAppBody,
   normalizeEmail,
 } from "./cloudflare-api.mjs";
 import { deployHub, hubModules, HUB_SCRIPT, workersClient } from "./cloudflare-workers.mjs";
@@ -87,6 +90,12 @@ async function teamMakeUnlocked(paths, options) {
       id: same && previous.hub?.host === hubHost ? previous.hub.appId : "",
     });
     if (!hubApp.aud) throw new Error(`Cloudflare returned no AUD tag for the Access app on ${hubHost}`);
+    // <hubHost>/guard passes Access: members' servers ask it with a guard token.
+    const sameHub = same && previous.hub?.host === hubHost;
+    const bypass = await ensureBypassPolicy(client, zone.accountId, { id: same ? previous.bypassPolicyId : "" });
+    const guardApp = await ensureAccessApp(client, zone.accountId, hubGuardAppBody({ host: hubHost, policyId: bypass.id }), {
+      id: sameHub ? previous.hub.guardAppId : "",
+    });
     const team = {
       name,
       hubHost,
@@ -121,8 +130,9 @@ async function teamMakeUnlocked(paths, options) {
       ownerEmail: email,
       peoplePolicyId: people.id,
       everyonePolicyId: everyone.id,
+      bypassPolicyId: bypass.id,
       teamName: name,
-      hub: { host: hubHost, appId: hubApp.id, aud: hubApp.aud, script: HUB_SCRIPT, deployedAt: new Date().toISOString() },
+      hub: { host: hubHost, appId: hubApp.id, guardAppId: guardApp.id, aud: hubApp.aud, script: HUB_SCRIPT, deployedAt: new Date().toISOString() },
       ...(same ? {} : { owner: undefined, sharers: {} }),
     }, privateFileOptionsFrom(options));
     return {

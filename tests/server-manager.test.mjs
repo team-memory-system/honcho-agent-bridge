@@ -20,6 +20,12 @@ import {
   SHARE_REQUIRED_SETTINGS,
 } from "../scripts/server-manager.mjs";
 import { LAUNCHD_LABEL } from "../scripts/share-manager.mjs";
+import { GUARD_URL, guardHub, HUB_HOST, SERVER_HOST } from "./fake-guard-hub.mjs";
+
+// Starting a server shared through the team asks the team hub for its Jev guard token
+// with this computer's team login, and each ask ends the token before; no test here
+// reaches a real one.
+process.env.HONCHO_AGENT_TEAM_AUTH = path.join(os.tmpdir(), `no-team-login-${process.pid}`, "team-auth.json");
 
 // Nothing in this file may reach the network. Every call that could fetch the
 // Honcho source is given its own runner or a stub.
@@ -1085,6 +1091,87 @@ test("a share profile with every setting filled is kept, and start says when it 
   assert.match(started.warnings.join("\n"), /Sharing was turned off/);
   assert.equal((await old.readEnv()).COMPOSE_PROFILES, "debug", "dropped before Compose came up");
   assert.deepEqual(composeCalls, ["up -d --remove-orphans --build"]);
+});
+
+test("a start while shared through the team writes this server's guard token from the team hub to the .env before Compose; one shared otherwise or not at all asks no hub", async (t) => {
+  const tunnelId = "6f1c2b9e-1a2b-4c3d-8e9f-00000000c0de";
+  const tunnelToken = Buffer.from(JSON.stringify({ a: "a", t: tunnelId, s: "s" })).toString("base64");
+  const full = await oldSharedServer(t, { values: { HONCHO_TUNNEL_TOKEN: tunnelToken, HONCHO_TEAM_MCP_TOKEN: "mcp-token-value", HONCHO_TEAM_PEER: "owner_peer" } });
+  const shareFile = path.join(path.dirname(full.directory), "runtime", "share.json");
+  const shared = (state) => fsp.writeFile(shareFile, JSON.stringify({ publicUrl: `https://${SERVER_HOST}`, host: SERVER_HOST, tunnel: true, ...state }));
+  await shared({ team: true, tunnelId });
+  const envFile = path.join(full.directory, ".env");
+  await fsp.appendFile(envFile, "TYPESAFE_API_KEY=typesafe-key-for-tests\n");
+  const hub = await guardHub(path.dirname(full.directory));
+  const atCompose = [];
+  const start = (server, shareOptions) => serverStart({
+    profile: "personal",
+    hostRuntime: { start: async () => ({ ok: true, running: true }), stop: async () => ({ ok: true }) },
+    preparedServer: { ok: true, ready: true, installation: {}, environment: {} },
+    serverDirectory: server.directory,
+    composeRunner: async (_directory, args) => { atCompose.push({ args: args.join(" "), environment: await server.readEnv() }); return { stdout: "", stderr: "" }; },
+    healthWaiter: async () => ({ ok: true, status: 200 }),
+    shareOptions,
+  });
+
+  const started = await start(full, { ...full.shareOptions, teamAuth: hub.teamAuth });
+  assert.equal(started.ok, true, JSON.stringify(started));
+  assert.deepEqual(started.jev, { synced: true, changed: true });
+  assert.deepEqual(hub.seen.map((item) => `${item.method} ${item.url}`), [`POST https://${HUB_HOST}/api/me/guard`]);
+  assert.deepEqual(hub.seen[0].body, { tunnelId }, "naming the tunnel this computer runs");
+  const atStart = atCompose.at(-1).environment;
+  assert.equal(atStart.HONCHO_JEV_GATE, "1");
+  assert.equal(atStart.HONCHO_JEV_GUARD_URL, GUARD_URL);
+  assert.equal(atStart.HONCHO_JEV_GUARD_TOKEN, hub.issued[0], "in the .env when Compose starts mcp");
+  assert.equal(atStart.TYPESAFE_API_KEY, "typesafe-key-for-tests");
+  assert.equal(JSON.stringify(started).includes(hub.issued[0]), false, "the result never holds the token");
+  if (process.platform !== "win32") assert.equal((await fsp.stat(envFile)).mode & 0o777, 0o600);
+
+  // The next start is a new token in place of the last.
+  const restarted = await start(full, { ...full.shareOptions, teamAuth: hub.teamAuth });
+  assert.deepEqual(restarted.jev, { synced: true, changed: true });
+  const text = await fsp.readFile(envFile, "utf8");
+  assert.deepEqual(text.split("\n").filter((line) => line.startsWith("HONCHO_JEV_GUARD_TOKEN=")), [`HONCHO_JEV_GUARD_TOKEN=${hub.issued[1]}`]);
+
+  // Without the hub, or without a server in the team, the server still starts and the
+  // .env stays as it was.
+  for (const [answer, reason] of [
+    [new TypeError("fetch failed"), "hub_unreachable"],
+    [{ status: 404, body: { error: "no_server" } }, "no_server"],
+  ]) {
+    hub.answer(answer);
+    const result = await start(full, { ...full.shareOptions, teamAuth: hub.teamAuth });
+    assert.equal(result.ok, true, `${reason}: the server starts`);
+    assert.equal(result.jev.reason, reason);
+    assert.equal(await fsp.readFile(envFile, "utf8"), text, `${reason}: the .env is left as it was`);
+  }
+  // Without a team login on this computer: nothing is asked.
+  const asked = hub.seen.length;
+  const noLogin = await start(full, full.shareOptions);
+  assert.equal(noLogin.ok, true);
+  assert.equal(noLogin.jev.reason, "no_hub_login");
+  assert.equal(hub.seen.length, asked);
+  assert.equal(await fsp.readFile(envFile, "utf8"), text);
+
+  // Shared another way, or joined with an invite: not the server the hub made, so
+  // nothing is asked and the .env stays.
+  hub.answer(null);
+  for (const state of [{}, { team: false }, { team: true, joined: true }]) {
+    await shared(state);
+    const other = await start(full, { ...full.shareOptions, teamAuth: hub.teamAuth });
+    assert.equal(other.ok, true, JSON.stringify(other));
+    assert.equal("jev" in other, false, JSON.stringify(state));
+    assert.equal(hub.seen.length, asked);
+    assert.equal(await fsp.readFile(envFile, "utf8"), text);
+  }
+
+  // Not shared (the half-set profile is dropped first): no hub, no Jev lines.
+  const old = await oldSharedServer(t);
+  const unshared = await start(old, { ...old.shareOptions, teamAuth: hub.teamAuth });
+  assert.equal(unshared.ok, true, JSON.stringify(unshared));
+  assert.equal("jev" in unshared, false);
+  assert.equal(hub.seen.length, asked);
+  assert.equal("HONCHO_JEV_GATE" in (await old.readEnv()), false);
 });
 
 test("personal status combines Docker and host health", async (t) => {

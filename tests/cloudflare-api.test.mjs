@@ -23,6 +23,7 @@ import {
   accessTeamDomain,
   HUB_APP_NAME,
   hubAppBody,
+  hubGuardAppBody,
   listIdentityProviders,
   peopleAppBody,
   PEOPLE_POLICY_NAME,
@@ -343,5 +344,28 @@ test("the hub app is the hub's host behind the everyone policy, with Google logi
   assert.equal(made.created, true);
   const writes = server.writes().length;
   assert.equal((await ensureAccessApp(client, ACCOUNT_ID, desired, { id: made.id })).updated, false, "a second run changes nothing");
+  assert.equal(server.writes().length, writes);
+});
+
+test("the hub's guard app is <host>/guard alone, behind the bypass policy, beside the hub app", async (t) => {
+  const desired = hubGuardAppBody({ host: "team.example.com", policyId: "policy-bypass" });
+  assert.deepEqual(desired, {
+    name: `${HUB_APP_NAME} team.example.com guard`,
+    type: "self_hosted",
+    domain: "team.example.com/guard",
+    destinations: [{ type: "public", uri: "team.example.com/guard" }],
+    policies: [{ id: "policy-bypass", precedence: 1 }],
+  });
+  const { server, client } = await fake(t);
+  const bypass = await ensureBypassPolicy(client, ACCOUNT_ID);
+  const everyone = await ensureEveryonePolicy(client, ACCOUNT_ID);
+  const hub = await ensureAccessApp(client, ACCOUNT_ID, hubAppBody({ host: "team.example.com", idpId: "idp-google-0001", policyId: everyone.id }));
+  const guard = await ensureAccessApp(client, ACCOUNT_ID, hubGuardAppBody({ host: "team.example.com", policyId: bypass.id }));
+  assert.equal(guard.created, true, "the hub app on the same host is not taken for it");
+  assert.notEqual(guard.id, hub.id);
+  assert.equal(server.state.apps.length, 2);
+  const writes = server.writes().length;
+  assert.equal((await ensureAccessApp(client, ACCOUNT_ID, hubGuardAppBody({ host: "team.example.com", policyId: bypass.id }), { id: guard.id })).updated, false);
+  assert.equal((await ensureAccessApp(client, ACCOUNT_ID, hubAppBody({ host: "team.example.com", idpId: "idp-google-0001", policyId: everyone.id }))).id, hub.id, "nor the guard app for the hub app");
   assert.equal(server.writes().length, writes);
 });

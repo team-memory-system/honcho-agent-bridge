@@ -18,6 +18,7 @@ import {
   RUN_VALUE,
   shareDisable,
   shareEnable,
+  shareEnableTeam,
   shareJoin,
   shareRotate,
   shareStatus,
@@ -29,6 +30,12 @@ import { decodeInvite, encodeInvite, teammateAdd } from "../scripts/team-access.
 import { serverStatus } from "../scripts/server-manager.mjs";
 import { formatJson } from "../scripts/redact.mjs";
 import { ACCOUNT_ID, API_TOKEN, startFakeCloudflare, TEAM_DOMAIN } from "./fake-cloudflare.mjs";
+import { fakeGuardToken, GUARD_URL, guardAnswer, guardHub, HUB_HOST, SERVER_HOST } from "./fake-guard-hub.mjs";
+
+// Sharing through the team asks the team hub for this server's Jev guard token with
+// this computer's team login, and each ask ends the token before. Here no test
+// reaches a real one: a test that wants a login hands in its own (teamAuth).
+process.env.HONCHO_AGENT_TEAM_AUTH = path.join(os.tmpdir(), `no-team-login-${process.pid}`, "team-auth.json");
 
 const TUNNEL_TOKEN = "eyJhIjoiYWNjb3VudC10YWciLCJ0IjoidHVubmVsLWlkIiwicyI6InNlY3JldCJ9";
 const PUBLIC_URL = "https://memory.example.com";
@@ -640,4 +647,165 @@ test("a share.json without the tunnel field still means the tunnel", async (t) =
 test("an invite decodes to exactly what was put in", () => {
   const invite = { host: "memory-bob.example.com", tunnelToken: TUNNEL_TOKEN, teamDomain: TEAM_DOMAIN, aud: "d".repeat(64), team: [{ name: "memory", host: "memory.example.com" }] };
   assert.deepEqual(decodeInvite(encodeInvite(invite)), { v: 1, ...invite });
+});
+
+// ------------------------------------------------------------- the Jev guard
+
+const JEV_LINES = /^(HONCHO_JEV_GATE|HONCHO_JEV_GUARD_URL|HONCHO_JEV_GUARD_TOKEN|TYPESAFE_API_KEY)=/;
+
+// The tunnel the hub made for this computer's server, in a connector token as
+// Cloudflare writes them.
+const TEAM_TUNNEL_ID = "6f1c2b9e-1a2b-4c3d-8e9f-00000000c0de";
+const TEAM_TUNNEL_TOKEN = Buffer.from(JSON.stringify({ a: "account-tag", t: TEAM_TUNNEL_ID, s: "c2VjcmV0" })).toString("base64");
+
+/** `team share`'s call once the hub has made this computer's server address. */
+async function teamShareOptions(f, extra = {}) {
+  await fsp.writeFile(path.join(f.serverDirectory, "compose.yaml"), "name: honcho-agent-bridge\n# ../runtime/gate:/gate-state\n");
+  return {
+    ...f.options,
+    host: SERVER_HOST,
+    teamDomain: TEAM_DOMAIN,
+    aud: "a".repeat(64),
+    owners: ["owner@example.com"],
+    peer: "owner_peer",
+    workspace: "memory",
+    env: { ...f.options.env, HONCHO_TUNNEL_TOKEN: TEAM_TUNNEL_TOKEN },
+    ...extra,
+  };
+}
+
+test("turning sharing on through the team writes this server's guard token to the .env before Compose, replacing the last one, and never touches TYPESAFE_API_KEY", async (t) => {
+  const f = await fixture(t);
+  await fsp.appendFile(f.envFile, "TYPESAFE_API_KEY=typesafe-key-for-tests\n");
+  const hub = await guardHub(f.root);
+  const atUp = [];
+  const options = await teamShareOptions(f, {
+    teamAuth: hub.teamAuth,
+    composeRunner: async (directory, args) => {
+      if (args[0] === "up") atUp.push(await f.readEnv());
+      return f.options.composeRunner(directory, args);
+    },
+  });
+  const results = [];
+  const enable = async () => {
+    const result = await shareEnableTeam(options);
+    results.push(result);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    return result;
+  };
+
+  const on = await enable();
+  assert.deepEqual(on.jev, { synced: true, changed: true });
+  let environment = await f.readEnv();
+  assert.equal(environment.HONCHO_JEV_GATE, "1");
+  assert.equal(environment.HONCHO_JEV_GUARD_URL, GUARD_URL);
+  assert.equal(environment.HONCHO_JEV_GUARD_TOKEN, hub.issued[0]);
+  assert.equal(environment.TYPESAFE_API_KEY, "typesafe-key-for-tests", "left as it was");
+  assert.equal(atUp[0].HONCHO_JEV_GUARD_TOKEN, hub.issued[0], "in the .env before mcp is made");
+  // It names the tunnel this computer runs, which is how the hub tells it runs the server.
+  assert.deepEqual(hub.seen, [{ method: "POST", url: `https://${HUB_HOST}/api/me/guard`, authorization: hub.login, body: { tunnelId: TEAM_TUNNEL_ID } }]);
+  assert.deepEqual(composeLines(f.calls), ["up -d gate mcp tunnel dashboard"]);
+  if (process.platform !== "win32") assert.equal(await mode(f.envFile), 0o600);
+
+  // Each ask is a new token, which replaces the one before in place.
+  const again = await enable();
+  assert.deepEqual(again.jev, { synced: true, changed: true });
+  assert.equal(hub.issued.length, 2);
+  assert.notEqual(hub.issued[1], hub.issued[0]);
+  const text = await fsp.readFile(f.envFile, "utf8");
+  assert.deepEqual(text.split("\n").filter((line) => JEV_LINES.test(line)), [
+    "TYPESAFE_API_KEY=typesafe-key-for-tests",
+    "HONCHO_JEV_GATE=1",
+    `HONCHO_JEV_GUARD_URL=${GUARD_URL}`,
+    `HONCHO_JEV_GUARD_TOKEN=${hub.issued[1]}`,
+  ], "replaced, not added");
+  assert.equal(atUp[1].HONCHO_JEV_GUARD_TOKEN, hub.issued[1]);
+  if (process.platform !== "win32") assert.equal(await mode(f.envFile), 0o600);
+
+  // The hub cannot be reached, refuses, says this person has no server in the team, or
+  // answers with something the .env must not hold: sharing goes on, and the .env
+  // stays byte for byte as it was.
+  const otherHub = guardAnswer(fakeGuardToken(90), { url: "https://elsewhere.example.net/guard" });
+  for (const [answer, reason, code] of [
+    [new TypeError("fetch failed"), "hub_unreachable"],
+    [{ status: 503, body: { error: "unavailable", detail: "The team's state could not be reached; try again" } }, "hub_unreachable", "unavailable"],
+    [{ status: 502, body: "Bad gateway" }, "hub_unreachable"],
+    [{ status: 404, body: { error: "no_server", detail: "owner@example.com has no server in the team" } }, "no_server"],
+    [{ status: 404, body: { error: "not_found" } }, "hub_refused", "not_found"],
+    [{ status: 409, body: { error: "other_computer", detail: "Your server runs on another computer now" } }, "other_computer"],
+    [{ status: 403, body: { error: "not_member", detail: "owner@example.com is not on the team's roster" } }, "hub_refused", "not_member"],
+    [guardAnswer("X".repeat(64)), "hub_answer"],
+    [guardAnswer(fakeGuardToken(91).toUpperCase()), "hub_answer"],
+    [guardAnswer(fakeGuardToken(92).slice(2)), "hub_answer"],
+    [guardAnswer(`${fakeGuardToken(93).slice(1)}\n`), "hub_answer"],
+    [guardAnswer(undefined), "hub_answer"],
+    [otherHub, "hub_answer"],
+    [guardAnswer(fakeGuardToken(94), { url: `http://${HUB_HOST}/guard` }), "hub_answer"],
+    [guardAnswer(fakeGuardToken(95), { url: `https://${HUB_HOST}/guard/more` }), "hub_answer"],
+    [guardAnswer(fakeGuardToken(96), { url: `https://${HUB_HOST}/guard?to=elsewhere` }), "hub_answer"],
+    [guardAnswer(fakeGuardToken(97), { url: `https://${HUB_HOST}:8443/guard` }), "hub_answer"],
+    [guardAnswer(fakeGuardToken(98), { url: undefined }), "hub_answer"],
+  ]) {
+    hub.answer(answer);
+    const ups = atUp.length;
+    const result = await enable();
+    const label = `${reason} ${JSON.stringify(answer.body ?? answer.message)}`;
+    assert.equal(result.jev.synced, false, label);
+    assert.equal(result.jev.reason, reason, label);
+    assert.equal(result.jev.code, code, label);
+    assert.equal(typeof result.jev.detail, "string", label);
+    assert.equal(atUp.length, ups + 1, `${label}: the share services still come up`);
+    assert.equal(await fsp.readFile(f.envFile, "utf8"), text, `${label}: the .env is left as it was`);
+  }
+
+  // A login that has ended is the same as none.
+  const ended = await guardHub(path.join(f.root, "ended"), null, { login: false });
+  const noLogin = await shareEnableTeam({ ...options, teamAuth: ended.teamAuth });
+  assert.equal(noLogin.ok, true);
+  assert.equal(noLogin.jev.reason, "no_hub_login");
+  assert.deepEqual(ended.seen, [], "nothing reaches the hub without a login");
+  assert.equal(await fsp.readFile(f.envFile, "utf8"), text);
+  results.push(noLogin);
+
+  const tokens = [...hub.issued, fakeGuardToken(90), "X".repeat(64)];
+  assertNoSecret(f.calls, tokens, "a command");
+  for (const result of results) assertNoSecret(result, tokens, "a result");
+  for (const result of results) assertNoSecret(formatJson(result), tokens, "printed output");
+  assertNoSecret(await fsp.readFile(f.shareFile, "utf8"), tokens, "share.json");
+});
+
+test("without a team login on this computer, sharing through the team leaves the .env's Jev lines as they are", async (t) => {
+  const f = await fixture(t);
+  await fsp.appendFile(f.envFile, "HONCHO_JEV_GATE=1\nTYPESAFE_API_KEY=set-by-hand-0123456789\n");
+  const before = await fsp.readFile(f.envFile, "utf8");
+  const result = await shareEnableTeam(await teamShareOptions(f));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.jev.synced, false);
+  assert.equal(result.jev.reason, "no_hub_login");
+  const after = await fsp.readFile(f.envFile, "utf8");
+  assert.deepEqual(after.split("\n").filter((line) => JEV_LINES.test(line)), before.split("\n").filter((line) => JEV_LINES.test(line)));
+  assert.equal("HONCHO_JEV_GUARD_URL" in (await f.readEnv()), false);
+  assert.equal(f.fetches.some((item) => String(item.url).includes(HUB_HOST)), false);
+  assertNoSecret(result, ["set-by-hand-0123456789"], "a result");
+});
+
+test("a server shared another way asks the team hub for nothing, and one whose tunnel token names no tunnel cannot", async (t) => {
+  const f = await fixture(t);
+  await fsp.appendFile(f.envFile, "TYPESAFE_API_KEY=set-by-hand-0123456789\n");
+  const hub = await guardHub(f.root);
+
+  // Its own address, with a team login on this computer: not the server the hub made.
+  const own = await shareEnable({ ...f.options, publicUrl: PUBLIC_URL, teamAuth: hub.teamAuth });
+  assert.equal(own.ok, true, JSON.stringify(own));
+  assert.equal("jev" in own, false);
+  assert.deepEqual(hub.seen, []);
+  assert.equal("HONCHO_JEV_GUARD_TOKEN" in (await f.readEnv()), false);
+  const text = await fsp.readFile(f.envFile, "utf8");
+
+  // Through the team, but the token in the .env names no tunnel: nothing is asked.
+  const unnamed = await shareEnableTeam(await teamShareOptions(f, { teamAuth: hub.teamAuth, env: { ...f.options.env, HONCHO_TUNNEL_TOKEN: TUNNEL_TOKEN } }));
+  assert.equal(unnamed.ok, true, JSON.stringify(unnamed));
+  assert.equal(unnamed.jev.reason, "no_tunnel");
+  assert.deepEqual(hub.seen, []);
+  assert.deepEqual((await fsp.readFile(f.envFile, "utf8")).split("\n").filter((line) => JEV_LINES.test(line)), text.split("\n").filter((line) => JEV_LINES.test(line)));
 });

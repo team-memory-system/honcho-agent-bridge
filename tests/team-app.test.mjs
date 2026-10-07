@@ -3,7 +3,8 @@
 // answer a JSON POST (the status alone also a GET) and never a token; the hub's own
 // refusals come back with their code. A browser login that came back with an error
 // shows in the status at once, starting again is a new login, and a login Access
-// stopped refreshing is reported as ended, with which one to log in to again.
+// stopped refreshing is reported as ended, with which one to log in to again. The
+// admin's Jev key goes to the hub, and no route hands it back.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -19,6 +20,9 @@ let tmp;
 let fake;
 let realFetch;
 const hubSeen = [];
+const JEV_KEY = "ts-jev-key-for-tests-0123456789";
+// The Jev key the stand-in hub keeps, as { key, setAt, setBy }, or null.
+let jev = null;
 
 async function send(pathname, { method = "GET", body, headers = {} } = {}) {
   const response = await realFetch(`http://127.0.0.1:${port}${pathname}`, {
@@ -48,6 +52,18 @@ before(async () => {
           if (url.pathname === "/api/me" && request.method === "POST") return Response.json({ peer: "me" });
           if (url.pathname === "/api/requests" && request.method === "POST") {
             return Response.json({ error: "own_server", detail: "That is your own server" }, { status: 400 });
+          }
+          if (url.pathname === "/api/admin/jev") {
+            if (request.method === "PUT") {
+              const { key } = await request.json();
+              hubSeen.at(-1).key = key;
+              if (key.length < 8) return Response.json({ error: "bad_request", detail: "key takes the Jev API key" }, { status: 400 });
+              jev = { key, setAt: "2026-10-07T09:00:00.000Z", setBy: email };
+              // A hub that says more than it should: the app passes on only the status.
+              return Response.json({ set: true, setAt: jev.setAt, setBy: email, key });
+            }
+            if (request.method === "DELETE") jev = null;
+            return Response.json({ set: Boolean(jev), setAt: jev?.setAt ?? null, setBy: jev?.setBy ?? null, ...(jev ? { key: jev.key } : {}) });
           }
           return Response.json({ error: "not_found" }, { status: 404 });
         },
@@ -172,4 +188,33 @@ test("a login Access stopped refreshing is reported as ended, and the routes say
   const after = await send("/api/team/status");
   assert.equal(after.json.hubLogin.signedIn, true);
   assert.equal(after.json.hubLogin.ended, undefined);
+});
+
+test("the admin's Jev key goes to the hub, and no route hands it back", async () => {
+  const none = await send("/api/team/admin/jev", { method: "POST", body: {} });
+  assert.deepEqual(none.json, { ok: true, jev: { set: false, setAt: null, setBy: null } });
+
+  const saved = await send("/api/team/admin/jev/set", { method: "POST", body: { key: `  ${JEV_KEY}  ` } });
+  assert.deepEqual(saved.json, { ok: true, jev: { set: true, setAt: "2026-10-07T09:00:00.000Z", setBy: "me@example.com" } });
+  assert.deepEqual(hubSeen.at(-1), { method: "PUT", path: "/api/admin/jev", email: "me@example.com", key: JEV_KEY }, "trimmed, to the hub alone");
+  assert.equal(saved.text.includes(JEV_KEY), false);
+  const status = await send("/api/team/admin/jev", { method: "POST", body: {} });
+  assert.deepEqual(status.json, { ok: true, jev: { set: true, setAt: "2026-10-07T09:00:00.000Z", setBy: "me@example.com" } });
+  assert.equal(status.text.includes(JEV_KEY), false, "not even when the hub sends it");
+
+  // An empty key never leaves the app; one the hub turns down comes back with its code.
+  const asked = hubSeen.length;
+  const empty = await send("/api/team/admin/jev/set", { method: "POST", body: { key: "   " } });
+  assert.equal(empty.json.ok, false);
+  assert.equal(hubSeen.length, asked);
+  const refused = await send("/api/team/admin/jev/set", { method: "POST", body: { key: "short" } });
+  assert.deepEqual([refused.json.ok, refused.json.code, refused.json.status], [false, "bad_request", 400]);
+
+  const cleared = await send("/api/team/admin/jev/clear", { method: "POST", body: {} });
+  assert.deepEqual(cleared.json, { ok: true, jev: { set: false, setAt: null, setBy: null } });
+  assert.equal(hubSeen.at(-1).method, "DELETE");
+
+  for (const route of ["/api/team/admin/jev", "/api/team/admin/jev/set", "/api/team/admin/jev/clear"]) {
+    assert.equal((await send(route)).status, 405, `${route} takes a JSON POST only`);
+  }
 });

@@ -553,14 +553,19 @@ do what on it.
 - **The team hub.** One Cloudflare Worker per team, at `https://team.<zone>` (the 팀
   주소 the admin sends people), with one Durable Object holding the team: its name,
   who is in it (the roster), each person's peer name and server address, and the
-  requests between people with their answers. Its code is
+  requests between people with their answers, and the team's Jev key, with which it
+  judges teammates' questions for every member's server (`POST /guard`). Its code is
   `server/hub/hub.mjs`.
-- **Two Access applications.** The hub's, open to any Google login (the hub then
+- **Three Access applications.** The hub's, open to any Google login (the hub then
   says who is on the roster, so a stranger is told which email it saw), and the
   servers', one application whose destinations are every member's server (at most
   50) and whose policy is the roster. Both have Managed OAuth with dynamic client
   registration for loopback redirects and a one-year grant, so one browser login
-  per application lasts, and one servers login reaches every server.
+  per application lasts, and one servers login reaches every server. The third
+  covers only the hub's `/guard` and lets every request through: servers call it
+  with a guard token the hub gave them, and the hub checks that token itself. The
+  hub's Worker serves `/guard` itself, exactly, without a login; `/guard/…` and
+  every other path still need one.
 - **The app's login.** The app registers itself as an OAuth client, the browser logs
   in once, and the app keeps an opaque access token (15 minutes) and a refresh token
   in `<data>/state/team-auth.json` (owner-only), refreshing it under a lock so two
@@ -632,7 +637,9 @@ CLOUDFLARE_API_TOKEN='<api token>' node scripts/cli.mjs team make --name '<team 
 
 `team make` keeps the roster in the reusable Access policy "Team Memory people" (the
 admin's email first), makes the policy "Team Memory everyone" and the hub's Access
-application, and deploys the hub: the Worker script `team-memory-hub` with the
+application, opens the hub's `/guard` path alone with a second application on
+`team.<zone>/guard` and the reusable bypass policy (servers call it with their own
+guard token, not a person's login), and deploys the hub: the Worker script `team-memory-hub` with the
 Durable Object class `TeamHub`, the team's ids as the plain-text binding `TEAM`, and
 the API token as the secret `CF_API_TOKEN`, which the hub uses to make each member's
 server address. Its `workers.dev` address is turned off and it answers at
@@ -719,6 +726,15 @@ address and closes their requests, so they can no longer log in, ask or collect.
 On the computer that made the team, the Cloudflare block holds the zone and
 token 바꾸기.
 
+Jev 키 sets the team's Jev API key. The hub keeps it in its Durable Object and uses
+it itself: a member's server sends each teammate's question to `POST /guard` with
+its own guard token, and the hub asks Jev and answers with the verdict, so the key
+never leaves the hub. 저장 sends it to the hub (`PUT /api/admin/jev`) and 지우기
+removes it (`DELETE /api/admin/jev`); the row shows only 설정됨 with the date, or
+없음 (`GET /api/admin/jev` answers `{set, setAt, setBy}`), and no route of the hub
+or the app returns the key. Either takes effect at the next question, on every
+server.
+
 ## Sending to this server from other computers (Cloudflare) / 다른 컴퓨터에서 이 서버로 보내기
 
 What follows is how a server was shared before teams (0.4), and still is outside a
@@ -730,7 +746,7 @@ A personal server listens only on `127.0.0.1`. Sharing puts it behind a Cloudfla
 - **`gate`** (`server/gate/gate.mjs`) publishes `127.0.0.1:<gate port>` (8010, or the next free port; kept in the installed `.env` as `HONCHO_GATE_PORT` once chosen). It has two ways through:
   - `GET /health` and `/v3/*`, for the owner's other computers, with `Authorization: Bearer <gate token>`, compared in constant time. The gate token is 32 random bytes, generated once into the private `.env` as `HONCHO_GATE_TOKEN`. Bodies stream both ways (dialectic SSE included), and bodies over 20 MB are refused.
   - `/mcp`, for teammates' agents, only with a verified Cloudflare Access login: `Cf-Access-Jwt-Assertion`, checked against the team's keys and the application's AUD tag, with an email in it. The gate passes the request on to `mcp` with that email.
-- **`mcp`**, honcho-selfhost's MCP bridge, answers `chat` only, as `HONCHO_TEAM_PEER` in `HONCHO_TEAM_WORKSPACE`, and records each call with the caller's email in the `honcho_audit` schema of the server's PostgreSQL. With `HONCHO_JEV_GATE=1` and `TYPESAFE_API_KEY` in the `.env`, Jev judges each `chat` question first (see "Who asked, and Jev").
+- **`mcp`**, honcho-selfhost's MCP bridge, answers `chat` only, as `HONCHO_TEAM_PEER` in `HONCHO_TEAM_WORKSPACE`, and records each call with the caller's email in the `honcho_audit` schema of the server's PostgreSQL. With `HONCHO_JEV_GATE=1` in the `.env`, Jev judges each `chat` question first: through the team hub's guard in a team, with `TYPESAFE_API_KEY` outside one (see "Who asked, and Jev").
 - **`tunnel`**, `cloudflared` in a container, runs the tunnel whose token is `HONCHO_TUNNEL_TOKEN`. Its ingress, set in Cloudflare, is `http://gate:8010`.
 
 In Cloudflare the server's hostname has two Access applications. One covers `/v3` and `/health` and lets every request through to the gate, where the gate token is the lock. The other covers the rest of the hostname: it sends people to Google login and lets in only the emails on the team list, and MCP clients log in to it through Access's Managed OAuth.
@@ -765,9 +781,9 @@ node scripts/cli.mjs server share token     # the gate token, to copy to the oth
 - the application `Team Memory <host>` on the hostname: Google only and sent straight there, a 24-hour session, the people policy, and Managed OAuth with dynamic client registration for localhost and loopback redirects and a 336-hour grant;
 - the application on `<host>/v3` and `<host>/health` with the bypass policy.
 
-Then it writes `HONCHO_TUNNEL_TOKEN`, `HONCHO_ACCESS_TEAM_DOMAIN`, `HONCHO_ACCESS_AUD`, `HONCHO_TEAM_WORKSPACE` and `HONCHO_TEAM_PEER` into the installed `.env`, creates `HONCHO_GATE_TOKEN`, `HONCHO_TEAM_MCP_TOKEN` and `HONCHO_GATE_PORT` when they are missing, adds `share` to `COMPOSE_PROFILES` (other profiles are kept), and runs `docker compose up -d gate mcp tunnel dashboard` (the dashboard comes too: it reads the audit log with the team MCP token, which may be new). Once a call with the API token has worked, the token is saved owner-only in `runtime/cloudflare/api-token`, so the `teammates` commands need it in the environment only the first time. What was made, by id, goes in `runtime/team-access.json`, and the address in `runtime/share.json`. Running `enable` again changes only what is missing or wrong; `cloudflare.changes` lists it.
+Then it writes `HONCHO_TUNNEL_TOKEN`, `HONCHO_ACCESS_TEAM_DOMAIN`, `HONCHO_ACCESS_AUD`, `HONCHO_TEAM_WORKSPACE` and `HONCHO_TEAM_PEER` into the installed `.env`, creates `HONCHO_GATE_TOKEN`, `HONCHO_TEAM_MCP_TOKEN` and `HONCHO_GATE_PORT` when they are missing, adds `share` to `COMPOSE_PROFILES` (other profiles are kept), gets this server's guard token from the team hub (see "Who asked, and Jev"), and runs `docker compose up -d gate mcp tunnel dashboard` (the dashboard comes too: it reads the audit log with the team MCP token, which may be new). Once a call with the API token has worked, the token is saved owner-only in `runtime/cloudflare/api-token`, so the `teammates` commands need it in the environment only the first time. What was made, by id, goes in `runtime/team-access.json`, and the address in `runtime/share.json`. Running `enable` again changes only what is missing or wrong; `cloudflare.changes` lists it.
 
-`server start` brings the share services up by itself while sharing is on, because Compose reads `COMPOSE_PROFILES` from the installed `.env`. `server status` includes `share: {enabled, publicUrl}`.
+`server start` brings the share services up by itself while sharing is on, because Compose reads `COMPOSE_PROFILES` from the installed `.env`, and first gets a new guard token into that `.env`. `server status` includes `share: {enabled, publicUrl}`.
 
 `server share status` reports by name and state only: `gate`; `tunnel`, where `hostAutostart` means the host tunnel of an older version is still registered; `mcp: {configured, missing, running}`, where `missing` names the settings `/mcp` still needs; and `cloudflare: {managed, joined, host, apiTokenSaved, teammatesShared}`. `--check` also requests `<public address>/health` with the gate token and reports `publicCheck.state`: `ok`; `access` (Cloudflare Access stopped the request: a 403, a redirect to `*.cloudflareaccess.com`, or a `cf-access-*`/`cf-mitigated` header); `token` (a 401 from the gate); `unreachable` (DNS or network failure, or a Cloudflare 502/530/1033 because the tunnel or the gate is down); or `error`.
 
@@ -777,7 +793,11 @@ Then it writes `HONCHO_TUNNEL_TOKEN`, `HONCHO_ACCESS_TEAM_DOMAIN`, `HONCHO_ACCES
 
 팀 → 조회 기록 lists every call that reached `mcp`: when, who (the email the gate verified), the question, and whether it passed, was refused or failed. The bridge writes each call to `honcho_audit.tool_calls`; the dashboard reads them from the bridge's `GET http://mcp:8765/audit` with `Authorization: Bearer <HONCHO_TEAM_MCP_TOKEN>` (`HONCHO_MCP_AUDIT_URL`, `HONCHO_MCP_BEARER_TOKEN` on the dashboard, `HONCHO_AUDIT_READ=1` on `mcp`), and the app relays `/api/dashboard/audit` to the dashboard. `/audit` is outside `/mcp`, so the gate never passes it on, and `mcp` has no host port. While sharing is off there is no `mcp`: the dashboard answers 502 and the screen says sharing is off. The records stay in the database and show again once it is on.
 
-Jev judges each teammate's `chat` before it reaches the memory, on while `HONCHO_JEV_GATE=1` and `TYPESAFE_API_KEY` are in the installed `.env`; `TYPESAFE_BASE_URL`, `HONCHO_JEV_MODEL`, `HONCHO_JEV_THRESHOLD` (0.7), `HONCHO_JEV_FAIL_MODE` (`open`) and `HONCHO_JEV_TOOLS` (`chat`) are optional (`server/.env.example`). A refused question is recorded as `denied` with its score, and a question Jev failed to judge and let through carries the reason on its row.
+Jev judges each teammate's `chat` before it reaches the memory, and refuses a question about the owner's private life rather than shared work. A refused question is recorded as `denied` with its score, and a question let through without a judgment carries the reason on its row.
+
+In a team the judging is the hub's (관리자 → Jev 키). Whenever sharing through the team is turned on (`team share`), and on every `server start` while so shared, the owner's app asks the hub for this server's guard token (`POST /api/me/guard`, with the owner's own team login) and writes `HONCHO_JEV_GATE=1`, `HONCHO_JEV_GUARD_URL=https://team.<zone>/guard` and `HONCHO_JEV_GUARD_TOKEN` into the installed `.env` before Compose starts `mcp`. Each new token ends the one before it, and the hub keeps only its SHA-256. The request names the tunnel this computer runs (`{tunnelId}`, read from the tunnel token in the `.env`), and the hub gives a token only to the computer running the server's current tunnel: a server moved to another computer keeps its address, and the computer it left must not end the new one's token (`409 other_computer`). A server shared another way (its own address, its own Cloudflare account, an invite) asks the hub nothing. The bridge then sends each question with the tool, the caller's email and the workspace to `/guard`; the hub asks Jev with the team's key (`jev-latest`), refuses at a score of 0.7 or more, and answers `{judged, allowed, score}`, keeping neither the question nor the answer. While the hub has no key, questions pass unjudged, and their rows say so. The hub refuses a token it did not give out or has replaced, a server whose owner left the roster or moved the server to another computer, and more than 120 questions a minute from one server; then, as when the hub or Jev cannot answer, `HONCHO_JEV_FAIL_MODE` (`open`) decides. Without a team login on that computer, without a server in the team, or when the hub cannot be reached or refuses, the `.env` stays as it is and the result's `jev` says why (`no_hub_login`, `no_server`, `other_computer`, `no_tunnel`, `hub_unreachable`, `hub_refused` with the hub's code); sharing and starting go on either way. No result, command or log holds the token.
+
+Outside a team, `HONCHO_JEV_GATE=1` and `TYPESAFE_API_KEY` in the installed `.env` make the bridge call Jev itself; `TYPESAFE_BASE_URL`, `HONCHO_JEV_MODEL`, `HONCHO_JEV_THRESHOLD` (0.7), `HONCHO_JEV_FAIL_MODE` (`open`) and `HONCHO_JEV_TOOLS` (`chat`) are optional (`server/.env.example`). With a guard URL the bridge asks the hub and does not use `TYPESAFE_API_KEY`.
 
 ### Teammates / 팀원
 

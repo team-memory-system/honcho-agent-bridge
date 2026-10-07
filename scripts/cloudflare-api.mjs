@@ -20,6 +20,9 @@
 //     apps above, which go when the host joins it;
 //   - the hub app, "Team Memory hub <host>", behind the reusable "Team Memory
 //     everyone" policy: anyone with a login reaches the hub, which keeps the roster.
+// and a third without a login: the guard app, "Team Memory hub <host> guard", on
+// <host>/guard alone with the Bypass policy, where members' servers ask the hub to
+// judge a teammate's question with a guard token the hub checks.
 //
 // Every ensure* helper looks first (by name, else by domain), creates only what is
 // missing and updates only what differs, so running it twice changes nothing.
@@ -616,5 +619,20 @@ export function hubAppBody({ host, idpId, policyId }) {
     session_duration: "24h",
     policies: [{ id: policyId, precedence: 1 }],
     oauth_configuration: managedOAuth(),
+  };
+}
+
+/**
+ * The hub's guard app: <host>/guard passes Access untouched, behind the Bypass
+ * policy, since a server calls it rather than a person; the guard token guards it.
+ * The hub's Worker serves only /guard itself without a login.
+ */
+export function hubGuardAppBody({ host, policyId }) {
+  return {
+    name: `${HUB_APP_NAME} ${host} guard`,
+    type: "self_hosted",
+    domain: `${host}/guard`,
+    destinations: [{ type: "public", uri: `${host}/guard` }],
+    policies: [{ id: policyId, precedence: 1 }],
   };
 }

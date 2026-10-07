@@ -10,7 +10,8 @@
 //             Access login, and /v3 also a device key or a grant in access.json,
 //             which gate-access.mjs keeps in <runtime>/gate (the gate's /gate-state).
 //   - mcp     the Honcho MCP bridge, `chat` only, over HONCHO_TEAM_WORKSPACE as
-//             HONCHO_TEAM_PEER.
+//             HONCHO_TEAM_PEER. In a team each teammate's question goes past the
+//             team hub's Jev guard first (see "the Jev guard" below).
 //   - tunnel  cloudflared running this server's remotely managed tunnel with
 //             HONCHO_TUNNEL_TOKEN; Cloudflare sends <host> to http://gate:8010.
 // `server start` brings all three up whenever COMPOSE_PROFILES has "share", so the
@@ -36,8 +37,9 @@
 // token into the .env and delete <runtime>/cloudflared, so two connectors never run
 // one tunnel.
 //
-// What is on lives in the installed .env (COMPOSE_PROFILES has "share"; the tokens
-// and the Access settings) and <runtime>/share.json, which holds no secret:
+// What is on lives in the installed .env (COMPOSE_PROFILES has "share"; the tokens,
+// the Access settings and, in a team, the hub's guard token) and
+// <runtime>/share.json, which holds no secret:
 //   publicUrl, enabledAt, disabledAt   the address and when it changed
 //   host, teamDomain, aud, tunnelId    the Cloudflare side, when known
 //   tunnel                             true while on, false once off; absent in an
@@ -103,6 +105,7 @@ import {
   withTeamAccessLock,
   writeTeamState,
 } from "./team-access.mjs";
+import { readTeamAuth, TEAM_AUTH_ENV, teamAuthPaths } from "./team-auth.mjs";
 
 export const TUNNEL_TOKEN_ENV = "HONCHO_TUNNEL_TOKEN";
 export const SHARE_PROFILE = "share";
@@ -111,6 +114,10 @@ export const MCP_SERVICE = "mcp";
 export const TUNNEL_SERVICE = "tunnel";
 export const SHARE_SERVICES = Object.freeze([GATE_SERVICE, MCP_SERVICE, TUNNEL_SERVICE]);
 const DASHBOARD_SERVICE = "dashboard";
+export const JEV_GATE_ENV = "HONCHO_JEV_GATE";
+export const JEV_GUARD_URL_ENV = "HONCHO_JEV_GUARD_URL";
+export const JEV_GUARD_TOKEN_ENV = "HONCHO_JEV_GUARD_TOKEN";
+const GUARD_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 /** What the gate needs before /mcp answers at all. */
 export const MCP_SETTINGS = Object.freeze(["HONCHO_ACCESS_TEAM_DOMAIN", "HONCHO_ACCESS_AUD", "HONCHO_TEAM_MCP_TOKEN"]);
 export const DEFAULT_SHARE_NAME = "memory";
@@ -171,6 +178,9 @@ function shareContext(options = {}) {
     },
     gateWaitMs: options.gateWaitMs ?? 30_000,
     config: options.config,
+    // This computer's team login, for the Jev guard: { paths, fetchImpl } (tests hand
+    // in their own); otherwise team-auth.mjs's files.
+    teamAuth: options.teamAuth || null,
     // For the Cloudflare client: a test hands in a local fake's address.
     cloudflare: { env, apiBaseUrl: options.apiBaseUrl, cloudflareFetch: options.cloudflareFetch },
   };
@@ -543,15 +553,113 @@ export async function shareStatus(options = {}) {
   return result;
 }
 
+// ---------------------------------------------------------- the Jev guard
+//
+// In a team the Jev key stays in the team hub, and the hub judges each teammate's
+// `chat` with it (its guard, https://<hub>/guard). This server holds only its own
+// token for that guard, which the hub issues to the member whose server it is
+// (POST /api/me/guard) and can revoke: HONCHO_JEV_GATE=1, HONCHO_JEV_GUARD_URL and
+// HONCHO_JEV_GUARD_TOKEN in the .env make mcp ask the guard before a question
+// reaches the memory. Each request issues a new token and ends the one before, so it
+// is made as sharing through the team is turned on and on every `server start` while
+// so shared, just before Compose starts mcp with it. The request names the tunnel
+// this computer runs, and the hub answers only the computer running the server's
+// current tunnel: a server moved to another computer keeps its address, and the one
+// it left must not end the new one's token. A server shared another way (its own
+// address, its own Cloudflare, an invite) asks nothing. Without a team login on this
+// computer, when this person has no server in the team, or when the hub cannot be
+// reached, refuses or answers with something else, the .env stays exactly as it was
+// and the result says why; sharing and starting go on.
+// TYPESAFE_API_KEY, which a server outside a team uses directly, is never touched.
+// The token goes to the .env and nowhere else: no result, command, log or share.json
+// holds it.
+
+async function teamAuthFor(ctx) {
+  if (ctx.teamAuth) return ctx.teamAuth;
+  const env = { ...process.env, ...ctx.env };
+  // team-auth.json sits in the data directory the config names, unless the
+  // environment names the file itself.
+  const config = ctx.config ?? (String(env[TEAM_AUTH_ENV] || "").trim() ? null : await loadConfig().catch(() => null));
+  return { paths: teamAuthPaths(config, env) };
+}
+
+/** The guard's address as the .env holds it: https://<the team hub>/guard and nothing else, or null. */
+function guardUrl(value, hub) {
+  let url;
+  try { url = new URL(String(value || "")); } catch { return null; }
+  if (url.protocol !== "https:" || url.username || url.password || url.port) return null;
+  if (url.pathname !== "/guard" || /[?#]/.test(String(value)) || !hub || url.hostname !== hub) return null;
+  return `https://${url.hostname}/guard`;
+}
+
+/** Why the hub gave no token: its own code when it named one, never a token. */
+function guardFailure(error) {
+  const code = error?.code ? String(error.code) : "";
+  const status = Number(error?.status) || 0;
+  const detail = firstLine(error?.message || error);
+  if (code === "no_team" || code === "login_needed") return { synced: false, reason: "no_hub_login", detail };
+  if (status === 404 && code === "no_server") return { synced: false, reason: "no_server", detail };
+  if (status === 409 && code === "other_computer") return { synced: false, reason: "other_computer", detail };
+  const reason = status >= 400 && status < 500 ? "hub_refused" : "hub_unreachable";
+  return { synced: false, reason, ...(code ? { code } : {}), detail };
+}
+
+/** `tunnelId`: the tunnel this computer runs for its server in the team. */
+async function syncJevGuard(ctx, tunnelId) {
+  if (!tunnelId) {
+    return { synced: false, reason: "no_tunnel", detail: "The tunnel token in the .env names no tunnel, so the team hub cannot tell this computer runs the server" };
+  }
+  const teamAuth = await teamAuthFor(ctx);
+  let answer;
+  try {
+    // team-hub imports this module, hence the import at call time.
+    const { hubCall } = await import("./team-hub.mjs");
+    answer = await hubCall("POST", "/api/me/guard", { tunnelId }, teamAuth);
+  } catch (error) {
+    return guardFailure(error);
+  }
+  const url = guardUrl(answer?.url, (await readTeamAuth(teamAuth.paths)).hub);
+  if (!url) return { synced: false, reason: "hub_answer", detail: "The team hub named a guard address other than its own /guard" };
+  const token = typeof answer?.token === "string" && GUARD_TOKEN_PATTERN.test(answer.token) ? answer.token : null;
+  if (!token) return { synced: false, reason: "hub_answer", detail: "The team hub's guard token is not 64 lower-case hex digits" };
+  const text = await fsp.readFile(ctx.paths.envFile, "utf8");
+  const updated = replaceEnvironment(text, { [JEV_GATE_ENV]: "1", [JEV_GUARD_URL_ENV]: url, [JEV_GUARD_TOKEN_ENV]: token });
+  if (updated !== text) await writeEnvironment(ctx, updated);
+  return { synced: true, changed: updated !== text };
+}
+
+/** syncJevGuard that never throws: sharing and starting go on without the guard. */
+async function syncJevGuardSafely(ctx, tunnelId) {
+  try {
+    return await syncJevGuard(ctx, tunnelId);
+  } catch (error) {
+    return { synced: false, reason: "error", detail: firstLine(error?.message || error) };
+  }
+}
+
+/**
+ * This server's guard token into its .env, for `server start` while shared, before
+ * Compose starts mcp; null when it is not shared through the team hub.
+ */
+export async function syncJevGuardToken(options = {}) {
+  const ctx = shareContext(options);
+  if (!(await exists(ctx.paths.envFile))) return { synced: false, reason: "not_installed", detail: "No memory server is installed on this computer" };
+  const state = await readJson(ctx.paths.stateFile);
+  if (state?.team !== true || state?.joined === true) return null;
+  const environment = await readEnvironmentFile(ctx.paths.envFile);
+  return syncJevGuardSafely(ctx, tunnelIdFromToken(environment[TUNNEL_TOKEN_ENV]));
+}
+
 // ------------------------------------------------------------------- open
 
 /**
  * The local half every way in shares: `values` and whatever is still missing
  * (the gate token, the team MCP token, the gate port) written to the .env, the share
  * profile on, and gate, mcp and tunnel up. The profile is only turned on with a
- * tunnel token and a team MCP token in place.
+ * tunnel token and a team MCP token in place. `team`: shared through the team hub,
+ * so this server's guard token comes too.
  */
-async function openShare(ctx, values) {
+async function openShare(ctx, values, { team = false } = {}) {
   const text = await fsp.readFile(ctx.paths.envFile, "utf8");
   const environment = parseEnvironment(text);
   const next = { ...values };
@@ -570,6 +678,8 @@ async function openShare(ctx, values) {
   const tunnelTokenUpdated = String(environment[TUNNEL_TOKEN_ENV] || "").trim() !== String(merged[TUNNEL_TOKEN_ENV]).trim();
   const updated = replaceEnvironment(text, next);
   if (updated !== text) await writeEnvironment(ctx, updated);
+  // Through the team, mcp is made with this server's guard token already in the .env.
+  const jev = team ? await syncJevGuardSafely(ctx, tunnelIdFromToken(merged[TUNNEL_TOKEN_ENV])) : null;
 
   // A changed token or setting recreates that container; an unchanged one is left
   // alone. The dashboard reads the audit log from mcp with the team MCP token, so it
@@ -594,6 +704,7 @@ async function openShare(ctx, values) {
     port: gatePort.port,
     gate,
     mcp: mcpReadiness(merged),
+    ...(jev ? { jev } : {}),
   };
 }
 
@@ -606,6 +717,7 @@ function openedResult(opened, extra) {
     gate: { port: opened.port, localUrl: `http://127.0.0.1:${opened.port}`, ...opened.gate },
     tunnel: { service: TUNNEL_SERVICE, tokenUpdated: opened.tunnelTokenUpdated },
     mcp: opened.mcp,
+    ...(opened.jev ? { jev: opened.jev } : {}),
     ...(opened.gate.healthy ? {} : { warnings: ["The gate did not answer its health check yet; check server status"] }),
   };
 }
@@ -826,7 +938,7 @@ async function shareEnableTeamUnlocked(ctx, options) {
     HONCHO_ACCESS_AUD: aud,
     HONCHO_TEAM_WORKSPACE: identity.workspace,
     HONCHO_TEAM_PEER: identity.peer,
-  });
+  }, { team: true });
   if (!opened.ok) return opened.failure;
   const publicUrl = `https://${host}`;
   const state = {

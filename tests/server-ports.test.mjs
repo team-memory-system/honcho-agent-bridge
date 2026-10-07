@@ -15,6 +15,10 @@ import {
   serverStart,
 } from "../scripts/server-manager.mjs";
 
+// Starting a shared server asks the team hub for its Jev guard token with this
+// computer's team login; no test here reaches a real one.
+process.env.HONCHO_AGENT_TEAM_AUTH = path.join(os.tmpdir(), `no-team-login-${process.pid}`, "team-auth.json");
+
 const noFetch = async () => ({ ok: true, fetched: false, directory: "(stubbed)" });
 
 test("portInUse sees a listener on 127.0.0.1 and a free port as free", async (t) => {

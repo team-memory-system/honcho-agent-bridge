@@ -1585,6 +1585,23 @@ async function settleShareFor(profile, directory, shareOptions, privateFileOptio
   return settleShareProfile(directory, { shareOptions, privateFileOptions });
 }
 
+/**
+ * While the .env shares this server through the team hub, the hub's guard token for
+ * it goes into the .env before Compose starts mcp (share-manager's syncJevGuardToken
+ * says how); null when not so shared. share-manager imports this module, hence the
+ * import at call time.
+ */
+async function syncJevGuardFor(directory, shareOptions) {
+  const environment = await readEnvironmentFile(path.join(directory, ".env"));
+  if (!profileList(environment).includes(SHARE_PROFILE_NAME)) return null;
+  try {
+    const { syncJevGuardToken } = await import("./share-manager.mjs");
+    return await syncJevGuardToken({ serverDirectory: directory, ...shareOptions });
+  } catch (error) {
+    return { synced: false, reason: "error", detail: String(error?.message || error).split(/\r?\n/)[0] };
+  }
+}
+
 async function waitForHealth(url, timeoutMs = 120_000) {
   const started = Date.now();
   let lastError = "";
@@ -1648,6 +1665,7 @@ async function serverStartUnlocked({
   // The prepare above settled the share profile; a start given a server prepared
   // elsewhere settles it here, so share never comes up half set.
   const share = preparedServer ? await settleShareFor(profile, installed, shareOptions) : prepared.share || null;
+  const jev = await syncJevGuardFor(installed, shareOptions);
   const args = ["up", "-d", "--remove-orphans"];
   if (build) args.push("--build");
   const ports = await installedServerPorts(installed);
@@ -1681,6 +1699,7 @@ async function serverStartUnlocked({
     ...serverUrls(ports),
     compose: { stdout: composeResult.stdout.trim(), stderr: composeResult.stderr.trim() },
     ...(share ? { share } : {}),
+    ...(jev ? { jev } : {}),
     ...(share?.warnings?.length ? { warnings: share.warnings } : {}),
   };
   if (host) result.host = host;
