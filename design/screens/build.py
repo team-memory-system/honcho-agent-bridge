@@ -528,22 +528,22 @@ def w1_body(kind):
                 + opt("radio", True, '내 서버 <span class="mono muted">' + MY_SERVER + "</span>", "MacBook에서 만든 서버",
                       tag("찾음", "ok"))
                 + opt("radio", False, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
-                + opt("radio", False, "수집하지 않기", "팀원 기억에 chat으로 묻기만 합니다.")
+                + opt("radio", False, "수집하지 않기")
                 + "</div>" + company_opts() + peer_field())
     if kind == "none":
         return (q + "<p class=\"lead\">" + ME + " 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", True, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
-                + opt("radio", False, "수집하지 않기", "팀원 기억에 chat으로 묻기만 합니다.")
+                + opt("radio", False, "수집하지 않기")
                 + "</div>" + company_opts() + peer_field())
     if kind == "none-admin":
         return (q + "<p class=\"lead\">admin@example.com 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", True, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
-                + opt("radio", False, "수집하지 않기", "팀원 기억에 chat으로 묻기만 합니다.")
+                + opt("radio", False, "수집하지 않기")
                 + "</div>" + peer_field("admin"))
     if kind == "skip":
         return (q + "<p class=\"lead\">" + ME + " 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", False, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
-                + opt("radio", True, "수집하지 않기", "팀원 기억에 chat으로 묻기만 합니다.")
+                + opt("radio", True, "수집하지 않기")
                 + "</div>")
     if kind == "solo-local":
         return (q + '<div class="opts">'
@@ -562,7 +562,7 @@ def w1_body(kind):
         on = kind == "edit-company"
         return (q + '<div class="label">내 기억 서버</div><div class="opts">'
                 + opt("radio", True, '이 컴퓨터 서버 <span class="mono muted">' + LOCAL + "</span>", "", tag("지금 수집 중", "ok"))
-                + opt("radio", False, "수집하지 않기", "팀원 기억에 chat으로 묻기만 합니다.")
+                + opt("radio", False, "수집하지 않기")
                 + "</div>" + company_opts(on, hint=on) + peer_field())
     raise ValueError(kind)
 
@@ -737,7 +737,7 @@ def scr_wm(steps, at):
 
 
 def scr_wt():
-    body = ('<h3>어느 팀원의 기억에 chat으로 물을까요?</h3><div class="opts" style="margin-top:14px">'
+    body = ('<h3>어느 팀원의 기억에 물을까요?</h3><div class="opts" style="margin-top:14px">'
             + opt("box", True, 'alice <span class="mono muted">memory-alice.example.com</span>')
             + opt("box", True, 'bob <span class="mono muted">memory-bob.example.com</span>')
             + opt("box", False, "carol", "서버 없음", dis=True)
@@ -1112,7 +1112,7 @@ def main():
     for row in ROWS:
         if row[0] == "cat":
             cat_i += 1
-            notes["cat" + str(cat_i)] = {"kind": "title1", "maxW": 9000, "text": row[1], "w": 240, "x": 0, "y": y}
+            notes["cat" + str(cat_i)] = {"kind": "title1", "maxW": 8000, "text": row[1], "w": 240, "x": 0, "y": y}
             y += 260
             continue
         _, cid, name, steps, end = row
