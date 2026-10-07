@@ -101,9 +101,10 @@ export function activeTargets(draft) {
 /**
  * Where to collect. `choices` lists what this window offers: "here" (this computer's
  * server, made now when there is none), "remote" (my server on another computer)
- * and "none" (store nothing, for someone who only asks teammates).
+ * and "none" (store nothing, for someone who only asks teammates). `onPick(choice)`
+ * hears each choice, for a window whose later steps follow it.
  */
-export function serverStep(draft, context, { choices = ["here", "remote"], peer = true, lead, others = false, company = null } = {}) {
+export function serverStep(draft, context, { choices = ["here", "remote"], peer = true, lead, others = false, company = null, onPick } = {}) {
   const localUrl = context?.localServer?.apiUrl || "";
   const current = context?.configured ? (sameServer(context.honcho?.url, localUrl) ? "here" : "remote") : "";
   if (!choices.includes(draft.server)) draft.server = choices[0];
@@ -124,6 +125,7 @@ export function serverStep(draft, context, { choices = ["here", "remote"], peer 
     draft.server = choice;
     remoteFields.hidden = choice !== "remote";
     if (choice === "remote") urlInput.focus();
+    onPick?.(choice);
   };
   const rows = choices.map((choice) => {
     if (choice === "here") {

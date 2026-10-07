@@ -92,6 +92,8 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
   let at = 0;
   let steps = [];
   let keys = [];
+  // Redraws the stepper and the button when a choice changes the steps that follow.
+  let frame = null;
   const issue = h("div", {});
   const win = modal({
     title: TITLE,
@@ -277,7 +279,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     const local = app.context?.localServer;
     const choices = state.path === "make" || !mine ? ["here", "none"] : ["found", "here", "none"];
     if (!choices.includes(draft.server)) draft.server = choices[0];
-    const pick = (choice) => () => { draft.server = choice; };
+    const pick = (choice) => () => { draft.server = choice; frame?.(); };
     const rows = choices.map((choice) => {
       if (choice === "found") {
         return opt({ name: "server", value: "found", checked: draft.server === "found", onChange: pick("found"),
@@ -383,7 +385,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     if (key === "agents") return agentsStep(state.draft, context, { chatgpt: true });
     if (key === "projects") return projectsStep(state.draft, context);
     if (inTeam()) return teamServerStep();
-    return serverStep(state.draft, context, { choices: ["here", "remote"] });
+    return serverStep(state.draft, context, { choices: ["here", "remote"], onPick: () => frame?.() });
   }
 
   // ── The window, one screen at a time ──
@@ -420,15 +422,18 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
       at -= 1;
       drawStep();
     } });
+    frame = null;
     if (step.foot) {
       win.foot(back, step.foot);
       return;
     }
-    const last = at === keys.length - 1;
-    win.foot(back, button(step.next || (last ? "적용" : "다음"), { kind: "primary", onClick: async (event) => {
+    const last = () => at === stepKeys().length - 1;
+    const label = () => step.next || (last() ? "적용" : "다음");
+    const primary = button(label(), { kind: "primary", onClick: async (event) => {
       const problemText = step.check();
       if (problemText) { clear(issue, notice("warn", problemText)); return; }
-      if (last) { apply(); return; }
+      keys = stepKeys();
+      if (last()) { apply(); return; }
       // The login opens a tab: opened now, in the click, so the browser lets it.
       if (keys[at + 1] === "login") state.login.tab = loginTab(step.run ? "팀을 만드는 중입니다. 다 되면 Google 로그인으로 넘어갑니다…" : "Google 로그인으로 넘어가는 중입니다…");
       if (step.run) {
@@ -448,7 +453,13 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
       state.login.phase = "idle";
       at += 1;
       drawStep();
-    } }));
+    } });
+    frame = () => {
+      keys = stepKeys();
+      win.steps(stepper(keys.map((key) => LABELS[key]), at));
+      primary.querySelector("span").textContent = label();
+    };
+    win.foot(back, primary);
   }
 
   // ── 적용 중: each thing the setup does, one row each ──
@@ -663,12 +674,14 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     if (state.path === "make") items.push({ title: "관리자 탭", text: "팀원 더하기로 팀원 이메일을 넣고, 팀 주소를 보내세요." });
     const agentsOnly = items.every((item) => Object.values(AGENTS).includes(item.title));
     const chatOnly = state.draft.server === "none";
+    // Waiting only when this setup asked someone: the admin who made a team asked nobody.
+    const waiting = chatOnly && state.requested.length > 0;
     const next = state.path === "make" ? ["관리자 탭 열기", "admin"]
       : chatOnly ? ["팀 화면 열기", "team"]
         : ["대시보드 열기", "dashboard"];
     const names = matesChosen().filter((mate) => state.requested.includes(mate.email)).map((mate) => mate.name);
     win.body(
-      h("h3", {}, chatOnly ? "승인 기다리는 중" : items.length ? `${agentsOnly ? "에이전트에서 할 일" : "할 일"} ${items.length}개` : "다 됐습니다"),
+      h("h3", {}, waiting ? "승인 기다리는 중" : items.length ? `${agentsOnly ? "에이전트에서 할 일" : "할 일"} ${items.length}개` : "다 됐습니다"),
       chatOnly && names.length ? h("p", { class: "lead" }, `${joined(names)}에게 chat 요청을 보냈습니다.`) : null,
       items.length ? todoList(items) : h("p", { class: "lead" }, "이제 대화가 끝날 때마다 기억 서버에 쌓입니다."));
     win.foot(null, button(next[0], { kind: "primary", onClick: () => { win.close("done"); onDone?.(next[1]); } }));
