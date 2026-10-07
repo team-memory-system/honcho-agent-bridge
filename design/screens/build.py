@@ -465,13 +465,13 @@ def tall(screen, h=1080):
 
 # ---------------------------------------------------------------- modal parts
 
-TEAM = ["로그인", "서버", "에이전트", "프로젝트"]
-JOIN = ["팀 주소", "로그인", "서버", "에이전트", "프로젝트"]
+TEAM = ["로그인", "서버", "에이전트", "프로젝트", "팀원"]
+JOIN = ["팀 주소", "로그인", "서버", "에이전트", "프로젝트", "팀원"]
 MAKE = ["팀 만들기", "로그인", "서버", "에이전트", "프로젝트"]
 SOLO = ["서버", "에이전트", "프로젝트"]
 EDIT = ["서버", "에이전트", "프로젝트"]
 CHATONLY = ["로그인", "서버", "팀원"]
-TEAM_NEW = ["로그인", "서버", "모델", "에이전트", "프로젝트"]
+TEAM_NEW = ["로그인", "서버", "모델", "에이전트", "프로젝트", "팀원"]
 MAKE_NEW = ["팀 만들기", "로그인", "서버", "모델", "에이전트", "프로젝트"]
 SOLO_NEW = ["서버", "모델", "에이전트", "프로젝트"]
 START = "팀 메모리 시작하기"
@@ -581,31 +581,37 @@ def w1_body(kind, company=False):
     raise ValueError(kind)
 
 
-# Agent folders found on this computer: (icon class, letter, name, folder). An account
-# with its own folder (CLAUDE_CONFIG_DIR, CODEX_HOME, GROK_HOME) is a row of its own.
+# Agent folders found on this computer: (icon class, letter, name, folder).
 AGENTS_FOUND = [("src", "C", "Claude Code", "~/.claude"), ("src x", "X", "Codex", "~/.codex")]
 AGENTS_GROK = AGENTS_FOUND + [("src g", "G", "Grok CLI", "~/.grok")]
-AGENTS_TWO_CLAUDE = [("src", "C", "Claude Code", "~/.claude"), ("src", "C", "Claude Code", "~/.claude-work"),
-                     ("src x", "X", "Codex", "~/.codex")]
 
 
-def w2_body(edit=False, agents=AGENTS_FOUND):
+# ChatGPT has no hook, so first setup takes its export file here and imports it before the
+# agents' past conversations. Later imports go through 기억 설정 → ChatGPT 기록 (3-4).
+CHATGPT_FILE = '<span class="mono">chatgpt-export.zip</span> · 48MB · 대화 312개'
+
+
+def w2_body(edit=False, agents=AGENTS_FOUND, chatgpt=False):
     t = tag("수집 중", "ok") if edit else ""
     rows = "".join(opt("box", True, '<span class="' + cls + '">' + letter + "</span>" + name,
                        '<span class="mono">' + folder + "</span>", t) for cls, letter, name, folder in agents)
+    gpt = ""
+    if not edit:
+        gpt = ('<div class="label">파일로 가져오는 대화</div><div class="opts">'
+               + (opt("box", True, "ChatGPT", CHATGPT_FILE, btn("다른 파일", "quiet", sm=True)) if chatgpt else
+                  opt("box", False, "ChatGPT", "ChatGPT의 설정 → 데이터 제어 → 데이터 내보내기로 받은 zip 파일",
+                      btn("파일 고르기", sm=True)))
+               + "</div>")
     return ("<h3>어느 에이전트의 대화를 수집할까요?</h3><p class=\"lead\">이 컴퓨터에서 찾은 에이전트입니다.</p>"
-            '<div class="opts">' + rows + "</div>")
+            '<div class="opts">' + rows + "</div>" + gpt)
 
 
 PROJECTS = [("honcho", "~/dev/honcho", 33), ("web-app", "~/dev/web-app", 104),
             ("api-server", "~/dev/api-server", 292), ("notes", "~/Documents/notes", 14)]
 
 
-PAST_HINT = "새 대화는 적용한 뒤부터 자동으로 쌓입니다. 지난 대화는 여기서 고른 만큼만 쌓입니다."
-
-
-def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past_label="지난 대화",
-            past_note="고른 폴더의 지난 대화 429개", past_hint=PAST_HINT):
+# The ticked folders' past conversations all go in when 적용 runs, so there is nothing to choose.
+def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past="고른 폴더의 지난 대화 429개도 함께 수집합니다."):
     every = all(name in checked for name, _p, _n in PROJECTS)
     rows = ['<div class="pr h"><span class="box' + (" on" if every else "") + '"></span><span>폴더</span><span class="c">대화</span></div>']
     for name, path, n in PROJECTS:
@@ -617,14 +623,11 @@ def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past_label="�
     return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">고른 에이전트의 대화가 있는 폴더입니다.</p>"
             '<div class="pt">' + "".join(rows) + "</div>"
             '<div class="row2"><span class="box on"></span>새로 생기는 프로젝트 폴더도 수집</div>'
-            '<div class="row2"><span style="color:#57534b;margin-right:4px">' + past_label + "</span>"
-            '<span class="seg"><span class="on">전부</span><span>날짜부터</span><span>안 함</span></span>'
-            '<span class="muted" style="font-size:12.5px">' + past_note + "</span></div>"
-            + ('<div class="hint">' + past_hint + "</div>" if past_hint else ""))
+            '<div class="row2" style="color:#57534b">' + past + "</div>")
 
 
 def w3_matrix(mine="이 컴퓨터 서버", mine_on=("honcho", "web-app", "api-server", "notes"), fresh=("honcho",),
-              past_label="새로 고른 폴더의 지난 대화", past_note="회사에 33개", past_hint=""):
+              past="새로 고른 폴더의 지난 대화 33개도 회사에 쌓습니다."):
     """Project step when the server step picked more than one server: one column per server.
     The company column starts empty apart from what the user ticks (honcho here)."""
     head_row = ('<div class="pr m h"><span>폴더</span><span class="c">대화</span><span class="ch">' + mine + "</span>"
@@ -643,10 +646,7 @@ def w3_matrix(mine="이 컴퓨터 서버", mine_on=("honcho", "web-app", "api-se
                 '<span class="cc"><span class="box on"></span></span><span class="cc"><span class="box"></span></span></div>')
     return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">서버마다 쌓을 폴더를 고르세요. 고른 서버마다 칸이 하나씩 생깁니다.</p>"
             '<div class="pt">' + "".join(rows) + "</div>"
-            '<div class="row2"><span style="color:#57534b;margin-right:4px">' + past_label + "</span>"
-            '<span class="seg"><span class="on">전부</span><span>날짜부터</span><span>안 함</span></span>'
-            '<span class="muted" style="font-size:12.5px">' + past_note + "</span></div>"
-            + ('<div class="hint">' + past_hint + "</div>" if past_hint else ""))
+            '<div class="row2" style="color:#57534b">' + past + "</div>")
 
 
 def progress(items):
@@ -662,9 +662,10 @@ def progress(items):
     return '<div class="prog">' + "".join(out) + "</div>"
 
 
-# A W4 list: the memory server's own steps first, then each agent's.
+# A W4 list: the memory server's own steps first, then each agent's, then the teammates'.
 SERVER_STEPS = ("label", "기억 서버", "", "")
 AGENT_STEPS = ("label", "에이전트", "", "")
+MATE_STEPS = [("label", "팀원", "", ""), ("wait", "alice와 bob에게 chat 요청", "", "")]
 PROG_INSTALL = [
     SERVER_STEPS,
     ("ok", "Docker", "이 컴퓨터에 있음", ""),
@@ -685,7 +686,7 @@ PROG_INSTALL_TWO = [
     ("wait", "Claude Code에 플러그인 설치", "", ""),
     ("wait", "Codex에 플러그인 설치", "", ""),
     ("wait", "지난 대화 수집 시작", "", ""),
-]
+] + MATE_STEPS
 PROG_CONNECT_GROK = [
     SERVER_STEPS,
     ("ok", "내 서버 연결", MY_SERVER, ""),
@@ -693,8 +694,9 @@ PROG_CONNECT_GROK = [
     ("ok", "Claude Code에 플러그인 설치", "", ""),
     ("run", "Codex에 플러그인 설치", "", ""),
     ("wait", "Grok CLI에 훅 설치", "", ""),
+    ("wait", "ChatGPT 기록 가져오기", CHATGPT_FILE, ""),
     ("wait", "지난 대화 수집 시작", "", ""),
-]
+] + MATE_STEPS
 PROG_CONNECT_COMPANY = [
     SERVER_STEPS,
     ("ok", "내 서버 연결", MY_SERVER, ""),
@@ -703,7 +705,7 @@ PROG_CONNECT_COMPANY = [
     ("ok", "Claude Code에 플러그인 설치", "", ""),
     ("run", "Codex에 플러그인 설치", "", ""),
     ("wait", "지난 대화 수집 시작", "", ""),
-]
+] + MATE_STEPS
 PROG_LAN = [
     SERVER_STEPS,
     ("ok", "서버 연결", LAN, ""),
@@ -717,6 +719,7 @@ TODO_AGENTS = [
     ("Claude Code", "열린 세션에 <span class=\"mono\">/reload-plugins</span> 를 입력하세요."),
     ("Codex", "새 세션을 열고 훅을 승인하세요."),
 ]
+TODO_BELL = ("알림", "팀원이 승인하면 오른쪽 위 종에 알림이 뜹니다. 그 알림에서 연결을 누르세요.")
 
 
 def todo(items):
@@ -776,12 +779,14 @@ def scr_w1(steps, at, kind, back=False, company=False):
     return BLANK + (wizard(START, steps, at, w1_body(kind, company), foot(left, btn("다음", "pri", hit=True))),)
 
 
-def scr_w2(steps, at, agents=AGENTS_FOUND):
-    return BLANK + (wizard(START, steps, at, w2_body(agents=agents), foot(btn("이전", "quiet"), btn("다음", "pri", hit=True))),)
+def scr_w2(steps, at, agents=AGENTS_FOUND, chatgpt=False):
+    return BLANK + (wizard(START, steps, at, w2_body(agents=agents, chatgpt=chatgpt),
+                           foot(btn("이전", "quiet"), btn("다음", "pri", hit=True))),)
 
 
 def scr_w3(steps, at, body=None):
-    return BLANK + (wizard(START, steps, at, body or w3_body(), foot(btn("이전", "quiet"), btn("적용", "pri", hit=True))),)
+    last = "적용" if at == len(steps) - 1 else "다음"
+    return BLANK + (wizard(START, steps, at, body or w3_body(), foot(btn("이전", "quiet"), btn(last, "pri", hit=True))),)
 
 
 def scr_w4(steps, items):
@@ -804,13 +809,14 @@ def scr_wm(steps, at, accounts=1):
     return BLANK + (wizard(START, steps, at, body, foot(btn("이전", "quiet"), btn("다음", "pri", hit=True))),)
 
 
-def scr_wt():
+def scr_wt(steps=CHATONLY):
+    """Teammate step, the last step of every first setup that has teammates."""
     body = ('<h3>어느 팀원의 기억에 물을까요?</h3><div class="opts" style="margin-top:14px">'
             + opt("box", True, 'alice <span class="mono muted">memory-alice.example.com</span>')
             + opt("box", True, 'bob <span class="mono muted">memory-bob.example.com</span>')
             + opt("box", False, "carol", "서버 없음", dis=True)
             + '</div>')
-    return BLANK + (wizard(START, CHATONLY, 2, body, foot(btn("이전", "quiet"), btn("적용", "pri", hit=True))),)
+    return BLANK + (wizard(START, steps, len(steps) - 1, body, foot(btn("이전", "quiet"), btn("적용", "pri", hit=True))),)
 
 
 # in-app backdrops
@@ -847,8 +853,9 @@ def case(cid, name, steps, end):
     ROWS.append(("case", cid, name, steps, end))
 
 
-DONE_GREEN = ("green", "끝. 대시보드 열기를 누르면 대시보드가 열립니다.")
-DONE_LOCAL = ("green", "끝. 대시보드 열기를 누르면 대시보드가 열립니다 (3-1 줄 첫 화면과 같은 꼴).")
+MATES_LATER = " 팀원이 승인한 뒤 연결은 4-1 줄 6번째 화면부터 같습니다."
+DONE_GREEN = ("green", "끝. 대시보드 열기를 누르면 대시보드가 열립니다." + MATES_LATER)
+DONE_LOCAL = ("green", "끝. 대시보드 열기를 누르면 대시보드가 열립니다 (3-1 줄 첫 화면과 같은 꼴)." + MATES_LATER)
 
 cat("1. 처음 설정 · 팀 링크로 열었을 때 (링크를 열면 바로 Google 로그인)")
 case("1-1", "이메일이 팀 명단에 없음", [
@@ -858,25 +865,27 @@ case("1-1", "이메일이 팀 명단에 없음", [
 case("1-2", "내 서버가 이미 있음", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
     ("W1", "서버 · 찾은 내 서버", scr_w1(TEAM, 1, "found")),
-    ("W2", "에이전트 · Grok CLI도 찾음", scr_w2(TEAM, 2, AGENTS_GROK)),
-    ("W3", "프로젝트 · 적용", scr_w3(TEAM, 3)),
+    ("W2", "에이전트 · Grok CLI도 찾음 · ChatGPT 파일 고름", scr_w2(TEAM, 2, AGENTS_GROK, chatgpt=True)),
+    ("W3", "프로젝트", scr_w3(TEAM, 3)),
+    ("WT", "팀원 · 적용", scr_wt(TEAM)),
     ("W4", "적용 중", scr_w4(TEAM, PROG_CONNECT_GROK)),
-    ("W5", "에이전트에서 할 일", scr_w5(TEAM, TODO_AGENTS + [("Grok CLI", "새 세션을 여세요.")])),
+    ("W5", "할 일", scr_w5(TEAM, TODO_AGENTS + [("Grok CLI", "새 세션을 여세요."), TODO_BELL], title="할 일 4개")),
 ], DONE_GREEN)
 case("1-3", "내 서버 없음 · 이 컴퓨터에 만들기", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
     ("W1", "서버 · 새로 만들기 (모델 단계가 붙음)", scr_w1(TEAM_NEW, 1, "none")),
     ("WM", "모델 · ChatGPT 계정 2개", scr_wm(TEAM_NEW, 2, accounts=2)),
-    ("W2", "에이전트 · 계정마다 폴더가 따로 있음", scr_w2(TEAM_NEW, 3, AGENTS_TWO_CLAUDE)),
-    ("W3", "프로젝트 · 적용", scr_w3(TEAM_NEW, 4)),
+    ("W2", "에이전트", scr_w2(TEAM_NEW, 3)),
+    ("W3", "프로젝트", scr_w3(TEAM_NEW, 4)),
+    ("WT", "팀원 · 적용", scr_wt(TEAM_NEW)),
     ("W4", "적용 중 · 계정마다 로그인", scr_w4(TEAM_NEW, PROG_INSTALL_TWO)),
-    ("W5", "에이전트에서 할 일", scr_w5(TEAM_NEW, TODO_AGENTS)),
+    ("W5", "할 일", scr_w5(TEAM_NEW, TODO_AGENTS + [TODO_BELL], title="할 일 3개")),
 ], DONE_LOCAL)
 case("1-4", "내 서버 없음 · 쌓지 않고 팀원 기억만", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
-    ("W1", "서버 · 쌓지 않기 (단계가 팀원으로 바뀜)", scr_w1(CHATONLY, 1, "skip")),
+    ("W1", "서버 · 쌓지 않기 (팀원 단계만 남음)", scr_w1(CHATONLY, 1, "skip")),
     ("WT", "팀원 · 적용", scr_wt()),
-    ("W5", "승인 기다리는 중", scr_w5(CHATONLY, [("알림", "팀원이 승인하면 오른쪽 위 종에 알림이 뜹니다. 그 알림에서 연결을 누르세요.")],
+    ("W5", "승인 기다리는 중", scr_w5(CHATONLY, [TODO_BELL],
                                button="팀 화면 열기", title="승인 기다리는 중", lead="alice와 bob에게 chat 요청을 보냈습니다.")),
     ("T1", "팀 · 승인 기다리는 중", page("chat", "팀", team(
         mates=[item("alice", " " + tag("승인 기다리는 중", "warn"), "memory-alice.example.com", btn("요청 취소", "quiet", sm=True)),
@@ -887,12 +896,14 @@ case("1-5", "내 서버가 이미 있음 · 회사 서버에도 쌓기", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
     ("W1", "서버 · 회사도 고름", scr_w1(TEAM, 1, "found", company=True)),
     ("W2", "에이전트", scr_w2(TEAM, 2)),
-    ("W3", "프로젝트 · 서버마다 고르기 · 적용", scr_w3(TEAM, 3, w3_matrix(
-        "내 서버", ("honcho", "web-app", "api-server"), fresh=(), past_label="지난 대화",
-        past_note="내 서버에 429개 · 회사에 33개", past_hint=PAST_HINT))),
+    ("W3", "프로젝트 · 서버마다 고르기", scr_w3(TEAM, 3, w3_matrix(
+        "내 서버", ("honcho", "web-app", "api-server"), fresh=(),
+        past="고른 폴더의 지난 대화도 함께 쌓습니다 (내 서버 429개 · 회사 33개)."))),
+    ("WT", "팀원 · 적용", scr_wt(TEAM)),
     ("W4", "적용 중 · 회사에 승인 요청", scr_w4(TEAM, PROG_CONNECT_COMPANY)),
-    ("W5", "에이전트에서 할 일", scr_w5(TEAM, TODO_AGENTS)),
-], ("green", "끝. 회사 서버 주인이 승인하면 따로 누를 것 없이 회사에도 쌓입니다. 승인하는 쪽은 3-2 줄 5번째 화면부터 같습니다."))
+    ("W5", "할 일", scr_w5(TEAM, TODO_AGENTS + [TODO_BELL], title="할 일 3개")),
+], ("green", "끝. 회사 서버 주인이 승인하면 따로 누를 것 없이 회사에도 쌓입니다. 승인하는 쪽은 3-2 줄 5번째 화면부터 같습니다."
+    + MATES_LATER))
 
 cat("2. 처음 설정 · 팀 링크 없이 열었을 때")
 case("2-1", "팀에 들어가기", [
@@ -909,8 +920,9 @@ case("2-2", "새 팀 만들기 (관리자)", [
     ("W2", "에이전트", scr_w2(MAKE_NEW, 4)),
     ("W3", "프로젝트 · 적용", scr_w3(MAKE_NEW, 5)),
     ("W4", "적용 중 · 구독 계정 로그인", scr_w4(MAKE_NEW, PROG_INSTALL)),
-    ("W5", "할 일", scr_w5(MAKE_NEW, TODO_AGENTS + [("관리자 탭", "팀원 더하기로 팀원 이메일을 넣고, 팀 주소를 보내세요.")], title="할 일 3개")),
-], ("green", "끝. 대시보드가 열리고 사이드바에 관리자 탭이 생깁니다 (5-1 줄)."))
+    ("W5", "할 일", scr_w5(MAKE_NEW, TODO_AGENTS + [("관리자 탭", "팀원 더하기로 팀원 이메일을 넣고, 팀 주소를 보내세요.")],
+                         button="관리자 탭 열기", title="할 일 3개")),
+], ("green", "끝. 관리자 탭이 열립니다 (5-1 줄 첫 화면)."))
 case("2-3", "혼자 쓰기 · 이 컴퓨터에 서버 만들기", [
     ("S1", "처음 화면", scr_start("시작")),
     ("W1", "서버 · 새로 만들기 (모델 단계가 붙음)", scr_w1(SOLO_NEW, 0, "solo-local", back=True)),
@@ -936,7 +948,7 @@ case("3-1", "대화 수집 설정 바꾸기", [
     ("W1", "서버 (수정)", scr_edit(0, w1_body("edit"), hit_btn="다음")),
     ("W2", "에이전트 (수정)", scr_edit(1, w2_body(edit=True), hit_btn="다음")),
     ("W3", "프로젝트 · 적용 (수정)", scr_edit(2, w3_body(("honcho", "web-app", "api-server", "notes"), fresh=("notes",),
-                                                       past_label="새로 고른 폴더의 지난 대화", past_note="notes 14개", past_hint=""),
+                                                       past="새로 고른 폴더의 지난 대화 14개도 함께 수집합니다."),
                                   hit_btn="적용")),
     ("D2", "기억 설정 · 적용 뒤", (side("member", "기억 설정"), settings(COLLECT_NOTES, toast="적용했습니다."), "")),
 ], ("gray", "끝. 수정 창은 처음 설정 창과 같습니다. 단계 이름을 눌러 바로 옮겨 갈 수도 있습니다."))
@@ -1095,18 +1107,18 @@ CODES = [
 
 RULES = [
     "처음 설정은 창 하나에서 끝납니다. 처음 고른 것(팀 링크 · 팀에 들어가기 · 새 팀 만들기 · 혼자 쓰기)에 따라 단계가 정해지고, 건너뛸 수 없습니다.",
-    "단계는 서버 → 에이전트 → 프로젝트입니다. 마지막 단계에 적용이 있고, 확인 화면은 따로 없습니다.",
-    "서버 단계에서 고른 것이 뒤 단계를 정합니다. 새로 만들기를 고르면 모델(구독 계정) 단계가 붙고, 쌓지 않기를 고르면 팀원 단계로 바뀝니다.",
+    "단계는 서버 → 에이전트 → 프로젝트 → 팀원이고, 팀원은 팀원이 있는 팀에만 붙습니다. 마지막 단계에 적용이 있고, 확인 화면은 따로 없습니다.",
+    "서버 단계에서 고른 것이 뒤 단계를 정합니다. 새로 만들기를 고르면 모델(구독 계정) 단계가 붙고, 쌓지 않기를 고르면 팀원 단계만 남습니다.",
     "설치가 끝난 뒤 기억 설정의 수정은 같은 창을 같은 단계로 엽니다. 회사 서버도 이 창의 서버 단계에서 고릅니다.",
     "메뉴 안의 설정은 모두 창으로 열립니다. 페이지는 지금 상태를 글로 보여 주고, 연결한 팀원 기억만 줄의 스위치로 바로 켜고 끕니다.",
     "알림은 오른쪽 위 종에만 모입니다. 받은 요청이나 승인된 내 요청처럼 내가 눌러야 할 것만 들어가고, 처리하면 사라집니다.",
     "팀원 명단과 팀원 더하기는 관리자 탭에만 있습니다. 팀원은 Cloudflare라는 말을 보지 않습니다.",
     "쌓지 않기를 고른 사람의 메뉴에는 기억 · 서버 탭이 없습니다. 기억 설정의 수정에서 서버를 고르면 생깁니다.",
     "팀으로 쓸 때 peer 이름은 Google 이메일의 @ 앞부분이라 묻지 않습니다. 혼자 쓰기만 직접 넣습니다.",
-    "에이전트 단계는 이 컴퓨터에서 찾은 에이전트 폴더를 한 줄씩 보여 줍니다. 계정마다 폴더가 따로 있으면 줄도 따로 나옵니다.",
+    "에이전트 단계는 찾은 에이전트 폴더를 한 줄씩 보여 줍니다. ChatGPT 기록은 여기서 내보내기 파일을 골라 지난 대화보다 먼저 가져옵니다.",
     "구독 계정이 여럿이면 모델 단계에서 수를 늘리고, 적용 중에 계정마다 로그인합니다.",
     "서버를 여럿 고르면 프로젝트 단계가 서버마다 열이 있는 표로 바뀝니다 (1-5, 3-2 줄). 함께 쌓을 서버의 열은 비어 있고, 고른 폴더만 그 서버에 쌓입니다.",
-    "새 대화는 적용한 뒤부터 자동으로 쌓이고, 지난 대화는 프로젝트 단계에서 고른 만큼만 쌓입니다.",
+    "고른 폴더의 지난 대화는 적용할 때 모두 수집하고, 그 뒤 새 대화는 자동으로 쌓입니다.",
     "서버에 넣는 쪽은 '쌓다', 에이전트와 폴더에서 가져오는 쪽은 '수집'이라고 씁니다.",
     "적용 뒤 알림은 화면 아래에 떴다가 사라지고 페이지를 밀지 않습니다. 적용 중 목록도 줄 높이가 그대로입니다.",
     "주황 테두리는 다음 화면으로 가려고 누르는 곳입니다.",
