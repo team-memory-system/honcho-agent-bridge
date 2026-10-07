@@ -12,6 +12,7 @@ OUT = os.path.join(HERE, "out", "project")
 NEW_CANVAS = {"v": 3, "title": "팀 메모리 화면 시안", "attachments": {}, "launch": {"view": "canvas"},
               "pages": [{"id": "page-1", "name": "Page 1"}]}
 BW, BH = 1280, 860
+MAP_H = 1480
 PITCH_X = 1360
 
 FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com">\n'
@@ -59,6 +60,8 @@ a.hit{box-shadow:0 0 0 3px #f0a868 !important}
 .notice{padding:12px 16px;border-radius:10px;border:1px solid #dcc89f;background:#fbf5e8;font-size:13.5px}
 .notice.ok{border-color:#bcd3b8;background:#eef5ec;color:#24492e}
 .notice.warn{border-color:#e2c48f;background:#fbf1de;color:#5e3d08}
+.toast{position:absolute;left:756px;bottom:28px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:10px 18px 10px 12px;border-radius:10px;background:#2b2a26;color:#fff;font-size:13.5px;box-shadow:0 8px 24px rgba(20,18,14,.25)}
+.toast .ic.ok{background:#3b7449;color:#fff}
 .switch{width:34px;height:20px;border-radius:10px;background:#c9c3b6;position:relative;flex:none;display:inline-block}
 .switch.on{background:#3b7449}
 .switch:after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)}
@@ -182,7 +185,8 @@ tr:last-child td{border-bottom:0}
 .seg span:last-child{border-right:0}
 .seg span.on{background:#1d1c19;color:#fff}
 .prog{border:1px solid #e3dfd6;border-radius:10px;overflow:hidden;margin-top:12px}
-.pg{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid #ece8e0}
+.pg{display:flex;align-items:center;gap:12px;min-height:64px;padding:12px 14px;border-bottom:1px solid #ece8e0}
+.pgl{padding:7px 14px;background:#f7f5f0;border-bottom:1px solid #ece8e0;color:#6f6a60;font-size:12.5px;font-weight:600}
 .pg:last-child{border-bottom:0}
 .ic{width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;flex:none}
 .ic.ok{background:#e1ecdf;color:#2e5c3a}
@@ -326,9 +330,8 @@ def kv(k, v, end=""):
 
 
 def settings(collect, toast=None, hit=None):
-    t = '<div class="notice ok">' + toast + "</div>" if toast else ""
-    return (head("기억 설정", "이 컴퓨터의 대화를 어디에 수집하고, 에이전트가 무엇을 쓸지 정합니다.")
-            + '<div class="body">' + t
+    return (head("기억 설정", "이 컴퓨터의 대화를 어디에 쌓고, 에이전트가 무엇을 쓸지 정합니다.")
+            + '<div class="body">'
             + '<section class="blk"><div class="blk-h"><h2>대화 수집</h2>' + tag("켜짐", "ok") + '<span class="sp"></span>' + btn("수정", hit=hit == "collect") + "</div>"
             + "".join(kv(k, v) for k, v in collect) + "</section>"
             + '<section class="blk"><div class="blk-h"><h2>MCP 도구</h2><span class="sp"></span>'
@@ -336,7 +339,8 @@ def settings(collect, toast=None, hit=None):
             + kv("찾기 도구", "20개 중 20개 켜짐") + kv("바꾸기·지우기 도구", "11개 중 0개 켜짐") + "</section>"
             + '<section class="blk"><div class="blk-h"><h2>ChatGPT 기록</h2><span class="sp"></span>'
             + btn("가져오기", hit=hit == "import") + "</div>"
-            + kv("기억에 있는 대화", "4,071개 · 9월 30일에 가져옴") + "</section></div>")
+            + kv("기억에 있는 대화", "4,071개 · 9월 30일에 가져옴") + "</section></div>"
+            + ('<div class="toast"><span class="ic ok">✓</span>' + toast + "</div>" if toast else ""))
 
 
 COLLECT_BASE = [
@@ -396,8 +400,8 @@ def share_page(server, computers, request=None):
             + '<section class="blk"><div class="blk-h"><h2>공유</h2>' + tag("켜짐", "ok")
             + '<span class="sp"></span>' + btn("공유 끄기") + "</div>"
             + kv("이 서버의 주소", '<span class="mono">https://' + server + "</span>") + "</section>"
-            + (section("받은 수집 요청 " + str(len(reqs)) + "개", reqs) if reqs else "")
-            + section("이 서버에 수집하는 컴퓨터", computers) + "</div>")
+            + (section("받은 요청 " + str(len(reqs)) + "개", reqs) if reqs else "")
+            + section("이 서버에 쌓는 컴퓨터", computers) + "</div>")
 
 
 def admin_page(members, hit=None):
@@ -520,35 +524,35 @@ NEW_SERVER_SUB = "ChatGPT나 Claude 구독이 필요합니다."
 
 
 def company_opts(on=False, hint=False):
-    return ('<div class="label">함께 수집할 서버</div><div class="opts">'
+    return ('<div class="label">함께 쌓을 서버</div><div class="opts">'
             + opt("box", on, '회사 <span class="mono muted">' + COMPANY + "</span>", end=tag("승인 요청", "warn"))
             + "</div>")
 
 
 def w1_body(kind):
     """The server step. kind picks what this account has and what is chosen."""
-    q = "<h3>어디에 수집할까요?</h3>"
+    q = "<h3>어디에 쌓을까요?</h3>"
     if kind == "found":
         return (q + '<div class="label">내 기억 서버</div><div class="opts">'
                 + opt("radio", True, '내 서버 <span class="mono muted">' + MY_SERVER + "</span>", "MacBook에서 만든 서버",
                       tag("찾음", "ok"))
                 + opt("radio", False, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
-                + opt("radio", False, "수집하지 않기")
+                + opt("radio", False, "쌓지 않기")
                 + "</div>" + company_opts())
     if kind == "none":
         return (q + "<p class=\"lead\">" + ME + " 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", True, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
-                + opt("radio", False, "수집하지 않기")
+                + opt("radio", False, "쌓지 않기")
                 + "</div>" + company_opts())
     if kind == "none-admin":
         return (q + "<p class=\"lead\">admin@example.com 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", True, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
-                + opt("radio", False, "수집하지 않기")
+                + opt("radio", False, "쌓지 않기")
                 + "</div>")
     if kind == "skip":
         return (q + "<p class=\"lead\">" + ME + " 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", False, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
-                + opt("radio", True, "수집하지 않기")
+                + opt("radio", True, "쌓지 않기")
                 + "</div>")
     if kind == "solo-local":
         return (q + '<div class="opts">'
@@ -566,8 +570,8 @@ def w1_body(kind):
     if kind in ("edit", "edit-company"):
         on = kind == "edit-company"
         return (q + '<div class="label">내 기억 서버</div><div class="opts">'
-                + opt("radio", True, '이 컴퓨터 서버 <span class="mono muted">' + LOCAL + "</span>", "", tag("지금 수집 중", "ok"))
-                + opt("radio", False, "수집하지 않기")
+                + opt("radio", True, '이 컴퓨터 서버 <span class="mono muted">' + LOCAL + "</span>", "", tag("지금 쌓는 중", "ok"))
+                + opt("radio", False, "쌓지 않기")
                 + "</div>" + company_opts(on, hint=on))
     raise ValueError(kind)
 
@@ -592,8 +596,11 @@ PROJECTS = [("honcho", "~/dev/honcho", 33), ("web-app", "~/dev/web-app", 104),
             ("api-server", "~/dev/api-server", 292), ("notes", "~/Documents/notes", 14)]
 
 
+PAST_HINT = "새 대화는 적용한 뒤부터 자동으로 쌓입니다. 지난 대화는 여기서 고른 만큼만 쌓입니다."
+
+
 def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past_label="지난 대화",
-            past_note="고른 폴더의 지난 대화 429개"):
+            past_note="고른 폴더의 지난 대화 429개", past_hint=PAST_HINT):
     every = all(name in checked for name, _p, _n in PROJECTS)
     rows = ['<div class="pr h"><span class="box' + (" on" if every else "") + '"></span><span>폴더</span><span class="c">대화</span></div>']
     for name, path, n in PROJECTS:
@@ -607,7 +614,8 @@ def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past_label="�
             '<div class="row2"><span class="box on"></span>새로 생기는 프로젝트 폴더도 수집</div>'
             '<div class="row2"><span style="color:#57534b;margin-right:4px">' + past_label + "</span>"
             '<span class="seg"><span class="on">전부</span><span>날짜부터</span><span>안 함</span></span>'
-            '<span class="muted" style="font-size:12.5px">' + past_note + "</span></div>")
+            '<span class="muted" style="font-size:12.5px">' + past_note + "</span></div>"
+            + ('<div class="hint">' + past_hint + "</div>" if past_hint else ""))
 
 
 def w3_matrix():
@@ -621,7 +629,7 @@ def w3_matrix():
                     '<span class="cc"><span class="box' + (" on" if company else "") + '"></span></span></div>')
     rows.append('<div class="pr m"><span class="pn"><b>새로 생기는 폴더</b></span><span></span>'
                 '<span class="cc"><span class="box on"></span></span><span class="cc"><span class="box"></span></span></div>')
-    return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">서버마다 수집할 폴더를 고릅니다.</p>"
+    return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">서버마다 쌓을 폴더를 고르세요.</p>"
             '<div class="pt">' + "".join(rows) + "</div>"
             '<div class="row2"><span style="color:#57534b;margin-right:4px">새로 고른 폴더의 지난 대화</span>'
             '<span class="seg"><span class="on">전부</span><span>날짜부터</span><span>안 함</span></span>'
@@ -631,6 +639,9 @@ def w3_matrix():
 def progress(items):
     out = []
     for state, title, sub, extra in items:
+        if state == "label":
+            out.append('<div class="pgl">' + title + "</div>")
+            continue
         icon = {"ok": '<span class="ic ok">✓</span>', "run": '<span class="ic run"></span>',
                 "wait": '<span class="ic wait"></span>'}[state]
         out.append('<div class="pg' + (" wait" if state == "wait" else "") + '">' + icon + '<div class="pb"><div class="pgt">'
@@ -638,40 +649,45 @@ def progress(items):
     return '<div class="prog">' + "".join(out) + "</div>"
 
 
+# A W4 list: the memory server's own steps first, then each agent's.
+SERVER_STEPS = ("label", "기억 서버", "", "")
+AGENT_STEPS = ("label", "에이전트", "", "")
 PROG_INSTALL = [
+    SERVER_STEPS,
     ("ok", "Docker", "이 컴퓨터에 있음", ""),
     ("ok", "기억 서버 설치", "Honcho와 Ollama", ""),
     ("run", "ChatGPT 계정 로그인", "브라우저에서 로그인을 마치세요.", btn("브라우저 다시 열기", sm=True)),
-    ("wait", "Claude Code 플러그인 설치", "", ""),
-    ("wait", "Codex 플러그인 설치", "", ""),
+    AGENT_STEPS,
+    ("wait", "Claude Code에 플러그인 설치", "", ""),
+    ("wait", "Codex에 플러그인 설치", "", ""),
     ("wait", "지난 대화 수집 시작", "", ""),
 ]
 PROG_INSTALL_TWO = [
+    SERVER_STEPS,
     ("ok", "Docker", "이 컴퓨터에 있음", ""),
     ("ok", "기억 서버 설치", "Honcho와 Ollama", ""),
     ("ok", "ChatGPT 계정 로그인 1/2", '<span class="mono">me@example.com</span>', ""),
     ("run", "ChatGPT 계정 로그인 2/2", "브라우저에서 다른 ChatGPT 계정으로 로그인하세요.", btn("브라우저 다시 열기", sm=True)),
-    ("wait", "Claude Code 플러그인 설치", "", ""),
-    ("wait", "Codex 플러그인 설치", "", ""),
+    AGENT_STEPS,
+    ("wait", "Claude Code에 플러그인 설치", "", ""),
+    ("wait", "Codex에 플러그인 설치", "", ""),
     ("wait", "지난 대화 수집 시작", "", ""),
 ]
 PROG_CONNECT_GROK = [
+    SERVER_STEPS,
     ("ok", "내 서버 연결", MY_SERVER, ""),
-    ("ok", "Claude Code 플러그인 설치", "", ""),
-    ("run", "Codex 플러그인 설치", "", ""),
-    ("wait", "Grok CLI 훅 설치", "", ""),
-    ("wait", "지난 대화 수집 시작", "", ""),
-]
-PROG_CONNECT = [
-    ("ok", "내 서버 연결", MY_SERVER, ""),
-    ("ok", "Claude Code 플러그인 설치", "", ""),
-    ("run", "Codex 플러그인 설치", "", ""),
+    AGENT_STEPS,
+    ("ok", "Claude Code에 플러그인 설치", "", ""),
+    ("run", "Codex에 플러그인 설치", "", ""),
+    ("wait", "Grok CLI에 훅 설치", "", ""),
     ("wait", "지난 대화 수집 시작", "", ""),
 ]
 PROG_LAN = [
+    SERVER_STEPS,
     ("ok", "서버 연결", LAN, ""),
-    ("ok", "Claude Code 플러그인 설치", "", ""),
-    ("run", "Codex 플러그인 설치", "", ""),
+    AGENT_STEPS,
+    ("ok", "Claude Code에 플러그인 설치", "", ""),
+    ("run", "Codex에 플러그인 설치", "", ""),
     ("wait", "지난 대화 수집 시작", "", ""),
 ]
 
@@ -759,8 +775,8 @@ def scr_w5(steps, items, button="대시보드 열기", title=None):
 def scr_wm(steps, at, accounts=1):
     count = '<span class="cnt-l">계정</span><span class="cnt"><i>−</i><b>' + str(accounts) + "</b><i>+</i></span>"
     body = ('<h3>기억 서버가 쓸 구독을 고르세요</h3><p class="lead">적용할 때 고른 계정마다 브라우저에서 로그인합니다.</p><div class="opts">'
-            + opt("box", True, "ChatGPT 구독", "Codex에서 쓰는 ChatGPT 계정", count)
-            + opt("box", False, "Claude 구독", "Claude Code에서 쓰는 Claude 계정")
+            + opt("box", True, "ChatGPT 구독", end=count)
+            + opt("box", False, "Claude 구독")
             + '</div><div class="hint">하나 이상 고르세요. 계정이 여럿이면 +를 누르세요.</div>')
     return BLANK + (wizard(START, steps, at, body, foot(btn("이전", "quiet"), btn("다음", "pri", hit=True))),)
 
@@ -796,10 +812,6 @@ def page(kind, on, main, hit=None):
 
 
 # ---------------------------------------------------------------- rows
-
-def dash_rows_first():
-    return [("on", "이 컴퓨터 서버", LOCAL, "지난 대화 수집 중", "412개", "방금", "17개")]
-
 
 ROWS = []
 
@@ -837,9 +849,9 @@ case("1-3", "내 서버 없음 · 이 컴퓨터에 만들기", [
     ("W4", "적용 중 · 계정마다 로그인", scr_w4(TEAM_NEW, PROG_INSTALL_TWO)),
     ("W5", "에이전트에서 할 일", scr_w5(TEAM_NEW, TODO_AGENTS)),
 ], DONE_LOCAL)
-case("1-4", "내 서버 없음 · 수집 없이 팀원 기억만", [
+case("1-4", "내 서버 없음 · 쌓지 않고 팀원 기억만", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
-    ("W1", "서버 · 수집하지 않기 (단계가 팀원으로 바뀜)", scr_w1(CHATONLY, 1, "skip")),
+    ("W1", "서버 · 쌓지 않기 (단계가 팀원으로 바뀜)", scr_w1(CHATONLY, 1, "skip")),
     ("WT", "팀원 · 적용", scr_wt()),
     ("W5", "할 일", scr_w5(CHATONLY, [("팀 화면", "팀원이 승인하면 그 팀원 줄의 연결을 누르세요.")],
                          button="팀 화면 열기", title="팀원이 승인하면 할 일")),
@@ -884,33 +896,34 @@ case("2-4", "혼자 쓰기 · 다른 컴퓨터의 내 서버", [
     ("W5", "에이전트에서 할 일", scr_w5(SOLO, TODO_AGENTS)),
 ], ("green", "끝. 대시보드가 열립니다. 혼자 쓰기에는 팀 탭이 없습니다."))
 
-cat("3. 설정 바꾸기 · 메뉴 안의 설정은 모두 창으로 열림 · 수집 설정은 처음 설정과 같은 창")
-case("3-1", "수집 설정 바꾸기", [
+cat("3. 설정 바꾸기 · 메뉴 안의 설정은 모두 창으로 열림 · 대화 수집 설정은 처음 설정과 같은 창")
+case("3-1", "대화 수집 설정 바꾸기", [
     ("D1", "대시보드", page("member", "대시보드", dashboard([ROW_LOCAL]), hit="기억 설정")),
     ("D2", "기억 설정", (side("member", "기억 설정"), settings(COLLECT_BASE, hit="collect"), "")),
     ("W1", "서버 (수정)", scr_edit(0, w1_body("edit"), hit_btn="다음")),
     ("W2", "에이전트 (수정)", scr_edit(1, w2_body(edit=True), hit_btn="다음")),
     ("W3", "프로젝트 · 적용 (수정)", scr_edit(2, w3_body(("honcho", "web-app", "api-server", "notes"), fresh=("notes",),
-                                                       past_label="새로 고른 폴더의 지난 대화", past_note="notes 14개"), hit_btn="적용")),
+                                                       past_label="새로 고른 폴더의 지난 대화", past_note="notes 14개", past_hint=""),
+                                  hit_btn="적용")),
     ("D2", "기억 설정 · 적용 뒤", (side("member", "기억 설정"), settings(COLLECT_NOTES, toast="적용했습니다."), "")),
 ], ("gray", "끝. 수정 창은 처음 설정 창과 같습니다. 단계 이름을 눌러 바로 옮겨 갈 수도 있습니다."))
-case("3-2", "회사 서버에도 수집", [
+case("3-2", "회사 서버에도 쌓기", [
     ("D2", "기억 설정", (side("member", "기억 설정"), settings(COLLECT_NOTES, hit="collect"), "")),
     ("W1", "서버 · 회사 고름 (수정)", scr_edit(0, w1_body("edit-company"), hit_step=2, collect=COLLECT_NOTES)),
     ("W3", "프로젝트 · 서버마다 고르기 · 적용", scr_edit(2, w3_matrix(), hit_btn="적용", collect=COLLECT_NOTES)),
     ("D2", "기억 설정 · 승인 기다리는 중", (side("member", "기억 설정"),
-                                       settings(COLLECT_COMPANY, toast="적용했습니다. 회사 서버의 승인을 기다리는 중입니다."), "")),
+                                       settings(COLLECT_COMPANY, toast="적용했습니다."), "")),
     ("D1", "회사 서버 주인 앱 · 대시보드", page("admin", "대시보드", dashboard(
         [("on", "이 컴퓨터 서버", LOCAL, "최신", "0개", "1분 전", "52,118개")],
-        notices=["승인할 수집 요청 1개가 있습니다. 서버 → 공유에서 승인하세요."], share=("켜짐", COMPANY)), hit="서버")),
+        notices=["이 서버에 대화를 쌓으려는 요청 1개가 있습니다. 서버 → 공유에서 승인하세요."], share=("켜짐", COMPANY)), hit="서버")),
     ("V1", "회사 서버 주인 앱 · 서버 → 공유", page("admin", "서버", share_page(COMPANY, [
-        item("이 컴퓨터", "", "마지막 수집 1분 전"),
-        item("dave의 Windows PC", "", "마지막 수집 어제", btn("끊기", "danger", sm=True)),
-    ], request=item("me의 MacBook", " " + tag("수집 요청", "warn"), "honcho 폴더 · 방금",
+        item("이 컴퓨터", "", "1분 전에 쌓음"),
+        item("dave의 Windows PC", "", "어제 쌓음", btn("끊기", "danger", sm=True)),
+    ], request=item("me의 MacBook", "", "honcho 폴더의 대화를 쌓으려 합니다 · 방금",
                     btn("승인", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True), cls="req")))),
     ("D1", "내 대시보드 · 회사 줄 생김", page("member", "대시보드", dashboard(
         [ROW_LOCAL, ("warn", "회사", COMPANY, "동기화 중", "33개", "방금", "-")]))),
-], ("green", "끝. 승인되면 따로 누를 것 없이 회사 서버 수집이 시작됩니다."))
+], ("green", "끝. 승인되면 따로 누를 것 없이 회사 서버에도 쌓이기 시작합니다."))
 case("3-3", "MCP 도구 바꾸기", [
     ("D2", "기억 설정", (side("member", "기억 설정"), settings(COLLECT_BASE, hit="mcp"), "")),
     ("M1", "MCP 도구 창", bg_settings() + (simple("MCP 도구",
@@ -930,16 +943,16 @@ case("3-4", "ChatGPT 기록 가져오기", [
 ], ("gray", "끝. 가져오는 동안 창에 진행이 보이고, 끝나면 기억에 있는 대화 수가 바뀝니다."))
 case("3-5", "내 다른 컴퓨터 끊기", [
     ("V1", "서버 → 공유", page("member", "서버", share_page(MY_SERVER, [
-        item("이 컴퓨터", "", "마지막 수집 3분 전"),
-        item("iMac", " " + tag("내 컴퓨터"), "마지막 수집 1시간 전", btn("끊기", "danger", sm=True)),
-        item("Windows PC", " " + tag("내 컴퓨터"), "마지막 수집 2시간 전", btn("끊기", "danger", sm=True, hit=True)),
+        item("이 컴퓨터", "", "3분 전에 쌓음"),
+        item("iMac", " " + tag("내 컴퓨터"), "1시간 전에 쌓음", btn("끊기", "danger", sm=True)),
+        item("Windows PC", " " + tag("내 컴퓨터"), "2시간 전에 쌓음", btn("끊기", "danger", sm=True, hit=True)),
     ]))),
     ("V2", "끊기 확인 창", (side("member", "서버"), share_page(MY_SERVER, [
-        item("이 컴퓨터", "", "마지막 수집 3분 전"),
-        item("iMac", " " + tag("내 컴퓨터"), "마지막 수집 1시간 전", btn("끊기", "danger", sm=True)),
-        item("Windows PC", " " + tag("내 컴퓨터"), "마지막 수집 2시간 전", btn("끊기", "danger", sm=True)),
+        item("이 컴퓨터", "", "3분 전에 쌓음"),
+        item("iMac", " " + tag("내 컴퓨터"), "1시간 전에 쌓음", btn("끊기", "danger", sm=True)),
+        item("Windows PC", " " + tag("내 컴퓨터"), "2시간 전에 쌓음", btn("끊기", "danger", sm=True)),
     ]), simple("Windows PC를 끊을까요?",
-               '<p class="lead" style="margin-top:4px">Windows PC는 이 서버에 더 이상 수집하지 못합니다. 다시 붙이려면 그 컴퓨터의 기억 설정에서 수정을 누르세요.</p>',
+               '<p class="lead" style="margin-top:4px">Windows PC는 이 서버에 더 이상 대화를 쌓지 못합니다. 다시 붙이려면 그 컴퓨터의 기억 설정에서 수정을 누르세요.</p>',
                foot("", btn("취소", "quiet") + btn("끊기", "dangerfill", hit=True))))),
 ], ("gray", "끝. 내 컴퓨터는 승인 없이 붙고, 끊을 때만 여기서 끊습니다."))
 case("3-6", "백업 바꾸기", [
@@ -1025,14 +1038,14 @@ case("5-1", "팀원 더하기", [
     ("A1", "관리자", tall(page("admin", "관리자", admin_page(members(), hit="add")))),
     ("A2", "팀원 더하기 창", tall((side("admin", "관리자"), admin_page(members()), simple("팀원 더하기",
         '<div class="field" style="margin-top:4px"><label>Google 이메일</label><div class="input mono">erin@example.com</div></div>'
-        '<div class="notice warn" style="margin-top:14px">더한 사람은 팀 주소로 로그인해 팀원 명단과 서버 주소를 보고, 팀원 기억에 chat을, 회사 서버에 수집을 요청할 수 있습니다. 회사 밖 사람은 더하지 마세요.</div>',
+        '<div class="notice warn" style="margin-top:14px">더한 사람은 팀 주소로 로그인해 팀원 명단과 서버 주소를 보고, 팀원 기억에 chat을, 회사 서버에 대화 쌓기를 요청할 수 있습니다. 회사 밖 사람은 더하지 마세요.</div>',
         foot("", btn("취소", "quiet") + btn("더하기", "pri", hit=True)))))),
     ("A1", "관리자 · 한 줄 늘어남", tall(page("admin", "관리자", admin_page(members(erin=True))))),
 ], ("gray", "끝. 페이지에는 이메일 한 줄만 늘어납니다. 팀 주소는 위의 복사로 erin에게 보냅니다."))
 case("5-2", "팀에서 빼기", [
     ("A1", "관리자", tall(page("admin", "관리자", admin_page(members(hit_bob=True))))),
     ("A3", "빼기 확인 창", tall((side("admin", "관리자"), admin_page(members()), simple("bob을 팀에서 뺄까요?",
-        '<p class="lead" style="margin-top:4px">bob@example.com 은 팀 주소로 로그인하지 못하고, 팀원 기억 연결과 회사 서버 수집이 모두 끊깁니다.</p>',
+        '<p class="lead" style="margin-top:4px">bob@example.com 은 팀 주소로 로그인하지 못합니다. 팀원 기억 연결이 끊기고, 회사 서버에도 더 이상 대화를 쌓지 못합니다.</p>',
         foot("", btn("취소", "quiet") + btn("빼기", "dangerfill", hit=True)))))),
 ], ("gray", "끝."))
 
@@ -1051,14 +1064,18 @@ CODES = [
 RULES = [
     "처음 설정은 창 하나에서 끝납니다. 처음 고른 것(팀 링크 · 팀에 들어가기 · 새 팀 만들기 · 혼자 쓰기)에 따라 단계가 정해지고, 건너뛸 수 없습니다.",
     "단계는 서버 → 에이전트 → 프로젝트입니다. 마지막 단계에 적용이 있고, 확인 화면은 따로 없습니다.",
-    "서버 단계에서 고른 것이 뒤 단계를 정합니다. 새로 만들기를 고르면 모델(구독 계정) 단계가 붙고, 수집하지 않기를 고르면 팀원 단계로 바뀝니다.",
+    "서버 단계에서 고른 것이 뒤 단계를 정합니다. 새로 만들기를 고르면 모델(구독 계정) 단계가 붙고, 쌓지 않기를 고르면 팀원 단계로 바뀝니다.",
     "설치가 끝난 뒤 기억 설정의 수정은 같은 창을 같은 단계로 엽니다. 회사 서버도 이 창의 서버 단계에서 고릅니다.",
     "메뉴 안의 설정은 모두 창으로 열립니다. 페이지는 지금 상태를 글로만 보여 줍니다.",
     "팀원 명단과 팀원 더하기는 관리자 탭에만 있습니다. 팀원은 Cloudflare라는 말을 보지 않습니다.",
-    "수집하지 않기를 고른 사람의 메뉴에는 기억 · 서버 탭이 없습니다. 기억 설정의 수정에서 서버를 고르면 생깁니다.",
+    "쌓지 않기를 고른 사람의 메뉴에는 기억 · 서버 탭이 없습니다. 기억 설정의 수정에서 서버를 고르면 생깁니다.",
     "팀으로 쓸 때 peer 이름은 Google 이메일의 @ 앞부분이라 묻지 않습니다. 혼자 쓰기만 직접 넣습니다.",
     "에이전트 단계는 이 컴퓨터에서 찾은 에이전트 폴더를 한 줄씩 보여 줍니다. 계정마다 폴더가 따로 있으면 줄도 따로 나옵니다.",
     "구독 계정이 여럿이면 모델 단계에서 수를 늘리고, 적용 중에 계정마다 로그인합니다.",
+    "서버를 여럿 고르면 프로젝트 단계 표에 서버마다 열이 하나씩 생깁니다.",
+    "새 대화는 적용한 뒤부터 자동으로 쌓이고, 지난 대화는 프로젝트 단계에서 고른 만큼만 쌓입니다.",
+    "서버에 넣는 쪽은 '쌓다', 에이전트와 폴더에서 가져오는 쪽은 '수집'이라고 씁니다.",
+    "적용 뒤 알림은 화면 아래에 떴다가 사라지고 페이지를 밀지 않습니다. 적용 중 목록도 줄 높이가 그대로입니다.",
     "주황 테두리는 다음 화면으로 가려고 누르는 곳입니다.",
 ]
 
@@ -1083,7 +1100,7 @@ def case_map():
     css = """
 *{box-sizing:border-box}
 body{margin:0}
-.map{width:2400px;height:1400px;background:#faf8f4;font-family:'Noto Sans KR',sans-serif;color:#1d1c19;padding:56px 64px}
+.map{width:2400px;height:""" + str(MAP_H) + """px;background:#faf8f4;font-family:'Noto Sans KR',sans-serif;color:#1d1c19;padding:56px 64px}
 .map h1{margin:0;font-size:40px;font-weight:700}
 .map .lead{margin:10px 0 0;color:#6f6a60;font-size:20px}
 .top{display:flex;gap:28px;margin-top:30px}
@@ -1135,11 +1152,11 @@ def main():
             os.remove(os.path.join(OUT, f))
     boards, notes, order = {}, {}, []
     css, body = case_map()
-    write_board("CaseMap.dc.html", "경우의 수 지도", "", "", "", 2400, 1400, css, raw=body)
-    boards["CaseMap.dc.html"] = {"h": 1400, "title": "경우의 수 지도", "w": 2400, "x": 0, "y": 0}
+    write_board("CaseMap.dc.html", "경우의 수 지도", "", "", "", 2400, MAP_H, css, raw=body)
+    boards["CaseMap.dc.html"] = {"h": MAP_H, "title": "경우의 수 지도", "w": 2400, "x": 0, "y": 0}
     order.append("CaseMap.dc.html")
     notes["title"] = {"kind": "title1", "maxW": 6000, "text": "팀 메모리 화면 시안 · 처음 설정과 수정은 같은 창", "w": 240, "x": 0, "y": -260}
-    y = 1400 + 360
+    y = MAP_H + 360
     cat_i = 0
     for row in ROWS:
         if row[0] == "cat":
