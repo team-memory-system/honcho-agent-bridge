@@ -149,6 +149,11 @@ tr:last-child td{border-bottom:0}
 .box.dis{border-color:#d8d3c8;background:#f3f0ea}
 .src{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;background:#c0693f;color:#fff;font-size:11px;font-weight:700}
 .src.x{background:#2b2a26}
+.src.g{background:#6b665c}
+.cnt-l{color:#6f6a60;font-size:12.5px}
+.cnt{display:inline-flex;align-items:center;border:1px solid #d8d3c8;border-radius:7px;background:#fff;font-size:13px}
+.cnt i{font-style:normal;width:26px;text-align:center;color:#57534b}
+.cnt b{min-width:26px;text-align:center;font-weight:600;border-left:1px solid #ece8e0;border-right:1px solid #ece8e0;padding:2px 0}
 .field{margin-top:12px}
 .field label{display:block;font-size:12.5px;font-weight:600;color:#57534b;margin-bottom:6px}
 .input{display:flex;align-items:center;height:38px;padding:0 12px;border:1px solid #d2ccc0;border-radius:8px;background:#fff;font-size:14px}
@@ -336,7 +341,7 @@ def settings(collect, toast=None, hit=None):
 
 COLLECT_BASE = [
     ("서버", '이 컴퓨터 서버 <span class="mono muted">' + LOCAL + "</span>"),
-    ("peer 이름", "me"),
+    ("peer 이름", 'me <span class="muted">· ' + ME + "에서</span>"),
     ("에이전트", "Claude Code · Codex"),
     ("프로젝트 폴더", 'honcho · web-app · api-server<div class="s">새로 생기는 폴더도 수집</div>'),
 ]
@@ -345,8 +350,8 @@ COLLECT_NOTES = COLLECT_BASE[:3] + [
 ]
 COLLECT_COMPANY = [
     ("서버", '이 컴퓨터 서버 <span class="mono muted">' + LOCAL + '</span><div style="margin-top:6px">회사 <span class="mono muted">'
-     + COMPANY + "</span> " + tag("허락 기다리는 중", "warn") + "</div>"),
-    ("peer 이름", "me"),
+     + COMPANY + "</span> " + tag("승인 기다리는 중", "warn") + "</div>"),
+    ("peer 이름", 'me <span class="muted">· ' + ME + "에서</span>"),
     ("에이전트", "Claude Code · Codex"),
     ("프로젝트 폴더", 'honcho · web-app · api-server · notes<div class="s">새로 생기는 폴더도 수집</div>'
      '<div style="margin-top:6px">회사: honcho</div>'),
@@ -372,12 +377,12 @@ def team(received=None, mates=None, granted=None, granted_title="내 기억을 �
     parts.append(section("팀원 기억", mates or []))
     if granted is not None:
         parts.append(section(granted_title, granted, empty="아직 없습니다."))
-    return (head("팀", "팀원의 기억에 chat으로 묻고, 내 기억에 온 chat 요청을 허락합니다.")
+    return (head("팀", "팀원의 기억에 chat으로 묻고, 내 기억에 온 chat 요청을 승인합니다.")
             + '<div class="body">' + "".join(parts) + "</div>")
 
 
 MATE_ALICE = item("alice", " " + tag("연결됨", "ok"), "Claude Code·Codex · 열린 프로젝트 2개", btn("끊기", "danger", sm=True))
-MATE_DAVE = item("dave", " " + tag("허락됨", "ok"), "열린 프로젝트 2개", btn("연결", "pri", sm=True))
+MATE_DAVE = item("dave", " " + tag("승인됨", "ok"), "열린 프로젝트 2개", btn("연결", "pri", sm=True))
 MATE_CAROL = item("carol", "", "서버 없음")
 GRANT_ALICE = lambda hit=False: item("alice", " " + tag("chat"), "열린 프로젝트: honcho · web-app", btn("수정", sm=True, hit=hit))
 
@@ -516,7 +521,7 @@ NEW_SERVER_SUB = "ChatGPT나 Claude 구독이 필요합니다."
 
 def company_opts(on=False, hint=False):
     return ('<div class="label">함께 수집할 서버</div><div class="opts">'
-            + opt("box", on, '회사 <span class="mono muted">' + COMPANY + "</span>", end=tag("허락 필요", "warn"))
+            + opt("box", on, '회사 <span class="mono muted">' + COMPANY + "</span>", end=tag("승인 요청", "warn"))
             + "</div>")
 
 
@@ -529,17 +534,17 @@ def w1_body(kind):
                       tag("찾음", "ok"))
                 + opt("radio", False, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
                 + opt("radio", False, "수집하지 않기")
-                + "</div>" + company_opts() + peer_field())
+                + "</div>" + company_opts())
     if kind == "none":
         return (q + "<p class=\"lead\">" + ME + " 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", True, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
                 + opt("radio", False, "수집하지 않기")
-                + "</div>" + company_opts() + peer_field())
+                + "</div>" + company_opts())
     if kind == "none-admin":
         return (q + "<p class=\"lead\">admin@example.com 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", True, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
                 + opt("radio", False, "수집하지 않기")
-                + "</div>" + peer_field("admin"))
+                + "</div>")
     if kind == "skip":
         return (q + "<p class=\"lead\">" + ME + " 계정에는 아직 기억 서버가 없습니다.</p>" + '<div class="opts">'
                 + opt("radio", False, "이 컴퓨터에 새로 만들기", NEW_SERVER_SUB)
@@ -563,17 +568,24 @@ def w1_body(kind):
         return (q + '<div class="label">내 기억 서버</div><div class="opts">'
                 + opt("radio", True, '이 컴퓨터 서버 <span class="mono muted">' + LOCAL + "</span>", "", tag("지금 수집 중", "ok"))
                 + opt("radio", False, "수집하지 않기")
-                + "</div>" + company_opts(on, hint=on) + peer_field())
+                + "</div>" + company_opts(on, hint=on))
     raise ValueError(kind)
 
 
-def w2_body(edit=False):
+# Agent folders found on this computer: (icon class, letter, name, folder). An account
+# with its own folder (CLAUDE_CONFIG_DIR, CODEX_HOME, GROK_HOME) is a row of its own.
+AGENTS_FOUND = [("src", "C", "Claude Code", "~/.claude"), ("src x", "X", "Codex", "~/.codex")]
+AGENTS_GROK = AGENTS_FOUND + [("src g", "G", "Grok CLI", "~/.grok")]
+AGENTS_TWO_CLAUDE = [("src", "C", "Claude Code", "~/.claude"), ("src", "C", "Claude Code", "~/.claude-work"),
+                     ("src x", "X", "Codex", "~/.codex")]
+
+
+def w2_body(edit=False, agents=AGENTS_FOUND):
     t = tag("수집 중", "ok") if edit else ""
+    rows = "".join(opt("box", True, '<span class="' + cls + '">' + letter + "</span>" + name,
+                       '<span class="mono">' + folder + "</span>", t) for cls, letter, name, folder in agents)
     return ("<h3>어느 에이전트의 대화를 수집할까요?</h3><p class=\"lead\">이 컴퓨터에서 찾은 에이전트입니다.</p>"
-            '<div class="opts">'
-            + opt("box", True, '<span class="src">C</span>Claude Code', "이 컴퓨터에 있음", t)
-            + opt("box", True, '<span class="src x">X</span>Codex', "이 컴퓨터에 있음", t)
-            + "</div>")
+            '<div class="opts">' + rows + "</div>")
 
 
 PROJECTS = [("honcho", "~/dev/honcho", 33), ("web-app", "~/dev/web-app", 104),
@@ -590,7 +602,7 @@ def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past_label="�
         t = " " + tag("새로 고름", "new") if name in fresh else ""
         rows.append('<div class="' + cls + '"><span class="box' + (" on" if on else "") + '"></span><span class="pn"><b>'
                     + name + "</b>" + t + "<small>" + path + '</small></span><span class="c">' + str(n) + "개</span></div>")
-    return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">Claude Code·Codex 대화가 있는 폴더입니다.</p>"
+    return ("<h3>어느 프로젝트 폴더의 대화를 수집할까요?</h3><p class=\"lead\">고른 에이전트의 대화가 있는 폴더입니다.</p>"
             '<div class="pt">' + "".join(rows) + "</div>"
             '<div class="row2"><span class="box on"></span>새로 생기는 프로젝트 폴더도 수집</div>'
             '<div class="row2"><span style="color:#57534b;margin-right:4px">' + past_label + "</span>"
@@ -600,7 +612,7 @@ def w3_body(checked=("honcho", "web-app", "api-server"), fresh=(), past_label="�
 
 def w3_matrix():
     head_row = ('<div class="pr m h"><span>폴더</span><span class="c">대화</span><span class="ch">이 컴퓨터 서버</span>'
-                '<span class="ch">회사<br>' + tag("허락 필요", "warn") + "</span></div>")
+                '<span class="ch">회사<br>' + tag("승인 요청", "warn") + "</span></div>")
     rows = [head_row]
     for name, path, n in PROJECTS:
         company = name == "honcho"
@@ -632,6 +644,22 @@ PROG_INSTALL = [
     ("run", "ChatGPT 계정 로그인", "브라우저에서 로그인을 마치세요.", btn("브라우저 다시 열기", sm=True)),
     ("wait", "Claude Code 플러그인 설치", "", ""),
     ("wait", "Codex 플러그인 설치", "", ""),
+    ("wait", "지난 대화 수집 시작", "", ""),
+]
+PROG_INSTALL_TWO = [
+    ("ok", "Docker", "이 컴퓨터에 있음", ""),
+    ("ok", "기억 서버 설치", "Honcho와 Ollama", ""),
+    ("ok", "ChatGPT 계정 로그인 1/2", '<span class="mono">me@example.com</span>', ""),
+    ("run", "ChatGPT 계정 로그인 2/2", "브라우저에서 다른 ChatGPT 계정으로 로그인하세요.", btn("브라우저 다시 열기", sm=True)),
+    ("wait", "Claude Code 플러그인 설치", "", ""),
+    ("wait", "Codex 플러그인 설치", "", ""),
+    ("wait", "지난 대화 수집 시작", "", ""),
+]
+PROG_CONNECT_GROK = [
+    ("ok", "내 서버 연결", MY_SERVER, ""),
+    ("ok", "Claude Code 플러그인 설치", "", ""),
+    ("run", "Codex 플러그인 설치", "", ""),
+    ("wait", "Grok CLI 훅 설치", "", ""),
     ("wait", "지난 대화 수집 시작", "", ""),
 ]
 PROG_CONNECT = [
@@ -710,8 +738,8 @@ def scr_w1(steps, at, kind, back=False):
     return BLANK + (wizard(START, steps, at, w1_body(kind), foot(left, btn("다음", "pri", hit=True))),)
 
 
-def scr_w2(steps, at):
-    return BLANK + (wizard(START, steps, at, w2_body(), foot(btn("이전", "quiet"), btn("다음", "pri", hit=True))),)
+def scr_w2(steps, at, agents=AGENTS_FOUND):
+    return BLANK + (wizard(START, steps, at, w2_body(agents=agents), foot(btn("이전", "quiet"), btn("다음", "pri", hit=True))),)
 
 
 def scr_w3(steps, at):
@@ -728,11 +756,12 @@ def scr_w5(steps, items, button="대시보드 열기", title=None):
     return BLANK + (wizard(START, steps, "done", body, foot("", btn(button, "pri", hit=True))),)
 
 
-def scr_wm(steps, at):
-    body = ('<h3>기억 서버가 쓸 구독을 고르세요</h3><p class="lead">적용할 때 고른 구독의 계정으로 로그인합니다.</p><div class="opts">'
-            + opt("box", True, "ChatGPT 구독", "Codex에서 쓰는 ChatGPT 계정")
+def scr_wm(steps, at, accounts=1):
+    count = '<span class="cnt-l">계정</span><span class="cnt"><i>−</i><b>' + str(accounts) + "</b><i>+</i></span>"
+    body = ('<h3>기억 서버가 쓸 구독을 고르세요</h3><p class="lead">적용할 때 고른 계정마다 브라우저에서 로그인합니다.</p><div class="opts">'
+            + opt("box", True, "ChatGPT 구독", "Codex에서 쓰는 ChatGPT 계정", count)
             + opt("box", False, "Claude 구독", "Claude Code에서 쓰는 Claude 계정")
-            + '</div><div class="hint">하나 이상 고르세요.</div>')
+            + '</div><div class="hint">하나 이상 고르세요. 계정이 여럿이면 +를 누르세요.</div>')
     return BLANK + (wizard(START, steps, at, body, foot(btn("이전", "quiet"), btn("다음", "pri", hit=True))),)
 
 
@@ -794,31 +823,31 @@ case("1-1", "이메일이 팀 명단에 없음", [
 case("1-2", "내 서버가 이미 있음", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
     ("W1", "서버 · 찾은 내 서버", scr_w1(TEAM, 1, "found")),
-    ("W2", "에이전트", scr_w2(TEAM, 2)),
+    ("W2", "에이전트 · Grok CLI도 찾음", scr_w2(TEAM, 2, AGENTS_GROK)),
     ("W3", "프로젝트 · 적용", scr_w3(TEAM, 3)),
-    ("W4", "적용 중", scr_w4(TEAM, PROG_CONNECT)),
-    ("W5", "에이전트에서 할 일", scr_w5(TEAM, TODO_AGENTS)),
+    ("W4", "적용 중", scr_w4(TEAM, PROG_CONNECT_GROK)),
+    ("W5", "에이전트에서 할 일", scr_w5(TEAM, TODO_AGENTS + [("Grok CLI", "새 세션을 여세요.")])),
 ], DONE_GREEN)
 case("1-3", "내 서버 없음 · 이 컴퓨터에 만들기", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
     ("W1", "서버 · 새로 만들기 (모델 단계가 붙음)", scr_w1(TEAM_NEW, 1, "none")),
-    ("WM", "모델", scr_wm(TEAM_NEW, 2)),
-    ("W2", "에이전트", scr_w2(TEAM_NEW, 3)),
+    ("WM", "모델 · ChatGPT 계정 2개", scr_wm(TEAM_NEW, 2, accounts=2)),
+    ("W2", "에이전트 · 계정마다 폴더가 따로 있음", scr_w2(TEAM_NEW, 3, AGENTS_TWO_CLAUDE)),
     ("W3", "프로젝트 · 적용", scr_w3(TEAM_NEW, 4)),
-    ("W4", "적용 중 · 구독 계정 로그인", scr_w4(TEAM_NEW, PROG_INSTALL)),
+    ("W4", "적용 중 · 계정마다 로그인", scr_w4(TEAM_NEW, PROG_INSTALL_TWO)),
     ("W5", "에이전트에서 할 일", scr_w5(TEAM_NEW, TODO_AGENTS)),
 ], DONE_LOCAL)
 case("1-4", "내 서버 없음 · 수집 없이 팀원 기억만", [
     ("L1", "로그인 중", scr_login(TEAM, 0)),
     ("W1", "서버 · 수집하지 않기 (단계가 팀원으로 바뀜)", scr_w1(CHATONLY, 1, "skip")),
     ("WT", "팀원 · 적용", scr_wt()),
-    ("W5", "할 일", scr_w5(CHATONLY, [("팀 화면", "팀원이 허락하면 그 팀원 줄의 연결을 누르세요.")],
-                         button="팀 화면 열기", title="팀원이 허락하면 할 일")),
-    ("T1", "팀 · 허락 기다리는 중", page("chat", "팀", team(
-        mates=[item("alice", " " + tag("허락 기다리는 중", "warn"), "memory-alice.example.com", btn("요청 취소", "quiet", sm=True)),
-               item("bob", " " + tag("허락 기다리는 중", "warn"), "memory-bob.example.com", btn("요청 취소", "quiet", sm=True)),
+    ("W5", "할 일", scr_w5(CHATONLY, [("팀 화면", "팀원이 승인하면 그 팀원 줄의 연결을 누르세요.")],
+                         button="팀 화면 열기", title="팀원이 승인하면 할 일")),
+    ("T1", "팀 · 승인 기다리는 중", page("chat", "팀", team(
+        mates=[item("alice", " " + tag("승인 기다리는 중", "warn"), "memory-alice.example.com", btn("요청 취소", "quiet", sm=True)),
+               item("bob", " " + tag("승인 기다리는 중", "warn"), "memory-bob.example.com", btn("요청 취소", "quiet", sm=True)),
                MATE_CAROL]))),
-], ("gray", "끝. 허락된 뒤 연결은 4-1 줄 6번째 화면부터 같습니다."))
+], ("gray", "끝. 승인된 뒤 연결은 4-1 줄 6번째 화면부터 같습니다."))
 
 cat("2. 처음 설정 · 팀 링크 없이 열었을 때")
 case("2-1", "팀에 들어가기", [
@@ -869,19 +898,19 @@ case("3-2", "회사 서버에도 수집", [
     ("D2", "기억 설정", (side("member", "기억 설정"), settings(COLLECT_NOTES, hit="collect"), "")),
     ("W1", "서버 · 회사 고름 (수정)", scr_edit(0, w1_body("edit-company"), hit_step=2, collect=COLLECT_NOTES)),
     ("W3", "프로젝트 · 서버마다 고르기 · 적용", scr_edit(2, w3_matrix(), hit_btn="적용", collect=COLLECT_NOTES)),
-    ("D2", "기억 설정 · 허락 기다리는 중", (side("member", "기억 설정"),
-                                       settings(COLLECT_COMPANY, toast="적용했습니다. 회사 서버의 허락을 기다리는 중입니다."), "")),
+    ("D2", "기억 설정 · 승인 기다리는 중", (side("member", "기억 설정"),
+                                       settings(COLLECT_COMPANY, toast="적용했습니다. 회사 서버의 승인을 기다리는 중입니다."), "")),
     ("D1", "회사 서버 주인 앱 · 대시보드", page("admin", "대시보드", dashboard(
         [("on", "이 컴퓨터 서버", LOCAL, "최신", "0개", "1분 전", "52,118개")],
-        notices=["허락할 수집 요청 1개가 있습니다. 서버 → 공유에서 허락하세요."], share=("켜짐", COMPANY)), hit="서버")),
+        notices=["승인할 수집 요청 1개가 있습니다. 서버 → 공유에서 승인하세요."], share=("켜짐", COMPANY)), hit="서버")),
     ("V1", "회사 서버 주인 앱 · 서버 → 공유", page("admin", "서버", share_page(COMPANY, [
         item("이 컴퓨터", "", "마지막 수집 1분 전"),
         item("dave의 Windows PC", "", "마지막 수집 어제", btn("끊기", "danger", sm=True)),
     ], request=item("me의 MacBook", " " + tag("수집 요청", "warn"), "honcho 폴더 · 방금",
-                    btn("허락", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True), cls="req")))),
+                    btn("승인", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True), cls="req")))),
     ("D1", "내 대시보드 · 회사 줄 생김", page("member", "대시보드", dashboard(
         [ROW_LOCAL, ("warn", "회사", COMPANY, "동기화 중", "33개", "방금", "-")]))),
-], ("green", "끝. 허락되면 따로 누를 것 없이 회사 서버 수집이 시작됩니다."))
+], ("green", "끝. 승인되면 따로 누를 것 없이 회사 서버 수집이 시작됩니다."))
 case("3-3", "MCP 도구 바꾸기", [
     ("D2", "기억 설정", (side("member", "기억 설정"), settings(COLLECT_BASE, hit="mcp"), "")),
     ("M1", "MCP 도구 창", bg_settings() + (simple("MCP 도구",
@@ -912,7 +941,7 @@ case("3-5", "내 다른 컴퓨터 끊기", [
     ]), simple("Windows PC를 끊을까요?",
                '<p class="lead" style="margin-top:4px">Windows PC는 이 서버에 더 이상 수집하지 못합니다. 다시 붙이려면 그 컴퓨터의 기억 설정에서 수정을 누르세요.</p>',
                foot("", btn("취소", "quiet") + btn("끊기", "dangerfill", hit=True))))),
-], ("gray", "끝. 내 컴퓨터는 허락 없이 붙고, 끊을 때만 여기서 끊습니다."))
+], ("gray", "끝. 내 컴퓨터는 승인 없이 붙고, 끊을 때만 여기서 끊습니다."))
 case("3-6", "백업 바꾸기", [
     ("B1", "백업", page("member", "백업", backup_page(hit="edit"))),
     ("B2", "백업 설정 창", (side("member", "백업"), backup_page(), simple("백업 설정",
@@ -938,14 +967,14 @@ case("3-7", "기억 서버가 쓰는 모델 바꾸기", [
 
 cat("4. 팀 · 팀원 기억에 묻기")
 TEAM_A = [MATE_ALICE, MATE_DAVE, item("bob", "", "memory-bob.example.com", btn("chat 요청", sm=True, hit=True)), MATE_CAROL]
-TEAM_B = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("허락 기다리는 중", "warn"), "방금 요청", btn("요청 취소", "quiet", sm=True)), MATE_CAROL]
-TEAM_C = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("허락됨", "ok"), "열린 프로젝트 1개", btn("연결", "pri", sm=True, hit=True)), MATE_CAROL]
+TEAM_B = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("승인 기다리는 중", "warn"), "방금 요청", btn("요청 취소", "quiet", sm=True)), MATE_CAROL]
+TEAM_C = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("승인됨", "ok"), "열린 프로젝트 1개", btn("연결", "pri", sm=True, hit=True)), MATE_CAROL]
 TEAM_D = [MATE_ALICE, MATE_DAVE, item("bob", " " + tag("연결됨", "ok"), "Claude Code·Codex · 열린 프로젝트 1개", btn("끊기", "danger", sm=True)), MATE_CAROL]
 BOB_MATES = [item("alice", " " + tag("연결됨", "ok"), "Claude Code · 열린 프로젝트 1개", btn("끊기", "danger", sm=True)),
              item("dave", "", "memory-dave.example.com", btn("chat 요청", sm=True)),
              item("me", "", MY_SERVER, btn("chat 요청", sm=True)), MATE_CAROL]
 BOB_REQ = item("me", " " + tag("chat"), "내 기억에 chat으로 물으려 합니다 · 방금",
-               btn("허락", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True), cls="req")
+               btn("승인", "pri", sm=True, hit=True) + btn("거절", "danger", sm=True), cls="req")
 BOB_PROJECTS = [("mobile-app", "~/dev/mobile-app", 58, True), ("design-system", "~/dev/design-system", 21, False),
                 ("notes", "~/Documents/notes", 9, False)]
 
@@ -958,19 +987,19 @@ def project_boxes(rows):
     return '<div class="pt">' + "".join(out) + "</div>"
 
 
-case("4-1", "팀원 기억에 chat 요청 → 허락 → 연결", [
+case("4-1", "팀원 기억에 chat 요청 → 승인 → 연결", [
     ("T1", "팀 (내 앱)", page("member", "팀", team(mates=TEAM_A, granted=[GRANT_ALICE()]))),
     ("T1", "팀 · 요청 보냄 (내 앱)", page("member", "팀", team(mates=TEAM_B, granted=[GRANT_ALICE()]))),
     ("D1", "대시보드 (bob 앱)", page("member", "대시보드", dashboard(
-        [ROW_LOCAL], notices=["허락할 chat 요청 1개가 있습니다. 팀에서 허락하세요."], share=("켜짐", "memory-bob.example.com")),
+        [ROW_LOCAL], notices=["승인할 chat 요청 1개가 있습니다. 팀에서 승인하세요."], share=("켜짐", "memory-bob.example.com")),
         hit="팀")),
     ("T1", "팀 · 받은 요청 (bob 앱)", page("member", "팀", team(received=[BOB_REQ], mates=BOB_MATES, granted=[]))),
-    ("T2", "chat 허락 창 (bob 앱)", (side("member", "팀"), team(received=[BOB_REQ.replace(" hit", "")], mates=BOB_MATES, granted=[]),
+    ("T2", "chat 승인 창 (bob 앱)", (side("member", "팀"), team(received=[BOB_REQ.replace(" hit", "")], mates=BOB_MATES, granted=[]),
                                   simple("me에게 내 기억 열기",
                                          '<p class="lead" style="margin-top:4px">me가 chat으로 물을 때 답에 쓸 프로젝트를 고르세요.</p>'
                                          + project_boxes(BOB_PROJECTS),
-                                         foot("", btn("취소", "quiet") + btn("허락", "pri", hit=True))))),
-    ("T1", "팀 · 허락됨 (내 앱)", page("member", "팀", team(mates=TEAM_C, granted=[GRANT_ALICE()]))),
+                                         foot("", btn("취소", "quiet") + btn("승인", "pri", hit=True))))),
+    ("T1", "팀 · 승인됨 (내 앱)", page("member", "팀", team(mates=TEAM_C, granted=[GRANT_ALICE()]))),
     ("T3", "연결 창 (내 앱)", (side("member", "팀"), team(mates=[m.replace(" hit", "") for m in TEAM_C], granted=[GRANT_ALICE()]),
                              simple("bob의 기억 연결",
                                     '<div class="opts">'
@@ -1014,7 +1043,7 @@ CODES = [
     ("S1", "처음 화면 (세 갈래)"), ("S2", "팀 주소"), ("S3", "새 팀 만들기"), ("L1", "로그인 중"), ("L2", "명단에 없음"),
     ("W1", "서버 단계"), ("WM", "모델 단계"), ("W2", "에이전트 단계"), ("W3", "프로젝트 단계 · 적용"), ("WT", "팀원 단계 · 적용"),
     ("W4", "적용 중"), ("W5", "할 일"), ("D1", "대시보드"), ("D2", "기억 설정"), ("M1", "MCP 도구 창"),
-    ("M2", "ChatGPT 기록 창"), ("T1", "팀"), ("T2", "chat 허락 창"), ("T3", "연결 창"), ("T4", "연 프로젝트 창"),
+    ("M2", "ChatGPT 기록 창"), ("T1", "팀"), ("T2", "chat 승인 창"), ("T3", "연결 창"), ("T4", "연 프로젝트 창"),
     ("V1", "서버 → 공유"), ("V2", "끊기 확인 창"), ("B1", "백업"), ("B2", "백업 설정 창"), ("G1", "서버 → 모델"),
     ("G2", "모델 창"), ("A1", "관리자"), ("A2", "팀원 더하기 창"), ("A3", "빼기 확인 창"),
 ]
@@ -1027,6 +1056,9 @@ RULES = [
     "메뉴 안의 설정은 모두 창으로 열립니다. 페이지는 지금 상태를 글로만 보여 줍니다.",
     "팀원 명단과 팀원 더하기는 관리자 탭에만 있습니다. 팀원은 Cloudflare라는 말을 보지 않습니다.",
     "수집하지 않기를 고른 사람의 메뉴에는 기억 · 서버 탭이 없습니다. 기억 설정의 수정에서 서버를 고르면 생깁니다.",
+    "팀으로 쓸 때 peer 이름은 Google 이메일의 @ 앞부분이라 묻지 않습니다. 혼자 쓰기만 직접 넣습니다.",
+    "에이전트 단계는 이 컴퓨터에서 찾은 에이전트 폴더를 한 줄씩 보여 줍니다. 계정마다 폴더가 따로 있으면 줄도 따로 나옵니다.",
+    "구독 계정이 여럿이면 모델 단계에서 수를 늘리고, 적용 중에 계정마다 로그인합니다.",
     "주황 테두리는 다음 화면으로 가려고 누르는 곳입니다.",
 ]
 
