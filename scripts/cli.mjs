@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   CONFIG_VERSION,
+  collectFolders,
   configEnvironment,
   hostConfigPaths,
   installPaths,
@@ -67,12 +68,14 @@ import {
   TARGET_SECRET_ENV,
   configuredTargets,
   folderMatches,
+  outsideCollectFolders,
   targetAccess,
   targetAgents,
   targetEnvironment,
   targetPaths,
   targetSummary,
   targetWorkspace,
+  withoutTargetFilter,
 } from "./targets.mjs";
 import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
 import { checkPrereqs, FEATURES, parseFeatures } from "./prereqs.mjs";
@@ -371,6 +374,7 @@ async function setupPlan(options = {}) {
   const existingAccess = configuredAccess(existing);
   const savedAccess = existingAccess && sameOrigin(existing.honcho.baseUrl, baseUrl) ? existingAccess : null;
   const access = envAccessGiven ? envAccess : savedAccess;
+  const collect = collectChoice(options, existing);
   const config = {
     version: CONFIG_VERSION,
     user: { peerId: optionString(options.userPeer, existing?.user?.peerId || "") },
@@ -381,6 +385,7 @@ async function setupPlan(options = {}) {
       ...(access ? { access } : {}),
     },
     agents,
+    ...(collect.collect ? { collect: collect.collect } : {}),
     // Written by `target add|set|remove`. Setup rebuilds the rest of the file and
     // must not drop the other servers some folders also go to.
     ...(Array.isArray(existing?.targets) ? { targets: existing.targets } : {}),
@@ -395,8 +400,8 @@ async function setupPlan(options = {}) {
   };
   const paths = installPaths(config);
   const selectedAgents = Object.entries(agents).filter(([, enabled]) => enabled).map(([name]) => name);
-  const issues = [];
-  const warnings = [];
+  const issues = [...collect.issues];
+  const warnings = [...collect.warnings];
   const nodeMajor = Number(process.versions.node.split(".", 1)[0]);
   if (!Number.isFinite(nodeMajor) || nodeMajor < 18) issues.push("Node.js 18 or newer is required");
   if (!config.user.peerId.trim()) issues.push("user peer id is required");
@@ -1128,11 +1133,11 @@ function targetUrlIssues(value) {
 }
 
 /** `--folders a,b`: absolute folders (or `~/...`), resolved, one spelling each. */
-function parseFolders(value) {
+function parseFolders(value, flag = "--folders") {
   const issues = [];
   const warnings = [];
   const folders = [];
-  if (typeof value !== "string" || !value.trim()) return { folders, issues: ["--folders needs at least one folder"], warnings };
+  if (typeof value !== "string" || !value.trim()) return { folders, issues: [`${flag} needs at least one folder`], warnings };
   for (const raw of value.split(",").map((item) => item.trim()).filter(Boolean)) {
     let expanded = raw;
     if (raw === "~") expanded = userHome();
@@ -1148,8 +1153,36 @@ function parseFolders(value) {
     folders.push(folder);
     if (!fs.existsSync(folder)) warnings.push(`${folder} does not exist on this computer; conversations there are sent once it does`);
   }
-  if (!folders.length && !issues.length) issues.push("--folders needs at least one folder");
+  if (!folders.length && !issues.length) issues.push(`${flag} needs at least one folder`);
   return { folders, issues, warnings };
+}
+
+/**
+ * Which folders' conversations the own server takes (config.json `collect`):
+ * `--take-folders a,b` and `--skip-folders c,d` name folders, the deepest one a
+ * session ran in deciding, and `--rest-folders take|skip` says what happens to a
+ * session in none of them, folders made later included (take when not given).
+ * `--all-folders` takes every folder again. Without any of them, what config.json
+ * says stays.
+ */
+function collectChoice(options, existing) {
+  const kept = collectFolders(existing);
+  const named = ["takeFolders", "skipFolders", "restFolders"].filter((key) => options[key] !== undefined);
+  if (options.allFolders !== undefined) {
+    return named.length
+      ? { collect: kept, issues: ["--all-folders takes every folder; leave out --take-folders, --skip-folders and --rest-folders"], warnings: [] }
+      : { collect: null, issues: [], warnings: [] };
+  }
+  if (!named.length) return { collect: kept, issues: [], warnings: [] };
+  const none = { folders: [], issues: [], warnings: [] };
+  const take = options.takeFolders === undefined ? none : parseFolders(options.takeFolders, "--take-folders");
+  const skip = options.skipFolders === undefined ? none : parseFolders(options.skipFolders, "--skip-folders");
+  const rest = options.restFolders === undefined ? "take" : options.restFolders;
+  const issues = [...take.issues, ...skip.issues];
+  if (rest !== "take" && rest !== "skip") issues.push("--rest-folders takes take or skip");
+  // Taking no folder and skipping the rest would collect nothing at all.
+  else if (rest === "skip" && !take.folders.length && !take.issues.length) issues.push("--rest-folders skip needs --take-folders with the folders to take");
+  return { collect: collectFolders({ collect: { take: take.folders, skip: skip.folders, rest } }), issues, warnings: take.warnings };
 }
 
 function parseTargetAgents(value) {
@@ -1394,38 +1427,29 @@ function runCollector(provider, transcript, env) {
   return { ok: false, error: result.error?.message || `the importer exited with ${result.status}` };
 }
 
-async function targetBackfill(id, options = {}) {
-  const issues = [...targetSecretsOnCommandLine(options)];
-  const since = parseSince(options.since);
-  issues.push(...since.issues);
-  const limit = options.limit === undefined ? BACKFILL_DEFAULT_LIMIT : Number(options.limit);
-  if (!Number.isInteger(limit) || limit < 1 || limit > BACKFILL_MAX_LIMIT) issues.push(`--limit takes a whole number from 1 to ${BACKFILL_MAX_LIMIT}`);
-  const base = await collectingConfiguration();
-  if (base.error) issues.push(base.error);
-  const target = base.config ? findTarget(base.config, id) : null;
-  if (base.config && !target) issues.push(`no target named ${id}`);
-  if (target && !target.enabled) issues.push(`${id} is turned off; turn it on with target set ${id} --enabled true`);
-  if (target && !target.folders.length) issues.push(`${id} has no folders`);
-  if (issues.length) return { ok: false, issues };
-
-  const { config } = base;
-  const paths = targetPaths(config, id);
-  const progress = await readJson(paths.backfill, null);
+/**
+ * Sends past Claude Code and Codex sessions through the importer, oldest first: the
+ * transcripts of `agents` changed since `sinceMs`, each kept or left out by
+ * `accepts(parsed)` and sent with `envFor(provider)`. What became of each transcript
+ * is kept in `progressPath` with its size and time, so a run carries on where the
+ * last one stopped; `filterKey` names the folders it was decided for, and a session
+ * left out is looked at again once they change. `onProgress` hears each step.
+ */
+async function backfillSessions({ config, agents, sinceMs, limit, accepts, envFor, progressPath, filterKey, onProgress }) {
+  const progress = await readJson(progressPath, null);
   const done = progress && typeof progress.done === "object" && progress.done ? progress.done : {};
-  // A session found outside the folders is looked at again once the folders change.
-  if (progress?.folders !== foldersKey(target.folders)) {
+  if (progress?.folders !== filterKey) {
     for (const [key, entry] of Object.entries(done)) if (entry?.outcome !== "sent") delete done[key];
   }
-  const saveProgress = () => writeJsonAtomic(paths.backfill, { version: 1, folders: foldersKey(target.folders), done });
+  const saveProgress = () => writeJsonAtomic(progressPath, { version: 1, folders: filterKey, done });
 
   const candidates = [];
-  const agents = targetAgents(config, target);
   for (const provider of TARGET_PROVIDERS) {
     if (!agents[provider]) continue;
     for (const file of await transcriptFiles(config, provider)) {
       let stat;
       try { stat = await fsp.stat(file); } catch { continue; }
-      if (stat.mtimeMs < since.sinceMs) continue;
+      if (stat.mtimeMs < sinceMs) continue;
       const key = `${provider}:${file}`;
       if (done[key] && done[key].mtimeMs === stat.mtimeMs && done[key].size === stat.size) continue;
       candidates.push({ provider, file, key, mtimeMs: stat.mtimeMs, size: stat.size });
@@ -1438,6 +1462,8 @@ async function targetBackfill(id, options = {}) {
   let examined = 0;
   let consecutiveFailures = 0;
   let stoppedEarly = false;
+  const tell = () => onProgress?.({ considered: candidates.length, examined, remaining: candidates.length - examined, ...summary });
+  await tell();
   for (const candidate of candidates.slice(0, limit)) {
     examined += 1;
     let parsed;
@@ -1451,22 +1477,19 @@ async function targetBackfill(id, options = {}) {
       continue;
     }
     // Decided here without starting the importer; the importer checks again.
-    if (!folderMatches(parsed.metadata?.cwd, target.folders)) {
+    if (!accepts(parsed)) {
       summary.outside_folders += 1;
       done[candidate.key] = { mtimeMs: candidate.mtimeMs, size: candidate.size, outcome: "outside" };
       continue;
     }
-    const env = targetEnvironment(config, target, candidate.provider, {
-      ...process.env,
-      HONCHO_AGENT_IMPORT_TRIGGER: "backfill",
-    });
-    const result = runCollector(candidate.provider, candidate.file, env);
+    const result = runCollector(candidate.provider, candidate.file, envFor(candidate.provider));
     if (result.ok) {
       consecutiveFailures = 0;
       if (!result.skipped) summary.sent_sessions += 1;
       summary.new_messages += Number(result.new_messages || 0);
       done[candidate.key] = { mtimeMs: candidate.mtimeMs, size: candidate.size, outcome: result.skipped ? "outside" : "sent", at: new Date().toISOString() };
       await saveProgress();
+      await tell();
     } else {
       summary.failed += 1;
       consecutiveFailures += 1;
@@ -1480,11 +1503,6 @@ async function targetBackfill(id, options = {}) {
   }
   await saveProgress();
   return {
-    ok: summary.failed === 0,
-    id,
-    url: publicUrl(target.honcho.baseUrl),
-    since: options.since || null,
-    limit,
     considered: candidates.length,
     examined,
     remaining: candidates.length - examined,
@@ -1492,6 +1510,144 @@ async function targetBackfill(id, options = {}) {
     ...(stoppedEarly ? { stopped: `stopped after ${BACKFILL_MAX_CONSECUTIVE_FAILURES} failures in a row; run it again once the server answers` } : {}),
     ...(failures.length ? { failures: failures.slice(0, 20) } : {}),
   };
+}
+
+function backfillLimit(value, fallback) {
+  if (value === undefined) return fallback;
+  const limit = Number(value);
+  return Number.isInteger(limit) && limit >= 1 && limit <= BACKFILL_MAX_LIMIT ? limit : null;
+}
+
+async function targetBackfill(id, options = {}) {
+  const issues = [...targetSecretsOnCommandLine(options)];
+  const since = parseSince(options.since);
+  issues.push(...since.issues);
+  const limit = backfillLimit(options.limit, BACKFILL_DEFAULT_LIMIT);
+  if (limit === null) issues.push(`--limit takes a whole number from 1 to ${BACKFILL_MAX_LIMIT}`);
+  const base = await collectingConfiguration();
+  if (base.error) issues.push(base.error);
+  const target = base.config ? findTarget(base.config, id) : null;
+  if (base.config && !target) issues.push(`no target named ${id}`);
+  if (target && !target.enabled) issues.push(`${id} is turned off; turn it on with target set ${id} --enabled true`);
+  if (target && !target.folders.length) issues.push(`${id} has no folders`);
+  if (issues.length) return { ok: false, issues };
+
+  const { config } = base;
+  const result = await backfillSessions({
+    config,
+    agents: targetAgents(config, target),
+    sinceMs: since.sinceMs,
+    limit,
+    accepts: (parsed) => folderMatches(parsed.metadata?.cwd, target.folders),
+    envFor: (provider) => targetEnvironment(config, target, provider, { ...process.env, HONCHO_AGENT_IMPORT_TRIGGER: "backfill" }),
+    progressPath: targetPaths(config, id).backfill,
+    filterKey: foldersKey(target.folders),
+  });
+  return { ok: result.failed === 0, id, url: publicUrl(target.honcho.baseUrl), since: options.since || null, limit, ...result };
+}
+
+// ── Past conversations to this computer's own server ─────
+//
+// The hook sends a session whole on its next turn, so a session never opened again
+// never reaches the server by itself. `backfill` sends them: every past Claude Code
+// and Codex session in the folders setup chose (config.json `collect`), oldest first,
+// deduped against what the collector already sent. `backfill start` runs it in the
+// background, which is what first setup does once it has applied.
+
+function ownBackfillPaths(config) {
+  const { dataDir } = installPaths(config);
+  return {
+    progress: path.join(dataDir, "state", "backfill.json"),
+    status: path.join(dataDir, "state", "backfill-status.json"),
+    lock: path.join(dataDir, "state", "backfill.lock"),
+  };
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function ownBackfillRun(options = {}) {
+  const issues = [];
+  const since = parseSince(options.since);
+  issues.push(...since.issues);
+  // Unlike a target's, this one runs in the background and goes through them all.
+  const limit = backfillLimit(options.limit, Number.POSITIVE_INFINITY);
+  if (limit === null) issues.push(`--limit takes a whole number from 1 to ${BACKFILL_MAX_LIMIT}`);
+  const base = await collectingConfiguration();
+  if (base.error) issues.push(base.error);
+  if (issues.length) return { ok: false, issues };
+
+  const { config } = base;
+  const paths = ownBackfillPaths(config);
+  const lock = await acquireFileLock(paths.lock, { staleMs: 24 * 3_600_000, reclaimDeadImmediately: true });
+  if (!lock) return { ok: false, busy: true, error: "another backfill is still running" };
+  const startedAt = new Date().toISOString();
+  const writeStatus = (fields) => writeJsonAtomic(paths.status, { version: 1, ...fields });
+  try {
+    const filter = collectFolders(config);
+    let lastWrite = 0;
+    const result = await backfillSessions({
+      config,
+      agents: config.agents || {},
+      sinceMs: since.sinceMs,
+      limit,
+      accepts: (parsed) => !outsideCollectFolders(parsed.metadata?.cwd, filter),
+      envFor: (provider) => withoutTargetFilter({
+        ...process.env,
+        ...configEnvironment(config, provider),
+        HONCHO_AGENT_PROVIDER: provider,
+        HONCHO_AGENT_IMPORT_TRIGGER: "backfill",
+      }),
+      progressPath: paths.progress,
+      filterKey: JSON.stringify(filter || {}),
+      // The screen reads how far it got; a write every few seconds is enough.
+      onProgress: async (progress) => {
+        if (Date.now() - lastWrite < 2_000) return;
+        lastWrite = Date.now();
+        await writeStatus({ running: { pid: process.pid, startedAt, ...progress } });
+      },
+    });
+    const finished = { ok: result.failed === 0, url: publicUrl(config.honcho.baseUrl), since: options.since || null, limit, ...result };
+    await writeStatus({ running: null, lastRun: { startedAt, finishedAt: new Date().toISOString(), ...finished } });
+    return finished;
+  } finally {
+    await releaseFileLock(lock);
+  }
+}
+
+/** Starts a backfill in the background and returns at once. */
+async function ownBackfillStart(options = {}) {
+  const base = await collectingConfiguration();
+  if (base.error) return { ok: false, error: base.error };
+  const since = parseSince(options.since);
+  if (since.issues.length) return { ok: false, issues: since.issues };
+  const status = await readJson(ownBackfillPaths(base.config).status, {});
+  if (status?.running && processAlive(status.running.pid)) return { ok: true, started: false, running: status.running };
+  const child = spawn(process.execPath, [path.join(SCRIPT_DIR, "cli.mjs"), "backfill", "run", ...(options.since ? ["--since", options.since] : [])], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: process.env,
+  });
+  child.on("error", () => {});
+  child.unref();
+  return { ok: true, started: true, pid: child.pid };
+}
+
+/** Where the last backfill got: `running` while one goes, `lastRun` once it has finished. */
+async function ownBackfillStatus() {
+  const base = await collectingConfiguration();
+  if (base.error) return { ok: false, error: base.error };
+  const status = await readJson(ownBackfillPaths(base.config).status, {});
+  const running = status?.running && processAlive(status.running.pid) ? status.running : null;
+  return { ok: true, running, lastRun: status?.lastRun || null };
 }
 
 async function targetCommand(args) {
@@ -1630,7 +1786,8 @@ function usage() {
       "host status [--profile personal]",
       "host stop [--profile personal]",
       "gateway open",
-      "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN; its Cloudflare Access service token in HONCHO_CF_ACCESS_CLIENT_ID, HONCHO_CF_ACCESS_CLIENT_SECRET)",
+      "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--take-folders <dir,dir>] [--skip-folders <dir,dir>] [--rest-folders take|skip] [--all-folders] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN; its Cloudflare Access service token in HONCHO_CF_ACCESS_CLIENT_ID, HONCHO_CF_ACCESS_CLIENT_SECRET)",
+      "backfill run|start|status [--since YYYY-MM-DD] (past conversations of the collected folders to this computer's own server; start runs it in the background)",
       "bridge disconnect (removes the shared-bridge settings 0.3.28 and before saved)",
       "target list",
       "target add <id> --url <https://host> --folders <dir,dir> [--label <text>] [--workspace <id>] [--user-peer <id>] [--agents claude,codex] (its API token in HONCHO_TARGET_API_TOKEN; its Cloudflare Access service token in HONCHO_TARGET_CF_ACCESS_CLIENT_ID, HONCHO_TARGET_CF_ACCESS_CLIENT_SECRET)",
@@ -1813,6 +1970,13 @@ async function main() {
     return { ok: false, error: "The shared-bridge relay was removed: connect a teammate's memory with teammates connect <name> <host>; bridge disconnect removes the old settings" };
   }
   if (command === "target") return targetCommand(args);
+  if (command === "backfill") {
+    const subcommand = args.shift() || "status";
+    const options = parseOptions(args);
+    if (subcommand === "run") return ownBackfillRun(options);
+    if (subcommand === "start") return ownBackfillStart(options);
+    if (subcommand === "status") return ownBackfillStatus();
+  }
   if (command === "teammates") return teammatesCommand(args);
   if (command === "backup") {
     const subcommand = args.shift() || "status";

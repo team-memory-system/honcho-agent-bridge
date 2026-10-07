@@ -55,6 +55,28 @@ export async function loadConfig() {
   return config;
 }
 
+// Where the collector reads which folders this computer's own server takes.
+export const COLLECT_FOLDERS_ENV = "HONCHO_AGENT_COLLECT_FOLDERS";
+
+/**
+ * The folders this computer's own server takes, from config.json `collect`:
+ * `{ take: [...], skip: [...], rest: "take" | "skip" }`. A session goes by the
+ * deepest of those folders it ran in, so a folder taken inside a skipped one is
+ * still taken, and the other way round; one in none of them goes by `rest`, which
+ * is how folders made later are taken or not. null when it takes everything, as
+ * it did before setup could choose.
+ */
+export function collectFolders(config) {
+  const collect = config?.collect;
+  if (!collect || typeof collect !== "object") return null;
+  const folders = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === "string" && item) : []);
+  const take = folders(collect.take);
+  const skip = folders(collect.skip);
+  const rest = collect.rest === "skip" ? "skip" : "take";
+  if (!skip.length && rest === "take") return null;
+  return { take, skip, rest };
+}
+
 export function configEnvironment(config, provider = "") {
   if (!config) return {};
   const paths = installPaths(config);
@@ -81,6 +103,8 @@ export function configEnvironment(config, provider = "") {
     env.HONCHO_AGENT_HOOK_STATE = path.join(paths.dataDir, "state", `${provider}.json`);
     env.HONCHO_AGENT_HOOK_LOG = path.join(paths.dataDir, "logs", `${provider}.log`);
   }
+  const folders = collectFolders(config);
+  if (folders) env[COLLECT_FOLDERS_ENV] = JSON.stringify(folders);
   return Object.fromEntries(Object.entries(env).filter(([, value]) => value !== ""));
 }
 

@@ -22,7 +22,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { installPaths } from "./config.mjs";
+import { COLLECT_FOLDERS_ENV, collectFolders, installPaths } from "./config.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
 import { publicUrl } from "./redact.mjs";
 
@@ -131,6 +131,44 @@ export function foldersFromEnvironment(env = process.env) {
   }
 }
 
+/**
+ * The folders this computer's own server takes, as the collector receives them
+ * (configEnvironment): null when it takes everything. A filter that cannot be read
+ * takes nothing, rather than everything.
+ */
+export function collectFoldersFromEnvironment(env = process.env) {
+  const raw = env[COLLECT_FOLDERS_ENV];
+  if (raw === undefined) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") return collectFolders({ collect: parsed });
+  } catch {}
+  return { take: [], skip: [], rest: "skip" };
+}
+
+/** How deep the deepest of `folders` that holds `cwd` is, or -1 when none does. */
+function deepestHolding(cwd, folders, options) {
+  let depth = -1;
+  for (const folder of folders) {
+    if (!folderMatches(cwd, [folder], options)) continue;
+    depth = Math.max(depth, normalizeFolder(folder, options).split(/[\\/]+/).filter(Boolean).length);
+  }
+  return depth;
+}
+
+/**
+ * Whether this computer's own server leaves out a session that ran in `cwd`: the
+ * deepest folder of `take` and `skip` that holds it decides, a skip when both name
+ * the same one; a session in none of them, or with no folder, goes by `rest`.
+ */
+export function outsideCollectFolders(cwd, filter, options) {
+  if (!filter) return false;
+  const take = deepestHolding(cwd, filter.take, options);
+  const skip = deepestHolding(cwd, filter.skip, options);
+  if (take < 0 && skip < 0) return filter.rest === "skip";
+  return skip >= take;
+}
+
 /** The targets in a configuration, with their defaults filled in. */
 export function configuredTargets(config) {
   if (!config || !Array.isArray(config.targets)) return [];
@@ -221,6 +259,8 @@ export function targetEnvironment(config, target, provider, baseEnv = process.en
   env.HONCHO_AGENT_HOOK_LOG = paths.log(provider);
   env[TARGET_ID_ENV] = target.id;
   env[TARGET_FOLDERS_ENV] = JSON.stringify(target.folders);
+  // The own server's folder choice says nothing about what a target takes.
+  delete env[COLLECT_FOLDERS_ENV];
   return env;
 }
 

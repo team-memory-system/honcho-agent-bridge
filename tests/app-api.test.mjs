@@ -247,3 +247,21 @@ test("a server token typed into the setup form reaches the CLI but not its comma
   const server = await fsp.readFile(new URL("../scripts/ui.mjs", import.meta.url), "utf8");
   assert.equal(/SETUP_OPTIONS = new Set\([^)]*apiToken/.test(server), false, "the token is not a command-line option");
 });
+
+test("관리자 shows only where the team was made: its admin, zone and host, never the token", async (t) => {
+  const runtime = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-team-"));
+  t.after(() => fsp.rm(runtime, { recursive: true, force: true }));
+  const config = { version: 1, user: { peerId: "me" }, honcho: { baseUrl: "http://127.0.0.1:1" }, agents: { claude: true } };
+  const teamPaths = { serverDirectory: path.join(runtime, "server"), runtimeDirectory: runtime };
+  const none = await appContext({ config, ports: { installed: false }, teamPaths, teamOptions: { homeDir: runtime, env: {} } });
+  assert.deepEqual(none.team, { admin: false }, "no team-access.json: not the admin");
+
+  await fsp.writeFile(path.join(runtime, "team-access.json"), JSON.stringify({
+    accountId: "acc", zone: "example.com", ownerEmail: "admin@example.com", peoplePolicyId: "policy", owner: { name: "memory", host: "memory.example.com" },
+  }));
+  await fsp.mkdir(path.join(runtime, "cloudflare"), { recursive: true });
+  await fsp.writeFile(path.join(runtime, "cloudflare", "api-token"), "cf-secret-token");
+  const admin = await appContext({ config, ports: { installed: false }, teamPaths, teamOptions: { homeDir: runtime, env: {} } });
+  assert.deepEqual(admin.team, { admin: true, ownerEmail: "admin@example.com", zone: "example.com", host: "memory.example.com", hasApiToken: true });
+  assert.equal(JSON.stringify(admin).includes("cf-secret-token"), false);
+});

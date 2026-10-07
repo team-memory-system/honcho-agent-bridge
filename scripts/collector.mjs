@@ -16,7 +16,7 @@ import {
   honchoHeaders,
   isCloudflareAccessBlock,
 } from "./honcho-access.mjs";
-import { folderMatches, foldersFromEnvironment } from "./targets.mjs";
+import { collectFoldersFromEnvironment, folderMatches, foldersFromEnvironment, outsideCollectFolders } from "./targets.mjs";
 
 const ROOT_URL = (process.env.HONCHO_BASE_URL || "http://127.0.0.1:8001").replace(/\/+$/, "");
 const AUTH_TOKEN = process.env.HONCHO_API_BEARER_TOKEN || "";
@@ -54,6 +54,9 @@ const AUTOMATION_CLASSIFIERS = {
 // without a working directory, is sent - checked here, before any request, so no
 // caller of this importer can send a target anything else.
 const TARGET_FOLDERS = foldersFromEnvironment(process.env);
+// The folders this computer's own server takes, when setup chose some (config.json
+// `collect`). A target run has its own folders and never this choice.
+const COLLECT_FOLDERS = TARGET_FOLDERS === null ? collectFoldersFromEnvironment(process.env) : null;
 
 /**
  * Whether this run may not send `parsed`. A session is decided by its own working
@@ -65,14 +68,19 @@ function outsideTargetFolders(parsed) {
   return !folderMatches(parsed?.metadata?.cwd, TARGET_FOLDERS);
 }
 
-function skippedOutsideFolders(provider, parsed, transcriptPath) {
+/** Whether the own server leaves `parsed` out. A ChatGPT conversation has no folder and is chosen on its own. */
+function outsideCollectedFolders(provider, parsed) {
+  return provider !== "chatgpt" && outsideCollectFolders(parsed?.metadata?.cwd, COLLECT_FOLDERS);
+}
+
+function skippedOutsideFolders(provider, parsed, transcriptPath, skipped = "outside target folders") {
   return {
     ok: true,
     provider,
     session_id: parsed?.session_id || null,
     transcript_path: transcriptPath,
     new_messages: 0,
-    skipped: "outside target folders",
+    skipped,
   };
 }
 
@@ -509,6 +517,7 @@ async function importCodex(args, hookInput) {
 
   const parsed = await getProvider("codex").parseTranscript(rolloutPath, hookInput);
   if (outsideTargetFolders(parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath);
+  if (outsideCollectedFolders("codex", parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath, "outside collected folders");
   const sessionId = parsed.session_id;
   const segmentId = codexSegmentId(rolloutPath, parsed.metadata.original_session_id);
   if (segmentId) for (const turn of parsed.turns) turn.segment_id = segmentId;
@@ -575,6 +584,9 @@ async function importParsedSession(args, parsed, transcriptPath, options = {}) {
   // Every non-Codex write passes here; a target run never writes a session from
   // outside its folders, whoever called.
   if (outsideTargetFolders(parsed)) return skippedOutsideFolders(args.provider, parsed, transcriptPath);
+  if (outsideCollectedFolders(args.provider, parsed)) {
+    return skippedOutsideFolders(args.provider, parsed, transcriptPath, "outside collected folders");
+  }
   const sessionId = parsed.session_id;
   return withStateLock(args.provider, async () => {
     const state = await loadState(args.provider);

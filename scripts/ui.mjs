@@ -441,6 +441,7 @@ const BACKUP_ROUTES = {
  */
 const READ_ROUTES = new Set([
   "/api/targets", "/api/status", "/api/server/status", "/api/backup/status", "/api/backup/remotes", "/api/host/status",
+  "/api/backfill/status",
 ]);
 
 const ROUTES = {
@@ -453,6 +454,9 @@ const ROUTES = {
   }),
   "/api/setup/plan": async (body) => runCli(["setup", "plan", ...cliOptions(body)], { env: setupEnvironment(body) }),
   "/api/setup/apply": async (body) => runCli(["setup", "apply", ...cliOptions(body)], { env: setupEnvironment(body) }),
+  // Past conversations of the collected folders, sent in the background.
+  "/api/backfill/start": async () => runCli(["backfill", "start"], { timeout: 60_000 }),
+  "/api/backfill/status": async () => runCli(["backfill", "status"], { timeout: 60_000 }),
   "/api/server/plan": async (body) => runCli(["server", "plan", ...profileOption(body)]),
   "/api/server/prepare": async (body) => runCli(["server", "prepare", ...profileOption(body), ...modelOption(body)]),
   "/api/server/start": async (body) => runCli(["server", "start", ...profileOption(body), ...modelOption(body)]),
@@ -495,7 +499,7 @@ function modelOption(body) {
  * passed through under a name the CLI would ignore in silence.
  */
 const SETUP_OPTIONS = new Set([
-  "userPeer", "honchoUrl", "workspace", "agents", "codexRoot", "dataDir",
+  "userPeer", "honchoUrl", "workspace", "agents", "codexRoot", "dataDir", "takeFolders", "skipFolders", "restFolders", "allFolders",
 ]);
 
 /**

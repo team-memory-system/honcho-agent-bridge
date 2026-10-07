@@ -8,7 +8,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { installPaths, loadConfig, readJson } from "./config.mjs";
+import { collectFolders, installPaths, loadConfig, readJson } from "./config.mjs";
 import {
   ACCESS_REFUSED_KO,
   configuredAccess,
@@ -22,7 +22,7 @@ import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { publicUrl } from "./redact.mjs";
 import { installedServerModel, installedServerPorts } from "./server-manager.mjs";
 import { configuredTargets, countPending, sentSummary, targetSummary } from "./targets.mjs";
-import { registeredTeamServers } from "./team-access.mjs";
+import { readTeamState, registeredTeamServers, teamAccessPaths } from "./team-access.mjs";
 import { VERSION } from "./version.mjs";
 
 const DEFAULT_HONCHO_URL = "http://127.0.0.1:8001";
@@ -83,6 +83,8 @@ export async function appContext(options = {}) {
     user: { peerId: config?.user?.peerId || "" },
     workspace: config?.honcho?.workspaceId || "memory",
     agents: { codex: Boolean(config?.agents?.codex), claude: Boolean(config?.agents?.claude) },
+    // The folders the own server takes ({ take, skip, rest }), or null for every folder.
+    collect: collectFolders(config),
     honcho: { url: publicUrl(endpoints.honchoUrl), hasToken: Boolean(endpoints.honchoToken), hasAccess: Boolean(endpoints.honchoAccess) },
     localServer: endpoints.localServer ? { ...endpoints.localServer, chatModel: await installedServerModel() } : null,
     dashboardUrl: endpoints.dashboardUrl,
@@ -91,11 +93,31 @@ export async function appContext(options = {}) {
     // MCP servers, read from those clients' own files; and whether the shared-bridge
     // settings of 0.3.28 (no longer used) are still saved here.
     teamMemory: await teamMemoryContext(options),
+    // Whether the team was made on this computer, which makes it the admin's (관리자).
+    team: await teamContext(options),
     oldBridge: Boolean(config?.honcho?.mcpBridgeUrl || config?.honcho?.mcpBridgeToken),
     // Other servers that also receive the conversations from chosen folders. Read
     // from files on this computer only (config, spool, state): no request is made.
     targets: await targetsContext(config),
   };
+}
+
+/**
+ * The team this computer made with 새 팀 만들기, if it did: its admin's email, the zone
+ * and the address of the admin's own server, and whether the Cloudflare API token
+ * is saved. Names only, read from team-access.json; the token is never read.
+ */
+async function teamContext(options = {}) {
+  if (options.team !== undefined) return options.team;
+  try {
+    const paths = teamAccessPaths(options.teamPaths || {});
+    const state = await readTeamState(paths);
+    if (!state?.ownerEmail || !state?.peoplePolicyId) return { admin: false };
+    const hasApiToken = await fsp.stat(paths.apiTokenFile).then(() => true, () => false);
+    return { admin: true, ownerEmail: state.ownerEmail, zone: state.zone || "", host: state.owner?.host || "", hasApiToken };
+  } catch {
+    return { admin: false };
+  }
 }
 
 async function teamMemoryContext(options = {}) {
@@ -127,8 +149,24 @@ export async function collectFlow(config) {
 
 /** The dashboard's flow: the own server's side (collectFlow) and each other server's. */
 export async function appFlow(config) {
-  if (!config) return { collect: null, targets: [] };
-  return { collect: await collectFlow(config), targets: await targetsContext(config) };
+  if (!config) return { collect: null, targets: [], backfill: null };
+  return { collect: await collectFlow(config), targets: await targetsContext(config), backfill: await backfillFlow(config) };
+}
+
+/**
+ * Past conversations on their way to the own server (`backfill`, cli.mjs): how far a
+ * running one has got, or how the last one ended. Read from its status file only.
+ */
+async function backfillFlow(config) {
+  const status = await readJson(path.join(installPaths(config).dataDir, "state", "backfill-status.json"), null);
+  if (!status || typeof status !== "object") return null;
+  const pid = Number(status.running?.pid);
+  let alive = false;
+  if (Number.isInteger(pid) && pid > 0) {
+    try { process.kill(pid, 0); alive = true; } catch (error) { alive = error?.code === "EPERM"; }
+  }
+  const pick = (run) => (run ? { considered: run.considered ?? 0, examined: run.examined ?? 0, remaining: run.remaining ?? 0, sent: run.sent_sessions ?? 0, failed: run.failed ?? 0, at: run.finishedAt || run.startedAt || null } : null);
+  return { running: alive ? pick(status.running) : null, lastRun: pick(status.lastRun) };
 }
 
 async function targetsContext(config) {
