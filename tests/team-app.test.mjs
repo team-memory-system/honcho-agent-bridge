@@ -1,0 +1,118 @@
+// The app's team routes, through its own HTTP server: the Google login comes back
+// to /oauth/callback and finishes only a login this app started; the team routes
+// answer a JSON POST (the status alone also a GET) and never a token; the hub's own
+// refusals come back with their code.
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test, { after, before } from "node:test";
+
+import { fakeTeam } from "./fake-team.mjs";
+
+const HUB = "team.example.com";
+let server;
+let port;
+let tmp;
+let fake;
+let realFetch;
+const hubSeen = [];
+
+async function send(pathname, { method = "GET", body, headers = {} } = {}) {
+  const response = await realFetch(`http://127.0.0.1:${port}${pathname}`, {
+    method,
+    headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await response.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  return { status: response.status, text, json };
+}
+
+before(async () => {
+  tmp = await fs.mkdtemp(path.join(os.tmpdir(), "team-app-"));
+  process.env.HONCHO_AGENT_BRIDGE_HOME = path.join(tmp, "home");
+  process.env.HONCHO_AGENT_TEAM_AUTH = path.join(tmp, "home", "data", "state", "team-auth.json");
+  fake = fakeTeam({
+    hosts: {
+      [HUB]: {
+        app: "hub",
+        handle: async (request, { email, url }) => {
+          hubSeen.push({ method: request.method, path: url.pathname, email });
+          if (url.pathname === "/api/me" && request.method === "GET") {
+            return Response.json({ email, member: email === "me@example.com", admin: true, peer: null, team: { name: "예시 팀", host: HUB }, servers: [] });
+          }
+          if (url.pathname === "/api/me" && request.method === "POST") return Response.json({ peer: "me" });
+          if (url.pathname === "/api/requests" && request.method === "POST") {
+            return Response.json({ error: "own_server", detail: "That is your own server" }, { status: 400 });
+          }
+          return Response.json({ error: "not_found" }, { status: 404 });
+        },
+      },
+    },
+  });
+  // The routes run in this process, so their requests to the team go to the stand-in.
+  realFetch = globalThis.fetch;
+  globalThis.fetch = (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input.url ?? String(input));
+    return url.protocol === "https:" ? fake.fetch(input, init) : realFetch(input, init);
+  };
+  const { createUiServer } = await import("../scripts/ui.mjs");
+  server = createUiServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  port = server.address().port;
+});
+
+after(async () => {
+  globalThis.fetch = realFetch;
+  server?.closeAllConnections?.();
+  await new Promise((resolve) => server?.close(resolve) ?? resolve());
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("a callback for a login this app never started does nothing", async () => {
+  const answer = await send("/oauth/callback?state=made-up&code=stolen");
+  assert.equal(answer.status, 400);
+  assert.match(answer.text, /로그인하지 못했습니다/);
+  assert.equal(await fs.stat(process.env.HONCHO_AGENT_TEAM_AUTH).then(() => true, () => false), false, "nothing was saved");
+});
+
+test("the hub login: started by a POST, finished by the browser coming back, then who this is", async () => {
+  const started = await send("/api/team/login", { method: "POST", body: { kind: "hub", hub: HUB } });
+  assert.equal(started.json.ok, true);
+  const authorize = new URL(started.json.url);
+  assert.equal(authorize.searchParams.get("redirect_uri"), `http://127.0.0.1:${port}/oauth/callback`);
+  const back = new URL(fake.browserLogin(started.json.url));
+  const done = await send(`${back.pathname}${back.search}`);
+  assert.equal(done.status, 200);
+  assert.match(done.text, /로그인됐습니다/);
+
+  const status = await send("/api/team/status");
+  assert.equal(status.json.hubLogin.signedIn, true);
+  for (const secret of ["oauth:", "refresh-", "accessToken", "refreshToken"]) assert.equal(status.text.includes(secret), false, `${secret} must not reach the page`);
+
+  const me = await send("/api/team/me", { method: "POST", body: { hub: HUB } });
+  assert.equal(me.json.ok, true);
+  assert.equal(me.json.member, true);
+  assert.equal(me.json.peer, "me");
+  const again = await send("/api/team/status");
+  assert.equal(again.json.email, "me@example.com");
+  assert.equal(again.json.peer, "me");
+  assert.equal(again.json.team, "예시 팀");
+});
+
+test("a team route answers a JSON POST only, the status alone a GET too", async () => {
+  assert.equal((await send("/api/team/requests")).status, 405);
+  assert.equal((await send("/api/team/decide")).status, 405);
+  assert.equal((await send("/api/team/status")).status, 200);
+  // A form post from another page is refused before any route runs.
+  assert.equal((await send("/api/team/request", { method: "POST", body: {}, headers: { "content-type": "text/plain" } })).status, 415);
+});
+
+test("the hub's own refusal comes back with its code", async () => {
+  const refused = await send("/api/team/request", { method: "POST", body: { kind: "chat", server: "memory.example.com" } });
+  assert.equal(refused.json.ok, false);
+  assert.equal(refused.json.code, "own_server");
+  assert.equal(refused.json.status, 400);
+});

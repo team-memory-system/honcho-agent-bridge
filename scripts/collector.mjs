@@ -16,6 +16,7 @@ import {
   honchoHeaders,
   isCloudflareAccessBlock,
 } from "./honcho-access.mjs";
+import { projectFolder, projectScope } from "./projects.mjs";
 import { collectFoldersFromEnvironment, folderMatches, foldersFromEnvironment, outsideCollectFolders } from "./targets.mjs";
 
 const ROOT_URL = (process.env.HONCHO_BASE_URL || "http://127.0.0.1:8001").replace(/\/+$/, "");
@@ -168,6 +169,7 @@ async function logLine(provider, message) {
 async function jsonRequest(method, apiPath, payload) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_SECONDS * 1000);
+  // A team server gets this computer's team login instead (fetchHoncho).
   const headers = honchoHeaders({ token: AUTH_TOKEN, access: CF_ACCESS }, { "Content-Type": "application/json" });
   try {
     const response = await fetchHoncho(`${ROOT_URL}${apiPath}`, {
@@ -349,6 +351,25 @@ function buildCodexMessages(sessionId, parsed, sessionState) {
   return [messages, pendingHashes, peers];
 }
 
+const projectMemo = new Map();
+
+/**
+ * The project a session ran in (projects.mjs): its scope id and name, so the server
+ * can put the session into that project's scope once the project is opened to a
+ * teammate. Nothing for a session with no folder.
+ */
+async function projectMetadata(cwd) {
+  if (!projectMemo.has(cwd)) {
+    projectMemo.set(cwd, (async () => {
+      const folder = await projectFolder(cwd).catch(() => null);
+      if (!folder) return {};
+      const scope = await projectScope(folder).catch(() => null);
+      return scope ? { project_id: scope.id, project_name: scope.name } : {};
+    })());
+  }
+  return projectMemo.get(cwd);
+}
+
 async function ensureSession(workspace, provider, sessionId, parsed, peers) {
   const peerConfig = {};
   for (const peer of peers) {
@@ -358,6 +379,7 @@ async function ensureSession(workspace, provider, sessionId, parsed, peers) {
   }
   const metadata = {
     ...parsed.metadata,
+    ...(await projectMetadata(parsed.metadata?.cwd)),
     source: provider,
     agent_provider: provider,
     memory_importer: provider === "codex" ? "codex_turn_ended" : "agent_turn_ended",

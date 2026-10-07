@@ -185,14 +185,14 @@ test("the context counts the teammates' memory Claude Code and Codex reach, and 
   const teamOptions = { homeDir: home, env: {} };
   const config = { version: 1, user: { peerId: "user_t" }, honcho: { baseUrl: "http://127.0.0.1:1", workspaceId: "ws" }, agents: { codex: true } };
   const context = await appContext({ config, ports: { installed: false }, teamOptions });
-  assert.deepEqual(context.teamMemory, { connected: 2, claude: 1, codex: 2 });
+  assert.deepEqual(context.teamMemory, { connected: 2, claude: 1, codex: 2, hosts: ["memory-alice.example.com", "memory-bob.example.com"] });
   assert.equal(context.oldBridge, false);
   assert.equal("sharedBridge" in context, false);
 
   const leftover = await appContext({ config: { version: 1, honcho: { mcpBridgeUrl: "https://bridge.example.com/mcp", mcpBridgeToken: "old-token" }, agents: { codex: false, claude: false } }, ports: { installed: false }, teamOptions: { homeDir: path.join(home, "none"), env: {} } });
   assert.equal(leftover.oldBridge, true);
   assert.equal(leftover.configured, false, "a file only the old bridge wrote does not count as set up");
-  assert.deepEqual(leftover.teamMemory, { connected: 0, claude: 0, codex: 0 });
+  assert.deepEqual(leftover.teamMemory, { connected: 0, claude: 0, codex: 0, hosts: [] });
   assert.equal(JSON.stringify(leftover).includes("old-token"), false);
 });
 
@@ -248,20 +248,43 @@ test("a server token typed into the setup form reaches the CLI but not its comma
   assert.equal(/SETUP_OPTIONS = new Set\([^)]*apiToken/.test(server), false, "the token is not a command-line option");
 });
 
-test("관리자 shows only where the team was made: its admin, zone and host, never the token", async (t) => {
+test("the team as the page sees it: who the hub said this is, what was made here, never a token", async (t) => {
   const runtime = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-team-"));
   t.after(() => fsp.rm(runtime, { recursive: true, force: true }));
   const config = { version: 1, user: { peerId: "me" }, honcho: { baseUrl: "http://127.0.0.1:1" }, agents: { claude: true } };
   const teamPaths = { serverDirectory: path.join(runtime, "server"), runtimeDirectory: runtime };
-  const none = await appContext({ config, ports: { installed: false }, teamPaths, teamOptions: { homeDir: runtime, env: {} } });
-  assert.deepEqual(none.team, { admin: false }, "no team-access.json: not the admin");
+  const authFile = path.join(runtime, "state", "team-auth.json");
+  const teamAuthPaths = { authFile, pendingFile: path.join(runtime, "state", "team-login.json"), lockFile: `${authFile}.lock` };
+  const context = (extra = {}) => appContext({ config, ports: { installed: false }, teamPaths, teamAuthPaths, teamOptions: { homeDir: runtime, env: {} }, ...extra });
 
+  const none = (await context()).team;
+  assert.equal(none.admin, false, "no team here: not an admin");
+  assert.equal(none.hub, null);
+  assert.equal(none.made, null);
+
+  // The computer that made the team: its admin, zone and hub, and whether the token is saved.
   await fsp.writeFile(path.join(runtime, "team-access.json"), JSON.stringify({
-    accountId: "acc", zone: "example.com", ownerEmail: "admin@example.com", peoplePolicyId: "policy", owner: { name: "memory", host: "memory.example.com" },
+    accountId: "acc", zone: "example.com", ownerEmail: "admin@example.com", peoplePolicyId: "policy",
+    teamName: "예시 팀", hub: { host: "team.example.com", appId: "app", aud: "aud", deployedAt: "2026-10-07T00:00:00Z" },
   }));
   await fsp.mkdir(path.join(runtime, "cloudflare"), { recursive: true });
   await fsp.writeFile(path.join(runtime, "cloudflare", "api-token"), "cf-secret-token");
-  const admin = await appContext({ config, ports: { installed: false }, teamPaths, teamOptions: { homeDir: runtime, env: {} } });
-  assert.deepEqual(admin.team, { admin: true, ownerEmail: "admin@example.com", zone: "example.com", host: "memory.example.com", hasApiToken: true });
-  assert.equal(JSON.stringify(admin).includes("cf-secret-token"), false);
+  const made = (await context()).team;
+  assert.equal(made.admin, true);
+  assert.deepEqual(made.made, { name: "예시 팀", hub: "team.example.com", ownerEmail: "admin@example.com", zone: "example.com", host: "", hasApiToken: true, deployedAt: "2026-10-07T00:00:00Z" });
+  assert.equal(made.hub, "team.example.com");
+
+  // Any computer logged in: what the hub said, and that the login is there.
+  await fsp.rm(path.join(runtime, "team-access.json"));
+  await fsp.mkdir(path.dirname(authFile), { recursive: true });
+  await fsp.writeFile(authFile, JSON.stringify({
+    hub: "team.example.com", email: "bob@example.com", me: { peer: "bob", admin: false, team: "예시 팀" },
+    logins: { hub: { accessToken: "oauth:secret-access", refreshToken: "secret-refresh", expiresAt: Date.now() + 600_000, host: "team.example.com" } },
+    devices: { "memory.example.com": { id: "d-0123456789abcdef", secret: "s".repeat(43) } },
+  }));
+  const member = await context();
+  assert.deepEqual([member.team.admin, member.team.email, member.team.peer, member.team.name, member.team.signedIn, member.team.serversSignedIn], [false, "bob@example.com", "bob", "예시 팀", true, false]);
+  for (const secret of ["cf-secret-token", "oauth:secret-access", "secret-refresh", "s".repeat(43)]) {
+    assert.equal(JSON.stringify(member).includes(secret), false, "no token reaches the page");
+  }
 });

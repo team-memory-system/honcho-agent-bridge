@@ -34,7 +34,7 @@ export function workspace() {
 }
 
 export function me() {
-  return app.prefs.me || app.context?.user?.peerId || "";
+  return app.prefs.me || app.context?.user?.peerId || app.context?.team?.peer || "";
 }
 
 export function api() {

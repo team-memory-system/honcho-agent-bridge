@@ -332,6 +332,8 @@ export async function targetSummary(config, target) {
     folders: [...target.folders],
     agents: targetAgents(config, target),
     enabled: target.enabled,
+    // A team's server, reached with the team login and turned on once its owner approves.
+    team: target.team === true,
     hasToken: Boolean(String(target.honcho.apiToken || "").trim()),
     hasAccess: Boolean(targetAccess(target)),
     pending,

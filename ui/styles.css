@@ -1287,6 +1287,8 @@ dialog.modal::backdrop { background: rgb(36 33 28 / 42%); }
 .cardopt p { flex: 1; margin: 0; color: var(--ink-3); font-size: 13px; }
 .cardopt .btn { align-self: stretch; }
 .waitline { display: flex; align-items: center; gap: 10px; margin-top: 14px; color: var(--ink-2); }
+/* The team and the email a login is for, under the login step's heading. */
+.idbox { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: var(--sunk-soft); overflow-wrap: anywhere; }
 
 /* An agent and what to do in it; a switch row; a file to pick. */
 .agent { display: flex; align-items: flex-start; gap: 12px; padding: 14px; border-bottom: 1px solid var(--line-soft); }

@@ -6,7 +6,9 @@
 //             and /v3/* need the gate token and go to the API, for the owner's other
 //             computers. /mcp needs a person's Cloudflare Access login and goes to mcp;
 //             until the Access team domain, AUD tag and team MCP token are all set,
-//             /mcp is not found.
+//             /mcp is not found. In a team (team share) every route needs the
+//             Access login, and /v3 also a device key or a grant in access.json,
+//             which gate-access.mjs keeps in <runtime>/gate (the gate's /gate-state).
 //   - mcp     the Honcho MCP bridge, `chat` only, over HONCHO_TEAM_WORKSPACE as
 //             HONCHO_TEAM_PEER.
 //   - tunnel  cloudflared running this server's remotely managed tunnel with
@@ -15,7 +17,10 @@
 // profile is never turned on while the tunnel token or the team MCP token is empty
 // (either service would restart forever).
 //
-// Three ways to turn it on:
+// Four ways to turn it on:
+//   team share            a member of a team: the hub (team-hub.mjs) made the tunnel
+//                         and the address, behind the team's servers Access app; no
+//                         API token on this computer.
 //   enable --cloudflare   the owner, with a Cloudflare API token: cloudflare-api.mjs
 //                         makes the tunnel, <name>.<zone>, its ingress and the Access
 //                         apps, and team-access.mjs keeps the email list.
@@ -519,6 +524,9 @@ export async function shareStatus(options = {}) {
       hostAutostart: hostTunnel,
     },
     mcp: { ...mcp, running: services.mcp === "running" },
+    // Opened through the team (team share): the hub made the address, the gate lets
+    // in by Google login and device key.
+    team: state?.team === true,
     cloudflare: {
       managed: Boolean(team?.owner?.host && team.owner.host === state?.host),
       joined: state?.joined === true,
@@ -646,7 +654,8 @@ async function shareEnableManual(ctx, { publicUrl }) {
 
 // ------------------------------------------------------ enable --cloudflare
 
-async function chooseZone(client, wanted, saved) {
+/** The zone named, else the one saved, else the only one the token sees. */
+export async function chooseZone(client, wanted, saved) {
   const name = String(wanted || saved || "").trim().toLowerCase().replace(/\.$/, "");
   if (name) return findZone(client, name);
   const zones = await listZones(client);
@@ -655,7 +664,8 @@ async function chooseZone(client, wanted, saved) {
   throw new Error(`--zone <zone> is needed: the API token sees ${zones.length} zones (${zones.map((zone) => zone.name).join(", ")})`);
 }
 
-async function chooseIdp(client, accountId, wanted, saved) {
+/** The Google login named, else the one saved, else the only Google login there is. */
+export async function chooseIdp(client, accountId, wanted, saved) {
   const providers = await listIdentityProviders(client, accountId);
   if (!wanted && saved) {
     const kept = providers.find((item) => item.id === saved && (item.type === "google" || item.type === "google-apps"));
@@ -762,6 +772,83 @@ export async function shareEnable(options = {}) {
     return await withServerLifecycleLock(ctx.paths.serverDir, "share-enable", () => (options.cloudflare
       ? withTeamAccessLock(ctx.paths, "share-enable", () => shareEnableCloudflare(ctx, options))
       : shareEnableManual(ctx, options)));
+  } catch (error) {
+    return errorResult(error);
+  }
+}
+
+// ------------------------------------------------------------ team share
+
+/**
+ * Turns sharing on with the address the team hub made for this computer's server
+ * (team-hub.mjs asks for it): the tunnel token in HONCHO_TUNNEL_TOKEN (never on the
+ * command line), and the hub's Zero Trust team domain and the servers app's AUD
+ * tag. The owners (this person's email) go into the gate's access.json first, so
+ * the gate lets their computers in from its first request, and nobody else until
+ * the owner opens something to them.
+ */
+async function shareEnableTeamUnlocked(ctx, options) {
+  const host = String(options.host || "").trim().toLowerCase();
+  if (!/^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(host)) {
+    return { ok: false, error: "--host takes the server address the team made" };
+  }
+  const teamDomain = String(options.teamDomain || "").trim().toLowerCase();
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(teamDomain)) return { ok: false, error: "--team-domain takes the Zero Trust team domain" };
+  const aud = String(options.aud || "").trim();
+  if (!/^[A-Za-z0-9_-]{16,256}$/.test(aud)) return { ok: false, error: "--aud takes the Access AUD tag of the team's servers" };
+  const owners = (Array.isArray(options.owners) ? options.owners : String(options.owners || "").split(","))
+    .map(normalizeEmail).filter(Boolean);
+  if (!owners.length) return { ok: false, error: "--owners takes the email this server belongs to" };
+  const tunnelToken = String(ctx.env[TUNNEL_TOKEN_ENV] || "").trim();
+  if (!TUNNEL_TOKEN_PATTERN.test(tunnelToken)) return { ok: false, error: `The tunnel token is needed in ${TUNNEL_TOKEN_ENV}` };
+  const server = await installedPersonalServer(ctx);
+  if (!server.installed) return { ok: false, error: server.issues[0], issues: server.issues };
+  const compose = await fsp.readFile(ctx.paths.composeFile, "utf8").catch(() => "");
+  if (!compose.includes("/gate-state")) {
+    return { ok: false, error: "The installed server predates team sharing; run server prepare --profile personal again to update its gate" };
+  }
+  // The team says who this is, so first setup can open the server before it writes
+  // the collector's own configuration.
+  const identity = options.peer
+    ? { ok: PEER_PATTERN.test(String(options.peer)) && PEER_PATTERN.test(String(options.workspace || "memory")), peer: String(options.peer), workspace: String(options.workspace || "memory") }
+    : await teamIdentity(ctx);
+  if (!identity.ok) return identity.error ? identity : { ok: false, error: "The peer or workspace has characters the server's .env cannot hold" };
+
+  const { gateStatePaths, setGateOwners } = await import("./gate-access.mjs");
+  await setGateOwners(gateStatePaths({ serverDirectory: ctx.paths.serverDir, runtimeDirectory: ctx.paths.runtimeDir }), { owners, workspace: identity.workspace });
+  const hostTunnel = await removeHostTunnel(ctx);
+  const opened = await openShare(ctx, {
+    [TUNNEL_TOKEN_ENV]: tunnelToken,
+    HONCHO_ACCESS_TEAM_DOMAIN: teamDomain,
+    HONCHO_ACCESS_AUD: aud,
+    HONCHO_TEAM_WORKSPACE: identity.workspace,
+    HONCHO_TEAM_PEER: identity.peer,
+  });
+  if (!opened.ok) return opened.failure;
+  const publicUrl = `https://${host}`;
+  const state = {
+    publicUrl,
+    enabledAt: new Date().toISOString(),
+    host,
+    teamDomain,
+    aud,
+    ...(tunnelIdFromToken(tunnelToken) ? { tunnelId: tunnelIdFromToken(tunnelToken) } : {}),
+    team: true,
+    tunnel: true,
+  };
+  await writeState(ctx, state);
+  return {
+    ...openedResult(opened, { publicUrl, enabledAt: state.enabledAt, host }),
+    owners,
+    hostTunnelRemoved: hostTunnel.removed,
+    next: `This server answers at ${publicUrl} to the owner's computers after a Google login; open chat or collecting to a teammate when they ask`,
+  };
+}
+
+export async function shareEnableTeam(options = {}) {
+  const ctx = shareContext(options);
+  try {
+    return await withServerLifecycleLock(ctx.paths.serverDir, "share-enable", () => shareEnableTeamUnlocked(ctx, options));
   } catch (error) {
     return errorResult(error);
   }

@@ -10,7 +10,7 @@ Use the deterministic CLI bundled at `<plugin-root>/scripts/cli.mjs`. Resolve `<
 
 Speak to the user in the language they wrote in: progress notes, questions, warnings and summaries alike (Korean for a Korean request). This file and the CLI's JSON are in English; translate what you pass on and never switch to English mid-setup.
 
-The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `dashboard` (대시보드), `start` (the first setup window), `server` (서버 → 기억 서버), `models` (서버 → 모델), `computer/collect` (기억 설정 with the 대화 수집 window open: the server, agents, project folders and other servers), `computer/import` (the ChatGPT 기록 window), `share` (서버 → 공유), `admin` (관리자: the team list and 팀 주소, on the team's own computer only), `team` (팀: teammates' memories), `backup` (백업). Older names (`computer/targets`, `team/share`, `team/memories`) still open the screen they moved to. Do not send them to the gateway's own page at 11450.
+The Team Memory app is the one screen the user works in. Whenever they have to do something in a browser (log in to a subscription, enter a teammate's connection details, look at the server), open the app with `node <plugin-root>/scripts/cli.mjs ui open --screen <name>` and give its returned `url` as text too. Screens: `dashboard` (대시보드), `start` (the first setup window; `start?team=<팀 주소>` opens it at the team's Google login), `server` (서버 → 기억 서버), `models` (서버 → 모델), `computer/collect` (기억 설정 with the 대화 수집 window open: the server, agents, project folders and other servers), `computer/import` (the ChatGPT 기록 window), `share` (서버 → 공유: the server's address and the computers that write to it), `admin` (관리자: the team's roster and 팀 주소, for the team's admins), `team` (팀: teammates' memories and who may ask mine), `backup` (백업). Older names (`computer/targets`, `team/share`, `team/memories`) still open the screen they moved to. Do not send them to the gateway's own page at 11450.
 
 ## Fixed lines
 
@@ -35,14 +35,14 @@ Say these lines exactly as written whenever their moment comes, in Korean for a 
 | `approve-hook` | Codex를 새로 열면 훅 승인 창이 뜹니다. "Syncing codex conversation to personal memory"만 승인하세요. |
 | `reload-plugins` | 이미 열려 있는 Claude Code 창에서는 `/reload-plugins`를 입력하세요. |
 | `install-plugin` | <Codex 또는 Claude Code> 플러그인: 터미널에서 아래 명령을 차례로 실행하세요. <그 단계의 `commands`를 한 줄에 하나씩> |
-| Chat connection | 팀원에게 받은 팀 주소를 방금 연 앱 화면(<url>)에 붙여 넣고 "Claude Code·Codex에 연결"을 누르세요. 끝나면 "했어"라고 말해 주세요. |
+| Join a team | 방금 연 앱(<url>)의 처음 설정에서 "팀에 들어가기"를 누르고, 관리자에게 받은 팀 주소를 넣은 뒤 브라우저에서 Google 로그인을 마치세요. 끝나면 "했어"라고 말해 주세요. |
+| Chat request | 방금 연 팀 화면(<url>)에서 물을 팀원 줄의 "chat 요청"을 누르세요. 그 팀원이 승인하면 오른쪽 위 종에 알림이 뜹니다. 그 알림에서 "연결"을 누르세요. 끝나면 "했어"라고 말해 주세요. |
 | Chat login | Claude Code에서는 `/mcp`를 입력하고 <team-이름>을 골라 Authenticate를 누르세요. Codex는 앱 화면의 "Codex 로그인"을 누르세요. 브라우저가 열리면 팀에 등록된 Google 계정으로 로그인하세요. 끝나면 "했어"라고 말해 주세요. |
 | Chat connected | 팀원 기억에 연결했습니다. 에이전트는 <team-이름> 서버의 chat 도구로 물을 수 있습니다. |
-| Share with Cloudflare (the team's owner) | 방금 연 앱의 서버 → 공유 화면(<url>)에서 "팀 만들기"를 고르고, Cloudflare API token과 내 Google 이메일을 넣어 주세요. token은 채팅에 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
-| Share with an invite (a teammate) | 방금 연 앱의 서버 → 공유 화면(<url>)에서 "초대 코드로 열기"를 고르고, 팀 관리자에게 받은 초대 코드를 넣어 주세요. 초대 코드는 채팅에 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
-| Before adding a teammate | 더한 사람은 팀에서 공유를 켠 모든 사람의 기억 전체에 chat으로 물을 수 있습니다. |
+| Make a team (the admin) | 방금 연 앱(<url>)의 처음 설정에서 "새 팀 만들기"를 고르고, 팀 이름과 Cloudflare API token, 내 Google 이메일을 넣어 주세요. token은 채팅에 붙여 넣지 마세요. 끝나면 "했어"라고 말해 주세요. |
+| Before adding a teammate | 더한 사람은 팀 주소로 로그인해 팀원 명단과 서버 주소를 봅니다. 기억에 묻거나 회사 서버에 쌓는 것은 각 서버 주인이 승인해야 열립니다. |
 | Stopped on an error | <단계>에서 멈췄습니다. <오류를 사용자의 말로 옮긴 것> |
-| Done | 설치가 끝났습니다. 팀원 기억은 팀 메모리 앱의 팀 메뉴에서, 다른 서버에도 쌓기는 기억 설정 → 대화 수집 → 수정에서, ChatGPT 기록은 기억 설정에서 필요할 때 켜세요. <이 컴퓨터에 서버를 만들었을 때만 덧붙임: 내 다른 컴퓨터와 팀원에게 서버를 열려면 서버 → 공유를 여세요.> 문제가 생기면 `/memory-doctor`를 입력하세요. |
+| Done | 설치가 끝났습니다. 팀원 기억은 팀 메모리 앱의 팀 메뉴에서, 다른 서버에도 쌓기는 기억 설정 → 대화 수집 → 수정에서, ChatGPT 기록은 기억 설정에서 필요할 때 켜세요. 승인할 것과 연결할 것은 오른쪽 위 종에 뜹니다. 문제가 생기면 `/memory-doctor`를 입력하세요. |
 
 Use the detected default data directory without asking; ask about it only when the user brings it up.
 
@@ -51,7 +51,7 @@ Use the detected default data directory without asking; ask about it only when t
 Ask one question before anything else: where this computer's memory server is. Ask it as a single choice, with the host's structured question tool when there is one, using these two labels and descriptions as written, in the user's language (Korean shown). Skip it when the request already says which.
 
 - **이 컴퓨터에 기억 서버 만들기** — Codex나 Claude 구독이 필요합니다. Docker와 Ollama는 앱이 설치합니다. → "Own memory workflow" below: the server (step 1), then the hooks (steps 2–10).
-- **다른 컴퓨터의 기억 서버에 연결하기** — 서버를 둔 컴퓨터의 서버 → 공유에서 주소와 서버 token을 받아 두세요. → "Own server on another computer" below: this computer gets the collector only.
+- **다른 컴퓨터의 기억 서버에 연결하기** — 팀이 있으면 같은 Google 계정으로 로그인하면 됩니다. 팀 없이 쓰면 서버를 둔 컴퓨터의 서버 → 공유에서 주소와 서버 token을 받아 두세요. → "Own server on another computer" below: this computer gets the collector only.
 
 Only the user knows which of their computers should hold the server, so present the two neutrally: no recommendation, no "most people", nothing about their setup taken from the examples in this file or the docs (those are other people's computers), and no computer named. Offer only these two. The question tool already lets the user answer otherwise, and anything added beyond the labels is noise.
 
@@ -71,14 +71,14 @@ Once the user has chosen, check the software that choice needs and get it instal
 
 Use this whenever the user asks to connect a teammate's memory, at first setup or any time after; it needs only the plugin on this computer.
 
-A teammate's shared memory is a remote MCP server at `https://<host>/mcp`. The user needs the team's 팀 주소, one `<name> https://<host>/mcp` line per server, which the team's owner copies from 관리자 (팀 주소 → "복사") and which holds no secret. They also need a Google account whose email the owner has put on the team list.
+A teammate's memory is a remote MCP server at `https://<host>/mcp`. The user needs to be in the team: the 팀 주소 (`team.<domain>`, no secret in it) from the team's admin, and a Google account whose email the admin put on the roster. Nothing opens without the teammate's approval, and the teammate chooses the projects their memory answers from.
 
-1. Run `node <plugin-root>/scripts/cli.mjs ui open --screen team`. It starts the local Team Memory app if it is not already running, opens it on the 팀 screen, where 팀 주소로 더하기 takes the 팀 주소, and returns its `url`. Give the user that address as text as well, in case no browser window appeared.
-2. Say the "Chat connection" line. The screen adds each server to Claude Code and Codex as `team-<name>`. If the user pastes the 팀 주소 into chat instead, that is fine: run `node <plugin-root>/scripts/cli.mjs teammates connect <name> <address>` for each line. A client reported as `missing` is not installed here; say so, and the other one is still connected.
-3. Say the "Chat login" line. Claude Code logs in from `/mcp` (choose `team-<name>`, then Authenticate); a Claude Code session that was open before the connection may need a restart before `team-<name>` shows there. Codex logs in with the screen's "Codex 로그인", or with `codex mcp login team-<name>` in the user's own terminal. The browser goes to Google through Cloudflare Access. An email that is not on the team list is refused there, and only the team's owner can add it.
+1. When this computer has not joined the team yet, run `node <plugin-root>/scripts/cli.mjs ui open --screen start` and say the "Join a team" line. The window logs in with Google; an email not on the roster gets a screen saying so, and only the admin can add it. Its 팀원 step sends chat requests to the members ticked there.
+2. Otherwise run `node <plugin-root>/scripts/cli.mjs ui open --screen team` and say the "Chat request" line. Give the returned `url` as text as well, in case no browser window appeared.
+3. Once the teammate approves, the bell's "연결" adds the server to Claude Code and Codex as `team-<name>`. Then say the "Chat login" line. Claude Code logs in from `/mcp` (choose `team-<name>`, then Authenticate); a Claude Code session that was open before the connection may need a restart before `team-<name>` shows there. Codex logs in with the screen's "Codex 로그인", or with `codex mcp login team-<name>` in the user's own terminal.
 4. When the user says it is done, run `node <plugin-root>/scripts/cli.mjs teammates connected` and report, per server, whether Claude Code and Codex have it. Then say the "Chat connected" line.
 
-Each client keeps its own login. `teammates disconnect <name>` takes a server out of both clients. On a computer that also syncs its own conversations, the agent keeps its own recall tools for the user's own memory, and the teammate's memory is the separate `team-<name>` server's `chat`. `bridge disconnect` only removes the shared-bridge settings that 0.3.28 and before saved.
+The other way round, a teammate's request for this user's memory arrives at the bell: its 승인 asks which of this computer's projects to open, and 팀 → 내 기억을 여는 팀원 → 수정 changes or closes it later. Each client keeps its own login. `teammates disconnect <name>` takes a server out of both clients. On a computer that also syncs its own conversations, the agent keeps its own recall tools for the user's own memory, and the teammate's memory is the separate `team-<name>` server's `chat`. `bridge disconnect` only removes the shared-bridge settings that 0.3.28 and before saved.
 
 ## Own memory workflow
 
@@ -127,7 +127,11 @@ node <plugin-root>/scripts/cli.mjs setup plan \
 
 ## Own server on another computer
 
-For a user whose own Honcho already runs on another of their computers, this computer gets only the collector. The user sets it up in the app's 대화 수집 window, so the server token goes from them straight into the app and never through chat:
+For a user whose own Honcho already runs on another of their computers, this computer gets only the collector.
+
+**In a team** (the server was made through the team): run `node <plugin-root>/scripts/cli.mjs ui open --screen start` and say the "Join a team" line. After the Google login with the same account, the server step shows the user's server as 찾음; the window registers this computer with that server and sets up the collector there. Nothing is typed but the 팀 주소. The computers that write to a server are listed, and can be cut off one by one, on that server's 서버 → 공유.
+
+**Without a team**, the user sets it up in the app's 대화 수집 window, so the server token goes from them straight into the app and never through chat:
 
 1. Install the plugin as usual. Skip `server ...` entirely.
 2. Run `node <plugin-root>/scripts/cli.mjs ui open --screen computer/collect` and say the "Server elsewhere" line. The window takes the address and the server token, then the agents and the project folders, checks the server, and runs the same `setup apply`. Its result lists what to do in Codex and Claude Code, so do not repeat the `approve-hook` and `reload-plugins` lines.
@@ -136,16 +140,19 @@ For a user whose own Honcho already runs on another of their computers, this com
    - It says Cloudflare Access blocked this computer: an Access application covers that server's API. Sharing the server from 서버 → 공유 ("팀 만들기" or "초대 코드로 열기") lets `/v3` through to the gate token. For Access made by hand, the user puts that server's Access service token into the screen's "Cloudflare Access 서비스 토큰".
 4. Only when the user asks for the terminal: they set `HONCHO_API_TOKEN` (and for Access made by hand `HONCHO_CF_ACCESS_CLIENT_ID` and `HONCHO_CF_ACCESS_CLIENT_SECRET`) in their own terminal and run `node <plugin-root>/scripts/cli.mjs setup apply --agents <…> --user-peer <id> --honcho-url <address>` there. These values are secrets, so they stay out of chat and off any command line you run.
 
-To make that possible for a personal server on the other computer, share it there first (서버 → 공유). Sharing needs a domain on the team owner's Cloudflare account. Ask one question: does the user run the team's Cloudflare account, or did the owner give them an invite code?
+## A team
 
-**The team's owner (the Cloudflare account and domain):**
+A team needs one admin with a domain on their Cloudflare account. Once, in the Cloudflare dashboard, the admin sets up Zero Trust with Google as a login method and makes an API token with Account → Cloudflare Tunnel → Edit, Account → Access: Apps and Policies → Edit, Account → Access: Organizations, Identity Providers, and Groups → Read, Account → Workers Scripts → Edit, and Zone → DNS → Edit and Zone → Zone → Read on the domain.
 
-1. Once, in the Cloudflare dashboard, the user sets up Zero Trust with Google as a login method and makes an API token with Account → Cloudflare Tunnel → Edit, Account → Access: Apps and Policies → Edit, Account → Access: Organizations, Identity Providers, and Groups → Read, and Zone → DNS → Edit and Zone → Zone → Read on the domain.
-2. Run `node <plugin-root>/scripts/cli.mjs ui open --screen share` and say the "Share with Cloudflare" line. The terminal equivalent, in the user's own terminal, is `CLOUDFLARE_API_TOKEN=... node <plugin-root>/scripts/cli.mjs server share enable --cloudflare --email <their Google email>`, with `--zone` when the token sees several zones and `--name` for a first label other than `memory`. The API token can change the team's whole Cloudflare setup, so it stays out of chat and off command lines (the CLI refuses it as an option); the app keeps it for the teammate commands.
-3. Report `publicUrl` and `cloudflare.changes`. `publicUrl` is the address for the other computers.
-4. When the user asks to add someone, say the "Before adding a teammate" line, then add them on 관리자 (`ui open --screen admin`, 팀원 더하기), or run `node <plugin-root>/scripts/cli.mjs teammates add <email>`; an email is not a secret. For a teammate who will share their own memory too, the screen's "이 사람도 자기 기억을 공유" shows an invite code once. In a terminal, `teammates add <email> --share <name> --invite-out <file>` writes it to a file only the user can read. The invite holds a tunnel token, which lets whoever has it serve that teammate's address, so the user passes it to the teammate over a private channel and you leave the file unread. `teammates remove <email>` takes someone off the list, and `teammates unshare <name>` removes a teammate's server. Teammates who only ask get the 팀 주소: "팀 주소 복사", or `addressText` from `teammates list`.
+1. Run `node <plugin-root>/scripts/cli.mjs ui open --screen start` and say the "Make a team (the admin)" line. The window deploys the team's hub at `team.<domain>`, logs the admin in with Google and goes on with the admin's own server, which becomes the team's company server. The terminal equivalent of the first part, in the user's own terminal, is `CLOUDFLARE_API_TOKEN=... node <plugin-root>/scripts/cli.mjs team make --name '<team name>' --email <their Google email>`, with `--zone` when the token sees several zones. The API token can change the team's whole Cloudflare setup, so it stays out of chat and off command lines (the CLI refuses it as an option).
+2. When the user asks to add someone, say the "Before adding a teammate" line, then add them on 관리자 (`ui open --screen admin`, 팀원 더하기); an email is not a secret. The admin sends them the 팀 주소 ("복사" on 관리자). 팀에서 빼기 takes someone off the roster and removes their server's address.
+3. Everyone else joins with the "Join a team" line. A member who makes a server on their computer gets its address from the team; nobody handles a tunnel token or an invite code.
 
-**A teammate with an invite code:** run `ui open --screen share` and say the "Share with an invite" line. The terminal equivalent, in the user's own terminal, is `node <plugin-root>/scripts/cli.mjs server share join --invite-file <file>`, or with the code in `HONCHO_SHARE_INVITE`. The invite is all it needs.
+`team status` says who this computer is signed in as, without any token.
+
+### Sharing without a team
+
+Outside a team, a personal server on the other computer is shared from its 서버 → 공유: "팀 만들기" there is the older way with the owner's API token and one gate token for every other computer, and "초대 코드로 열기" takes an invite an owner made with `teammates add <email> --share <name> --invite-out <file>`. Use these only when the user asks for them; a team is the way for anything new.
 
 **A tunnel the user already made**, only when they ask for it: `HONCHO_TUNNEL_TOKEN=... node <plugin-root>/scripts/cli.mjs server share enable --public-url https://<hostname>` in their own terminal, with the tunnel's public hostname pointing at `http://gate:8010`. The Access setup is then theirs, and `/mcp` stays closed until `HONCHO_ACCESS_TEAM_DOMAIN` and `HONCHO_ACCESS_AUD` are set.
 
@@ -158,9 +165,10 @@ To make that possible for a personal server on the other computer, share it ther
 
 When the user wants the conversations from certain folders to also reach another Honcho (usually the company's), add a target. Their own server still receives every folder it takes.
 
-1. Open the app's 대화 수집 window with `node <plugin-root>/scripts/cli.mjs ui open --screen computer/collect` and give its `url` as text too. The user ticks 다른 서버 더하기 in its 서버 step, types the server's address and token there, which keeps the token out of this chat, and ticks that server's folders in the 프로젝트 step's column for it; 적용 sends those folders' past conversations too. In a terminal instead, the user sets `HONCHO_TARGET_API_TOKEN` (and, when Cloudflare Access covers that server's API, `HONCHO_TARGET_CF_ACCESS_CLIENT_ID`/`_SECRET`) and runs `node <plugin-root>/scripts/cli.mjs target add <id> --url <https://…> --folders <a,b> [--workspace <id>]`. Never ask for these in chat or pass them as options; the CLI refuses them.
-2. `target add` checks the server first. Report its `warnings` (a folder that does not exist yet) and its `note`: past conversations are not sent until the user asks for `target backfill <id> --since YYYY-MM-DD`. Run a backfill only when the user asks.
-3. `target test <id>` and `doctor` (check `target-<id>`) diagnose it; `target set <id> --folders … | --enabled false` changes or pauses it; `target remove <id>` removes it.
+1. In a team, the company server is one tick: open the app's 대화 수집 window (`node <plugin-root>/scripts/cli.mjs ui open --screen computer/collect`), tick 함께 쌓을 서버 → 회사 in its 서버 step and that server's folders in the 프로젝트 step's column. 적용 asks the company server's owner; once they approve, the app starts sending those folders, past conversations included, by itself. A teammate can only add their own conversations there and cannot read anyone's.
+2. For any other server, open the same window and give its `url` as text too. The user ticks 다른 서버 더하기 in its 서버 step, types the server's address and token there, which keeps the token out of this chat, and ticks that server's folders in the 프로젝트 step's column for it; 적용 sends those folders' past conversations too. In a terminal instead, the user sets `HONCHO_TARGET_API_TOKEN` (and, when Cloudflare Access covers that server's API, `HONCHO_TARGET_CF_ACCESS_CLIENT_ID`/`_SECRET`) and runs `node <plugin-root>/scripts/cli.mjs target add <id> --url <https://…> --folders <a,b> [--workspace <id>]`. Never ask for these in chat or pass them as options; the CLI refuses them.
+3. `target add` checks the server first. Report its `warnings` (a folder that does not exist yet) and its `note`: past conversations are not sent until the user asks for `target backfill <id> --since YYYY-MM-DD`. Run a backfill only when the user asks.
+4. `target test <id>` and `doctor` (check `target-<id>`) diagnose it; `target set <id> --folders … | --enabled false` changes or pauses it; `target remove <id>` removes it.
 
 Only Codex and Claude Code sessions whose first working directory is inside a target folder are sent there; ChatGPT imports never are. Recall (the MCP tools) reads the user's own server only.
 
@@ -169,8 +177,8 @@ Only Codex and Claude Code sessions whose first working directory is inside a ta
 - Preserve unrelated hooks and settings. The CLI removes only entries bearing its managed markers and creates timestamped backups before rewriting existing files.
 - Never display API tokens, bearer tokens, or secret environment values.
 - Never put the gateway's router key on a command line or in chat. `server prepare` writes it into the installed private `.env`, and no result prints it. The opt-in live verification reads it there inside the process, sends it only to this machine's router, discards the completion response body, and reports only success/model.
-- The sharing this version supports is asking teammates' memories (`teammates connect`), opening this computer's memory to the user's other computers and the team (서버 → 공유, 관리자), and sending chosen folders to a target the user adds explicitly. Do not add teammates, targets, folders or backfills the user did not ask for, and do not add cross-device synchronization.
-- A Cloudflare API token can change the team's whole Cloudflare setup, and a tunnel token or an invite code lets a computer serve a team address, so these stay between the user and the app: the user types them into the app or sets them in their own terminal, and you neither ask for them nor read or print them.
+- The sharing this version supports is a team (its roster, requests and approvals, each server's own permissions), asking teammates' memories (`teammates connect`), opening this computer's memory to the user's other computers and to teammates the user approves, and sending chosen folders to a target the user adds explicitly. Do not add teammates, approve requests, open projects, add targets, folders or backfills the user did not ask for, and do not add cross-device synchronization.
+- A Cloudflare API token can change the team's whole Cloudflare setup, and a tunnel token or an invite code lets a computer serve a team address, so these stay between the user and the app: the user types them into the app or sets them in their own terminal, and you neither ask for them nor read or print them. The team login and the device keys live in the app's `team-auth.json`; never read or print it.
 - Do not claim Honcho was installed when `server start`, `server status`, or `doctor` reports it unreachable. For `personal`, success also requires the gateway's router answering (`host.gateway.router.ok`), healthy Ollama, and the Qwen alias resident.
 - Use the same profile for the complete lifecycle. `server status --profile personal` covers Docker, the gateway and Ollama; `server stop --profile personal` stops the containers and the Ollama supervisor while preserving configuration and Docker volumes. The gateway keeps running: it has its own lifecycle, and `node <app-directory>/runtime/subscription-gateway/gateway/cli.mjs uninstall` is what removes it.
 - `server stop` preserves Docker volumes. Never run `docker compose down -v` or otherwise delete memory data.

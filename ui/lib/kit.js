@@ -185,8 +185,9 @@ export function todoList(items) {
 /**
  * Folders to tick: `{ path, name, count }` each, `checked` the paths ticked. The box
  * in the header ticks or clears them all; `fresh` paths are marked as newly ticked.
+ * `heading` names the first column.
  */
-export function folderTable(folders, checked, { onChange, fresh = new Set(), freshTag, scroll = false } = {}) {
+export function folderTable(folders, checked, { onChange, fresh = new Set(), freshTag, scroll = false, heading = "폴더" } = {}) {
   const boxes = [];
   const all = h("input", { type: "checkbox", "aria-label": "모두 고르기" });
   const sync = () => {
@@ -216,6 +217,6 @@ export function folderTable(folders, checked, { onChange, fresh = new Set(), fre
   });
   sync();
   return h("div", { class: "pt" },
-    h("div", { class: "pr h" }, all, h("span", {}, "폴더"), h("span", { class: "c" }, "대화")),
+    h("div", { class: "pr h" }, all, h("span", {}, heading), h("span", { class: "c" }, "대화")),
     scroll ? h("div", { class: "pt-scroll" }, rows) : rows);
 }

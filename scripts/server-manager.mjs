@@ -134,7 +134,7 @@ function requireServerProfile(profile) {
   return profile;
 }
 
-function sourceServerDir() {
+export function sourceServerDir() {
   return path.resolve(process.env.HONCHO_AGENT_BRIDGE_SERVER_SOURCE || path.join(PLUGIN_ROOT, "server"));
 }
 

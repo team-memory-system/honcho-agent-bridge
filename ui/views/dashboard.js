@@ -90,10 +90,11 @@ function ownRow(live) {
 function targetRows(live) {
   const targets = live.flow?.targets || app.context?.targets || [];
   return targets.map((target) => row({
-    state: !target.enabled ? "idle" : target.pending ? "warn" : "",
+    state: !target.enabled ? (target.team ? "warn" : "idle") : target.pending ? "warn" : "",
     name: target.label || target.id,
     addr: hostOf(target.url),
-    status: !target.enabled ? "꺼 둠" : target.pending ? "동기화 중" : "최신",
+    // A team's server kept off is one whose owner has not approved yet.
+    status: !target.enabled ? (target.team ? "승인 기다리는 중" : "꺼 둠") : target.pending ? "동기화 중" : "최신",
     pending: `${number(target.pending || 0)}개`,
     last: target.lastSentAt ? ago(target.lastSentAt) : "아직 없음",
     total: "-",

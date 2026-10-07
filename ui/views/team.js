@@ -1,80 +1,26 @@
-// 팀: teammates' memories this computer's agents ask, and who may ask mine. A
-// teammate's memory is a remote MCP server (team-<name>) in Claude Code and Codex;
-// its row's switch puts it in or takes it out (lib/team.js), and each agent logs in
-// to it by itself, which the 연결 window says how. Teammates get `chat` alone, fixed
-// in the server's settings, so there are no tool switches here. Who asked my memory
-// is 조회 기록 (audit.js).
-import { cli, post } from "../lib/api.js";
+// 팀: teammates' memories this computer's agents ask, and who may ask mine.
+//
+// 팀원 기억 lists every member from the team hub. Asking a teammate's memory starts
+// with a chat request, which its owner approves with the projects they open; then
+// 연결 puts it into Claude Code and Codex as a remote MCP server (team-<name>), and
+// its row's switch takes it out and puts it back. 내 기억을 여는 팀원 is the other
+// way: what this computer's server opened to whom (its gate's access.json), with
+// 수정 for the projects and for closing it again, and who collects into it. Who
+// asked my memory is 조회 기록 (audit.js).
+import { post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
-import { confirmWindow, field, list, listItem, modal } from "../lib/kit.js";
-import { clientOutcome, connectTeammate, parseTeamAddresses } from "../lib/team.js";
+import { confirmWindow, list, listItem } from "../lib/kit.js";
+import { chooseProjects, connectApproved, loadRequests, openConnected } from "../lib/requests.js";
+import { clientOutcome, connectTeammate, mateName, sendRequest, teamCall, teamDirectory } from "../lib/team.js";
+import { refreshBell } from "../lib/bell.js";
 import { app, go, loadContext, refreshStatus } from "../lib/state.js";
 import { button, busy, errorNotice, notice, pageHead, spinner, tag, toggle } from "../lib/ui.js";
 
 const CLIENTS = { claude: "Claude Code", codex: "Codex" };
 
-/** After a teammate's memory went in: each agent logs in to it once, and how. */
-function openConnected(mate) {
-  const entry = mate.entry || `team-${mate.name}`;
-  const win = modal({ title: `${mate.name}의 기억 연결`, big: true, small: true });
-  const codexState = tag("로그인 필요", "warn");
-  const codexNote = h("div", { class: "s" }, "Codex 로그인을 누르고, 브라우저가 열리면 팀 Google 계정으로 로그인하세요.");
-  const codexLogin = button("Codex 로그인", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
-    const login = await post("/api/teammates/codex-login", { name: mate.name });
-    if (!login.ok) throw new Error(login.error || "Codex 로그인을 시작하지 못했습니다.");
-    if (login.state === "done") {
-      clear(codexState, "로그인됨");
-      codexState.className = "tag ok";
-      return;
-    }
-    clear(codexNote, "브라우저에서 로그인을 마치세요. 창이 열리지 않았으면 ",
-      login.loginUrl ? h("a", { href: login.loginUrl, target: "_blank", rel: "noreferrer" }, "로그인 주소") : "로그인 주소",
-      "를 여세요. 10분 안에 마치지 않으면 다시 누릅니다.");
-  }) });
-  win.body(
-    h("p", { class: "lead", style: { marginTop: "4px" } },
-      `${mate.name}의 기억을 이 컴퓨터의 Claude Code와 Codex에 도구로 넣었습니다. ${mate.name}의 서버는 팀 Google 계정으로만 열려서, 에이전트마다 한 번 로그인하면 끝납니다.`),
-    h("div", { class: "opts" },
-      h("div", { class: "agent" }, h("span", { class: "src claude" }, "C"),
-        h("div", { class: "ab" }, h("div", { class: "t" }, "Claude Code ", tag("로그인 필요", "warn")),
-          h("div", { class: "s" }, "열린 세션에서 ", h("span", { class: "mono" }, "/mcp"), " 를 열고 ", h("span", { class: "mono" }, entry), " 을 골라 Authenticate를 누르고, 브라우저가 열리면 팀 Google 계정으로 로그인하세요."))),
-      h("div", { class: "agent" }, h("span", { class: "src codex" }, "X"),
-        h("div", { class: "ab" }, h("div", { class: "t" }, "Codex ", codexState), codexNote),
-        codexLogin)));
-  win.foot(null, button("닫기", { onClick: () => win.close() }));
-  win.open();
-}
-
-/** 팀 주소로 더하기: the addresses the admin sent, each put into the agents. */
-function openAdd(onDone) {
-  const win = modal({ title: "팀원 기억 더하기", big: true, small: true });
-  const box = h("textarea", { class: "input mono", rows: "4", spellcheck: "false", placeholder: "alice https://memory-alice.example.com/mcp" });
-  const problem = h("div", {});
-  win.body(field("팀 주소", box, "관리자가 관리자 탭에서 복사해 보낸 팀 주소를 붙여 넣습니다. 주소 하나만 넣어도 됩니다."), problem);
-  win.foot(null, [
-    button("취소", { kind: "quiet", onClick: () => win.close() }),
-    button("연결", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
-      const { found, bad } = parseTeamAddresses(box.value);
-      if (!found.length) { clear(problem, notice("warn", "알아볼 수 있는 주소가 없습니다. https://로 시작하는 주소나 memory-이름.도메인 꼴로 넣으세요.")); return; }
-      const failed = [];
-      const done = [];
-      for (const mate of found) {
-        const result = await connectTeammate(mate).catch((error) => ({ ok: false, error: error.message }));
-        if (result.ok) done.push({ ...mate, entry: result.entry });
-        else failed.push(`${mate.name}: ${result.error || clientOutcome(result).join(" · ")}`);
-      }
-      if (failed.length || bad.length) {
-        clear(problem, notice("bad", h("ul", {}, [...failed, ...bad.map((line) => `알아보지 못한 줄: ${line}`)].map((line) => h("li", {}, line)))));
-        if (!done.length) return;
-      }
-      win.close("ok");
-      await loadContext();
-      refreshStatus();
-      onDone();
-      if (done.length) openConnected(done[0]);
-    }) }),
-  ]);
-  win.open();
+/** The person's name as the team shows it: their peer, else the start of their email. */
+function nameOf(person) {
+  return person.peer || person.email.split("@")[0];
 }
 
 export default {
@@ -87,74 +33,189 @@ export default {
     );
 
     async function draw() {
-      let status;
+      const team = app.context?.team || {};
+      if (!team.hub || !team.signedIn) {
+        clear(body, notice("warn", "팀에 로그인하지 않았습니다. ", button("팀에 들어가기", { kind: "small", onClick: () => go("start") })));
+        return;
+      }
+      let directory;
+      let requests;
+      let connected;
       try {
-        status = await cli("/api/teammates/connected", {});
+        [directory, requests, connected] = await Promise.all([
+          teamDirectory(),
+          loadRequests({ fresh: true }),
+          post("/api/teammates/connected", {}),
+        ]);
       } catch (error) {
         clear(body, errorNotice(error));
         return;
       }
-      const clients = status.clients || {};
+      const servers = new Map((directory.servers || []).map((server) => [server.owner, server]));
+      const outgoing = new Map();
+      for (const request of requests?.outgoing || []) {
+        if (request.kind === "chat" && !outgoing.has(request.server)) outgoing.set(request.server, request);
+      }
+      const registered = new Map((connected.servers || []).map((server) => [server.host, server]));
+      const clients = connected.clients || {};
       const missing = Object.entries(CLIENTS).filter(([key]) => clients[key]?.found === false).map(([, label]) => label);
-      const rows = (status.servers || []).map((server) => {
-        const registered = Object.keys(CLIENTS).filter((key) => server[key]?.registered);
-        const moved = registered.some((key) => server[key].same === false);
-        const on = registered.length > 0;
-        return listItem({
-          title: server.name,
-          tags: moved ? [" ", tag("주소가 바뀜", "warn")] : [],
-          sub: on ? `${registered.map((key) => CLIENTS[key]).join("·")} · ${server.host || server.url || ""}` : server.host || server.url || "",
-          end: [
-            on && server.codex?.registered ? button("로그인 안내", { kind: "small quiet", onClick: () => openConnected(server) }) : null,
-            toggle(on && !moved, async (next) => {
-              if (next) {
-                const result = await connectTeammate({ name: server.name, host: server.host || server.url });
-                if (!result.ok) throw new Error(result.error || clientOutcome(result).join(" · ") || "연결하지 못했습니다.");
+
+      const mateRow = (person) => {
+        const server = servers.get(person.email);
+        if (!server) return listItem({ title: nameOf(person), sub: "서버 없음" });
+        const request = outgoing.get(server.host);
+        const local = registered.get(server.host);
+        const agents = local ? Object.keys(CLIENTS).filter((key) => local[key]?.registered) : [];
+        const projects = request?.projects?.length ? ` · 열린 프로젝트 ${request.projects.length}개` : "";
+        const name = mateName(person);
+        // Connected once: the switch takes it out of the agents and puts it back.
+        if (agents.length || local) {
+          const on = agents.length > 0;
+          return listItem({
+            title: nameOf(person),
+            sub: on ? `${agents.map((key) => CLIENTS[key]).join("·")}${projects}` : `꺼 둠${projects}`,
+            end: [
+              on && local?.codex?.registered ? button("로그인 안내", { kind: "small quiet", onClick: () => openConnected({ name, entry: local.entry }) }) : null,
+              toggle(on, async (next) => {
+                if (next) {
+                  const result = await connectTeammate({ name, host: server.host });
+                  if (!result.ok) throw new Error(result.error || clientOutcome(result).join(" · ") || "연결하지 못했습니다.");
+                  await loadContext();
+                  refreshStatus();
+                  openConnected({ name, entry: result.entry });
+                  draw();
+                  return;
+                }
+                const ok = await confirmWindow({
+                  title: `${nameOf(person)}의 기억을 끌까요?`,
+                  text: `Claude Code와 Codex에서 team-${name} 을 뺍니다. 다시 켜면 에이전트마다 한 번 더 로그인합니다.`,
+                  confirm: "끄기",
+                  danger: true,
+                });
+                if (!ok) return false;
+                const result = await post("/api/teammates/disconnect", { name });
                 await loadContext();
                 refreshStatus();
-                openConnected({ ...server, entry: result.entry });
-                return;
-              }
-              const ok = await confirmWindow({
-                title: `${server.name}의 기억을 끌까요?`,
-                text: `Claude Code와 Codex에서 ${server.entry || `team-${server.name}`} 를 뺍니다. 다시 켜면 에이전트마다 한 번 더 로그인합니다.`,
-                confirm: "끄기",
-                danger: true,
-              });
-              if (!ok) return false;
-              const result = await post("/api/teammates/disconnect", { name: server.name });
-              await loadContext();
-              refreshStatus();
-              if (!result.ok) throw new Error(clientOutcome(result).join(" · ") || "다 끄지 못했습니다.");
-            }, { label: `${server.name} 기억 켜기` }),
-          ],
+                if (!result.ok) throw new Error(clientOutcome(result).join(" · ") || "다 끄지 못했습니다.");
+              }, { label: `${nameOf(person)} 기억 켜기` }),
+            ],
+          });
+        }
+        if (request?.status === "pending") {
+          return listItem({
+            title: nameOf(person),
+            tags: [" ", tag("승인 기다리는 중", "warn")],
+            sub: server.host,
+            end: button("요청 취소", { kind: "small quiet", onClick: (event) => busy(event.currentTarget, async () => {
+              await teamCall("/api/team/cancel", { id: request.id });
+              refreshBell();
+              await draw();
+            }) }),
+          });
+        }
+        if (request?.status === "approved") {
+          return listItem({
+            title: nameOf(person),
+            tags: [" ", tag("승인됨", "ok")],
+            sub: `열린 프로젝트 ${(request.projects || []).length}개`,
+            end: button("연결", { kind: "primary small", onClick: (event) => busy(event.currentTarget, async () => {
+              await connectApproved({ ...request, ownerPeer: person.peer });
+              refreshBell();
+              await draw();
+            }) }),
+          });
+        }
+        return listItem({
+          title: nameOf(person),
+          tags: request?.status === "declined" ? [" ", tag("거절됨")] : [],
+          sub: server.host,
+          end: button("chat 요청", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+            await sendRequest({ kind: "chat", server: server.host });
+            refreshBell();
+            await draw();
+          }, { done: `${nameOf(person)}에게 chat을 요청했습니다` }) }),
         });
-      });
-      const audits = Boolean(app.context?.localServer) || app.auditAnswers;
+      };
+
+      const mates = (directory.people || []).filter((person) => person.email !== team.email).map(mateRow);
+      // What is opened to whom lives beside the server, so the computer that runs it lists it.
+      const myServer = servers.get(team.email);
+      const granted = myServer && myServer.host === team.localHost ? grantRows(requests, directory) : null;
       clear(body,
-        app.context?.oldBridge ? notice("warn", h("b", {}, "예전 방식의 팀원 기억 연결이 남아 있습니다."), " ",
-          button("예전 연결 지우기", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
-            await cli("/api/bridge/disconnect", {});
-            await loadContext();
-            draw();
-          }, { done: "예전 연결을 지웠습니다" }) })) : null,
         missing.length ? notice("warn", `${missing.join(", ")}가 이 컴퓨터에 없어 그쪽에는 넣지 않습니다.`) : null,
-        list({
-          title: "팀원 기억",
-          actions: [button("팀 주소로 더하기", { kind: "small", onClick: () => openAdd(draw) })],
-          empty: "아직 연결한 팀원 기억이 없습니다. 관리자에게 받은 팀 주소로 더하세요.",
-        }, rows),
-        audits ? list({
+        list({ title: "팀원 기억", empty: "아직 다른 팀원이 없습니다." }, mates),
+        granted ? list({
           title: "내 기억을 여는 팀원",
           actions: [button("조회 기록", { kind: "small", onClick: () => go("audit") })],
-          empty: "",
-        }, [listItem({
-          title: "팀 명단에 있는 사람",
-          sub: app.context?.team?.admin
-            ? "관리자 탭의 팀원 명단에 있는 사람은 모두 내 기억에 chat으로 물을 수 있습니다."
-            : "팀 관리자가 명단에 넣은 사람은 모두 내 기억에 chat으로 물을 수 있습니다.",
-          end: app.context?.team?.admin ? button("관리자 탭", { kind: "small quiet", onClick: () => go("admin") }) : null,
-        })]) : null);
+          empty: "아직 없습니다.",
+        }, granted) : null);
+    }
+
+    /** What this computer's server opened to whom: chat with its projects, or collecting into it. */
+    function grantRows(requests, directory) {
+      const people = new Map((directory.people || []).map((person) => [person.email, person]));
+      const approved = new Map();
+      for (const request of requests?.granted || []) approved.set(`${request.kind}:${request.from}`, request);
+      return (requests?.grants || []).flatMap((grant) => {
+        const person = people.get(grant.email) || { email: grant.email, peer: grant.peer };
+        const rows = [];
+        if (grant.chat) {
+          const request = approved.get(`chat:${grant.email}`);
+          rows.push(listItem({
+            title: nameOf(person),
+            tags: [" ", tag("chat")],
+            sub: grant.chat.projects.length ? `열린 프로젝트: ${grant.chat.projects.map((project) => project.name).join(" · ")}` : "열린 프로젝트 없음",
+            end: button("수정", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+              await editGrant(person, grant, request);
+            }) }),
+          }));
+        }
+        if (grant.collect) {
+          const request = approved.get(`collect:${grant.email}`);
+          rows.push(listItem({
+            title: nameOf(person),
+            tags: [" ", tag("대화 쌓기")],
+            sub: "이 서버에 대화를 쌓습니다",
+            end: button("멈추기", { kind: "small danger", onClick: async (event) => {
+              const ok = await confirmWindow({ title: `${nameOf(person)}의 대화 쌓기를 멈출까요?`, text: `${grant.email} 의 컴퓨터는 이 서버에 더 이상 쌓지 못합니다. 이미 쌓인 대화는 그대로 둡니다.`, confirm: "멈추기", danger: true });
+              if (!ok) return;
+              await busy(event.currentTarget, async () => {
+                await teamCall("/api/team/stop-collect", { email: grant.email, request: request?.id || "" });
+                await draw();
+              });
+            } }),
+          }));
+        }
+        return rows;
+      });
+    }
+
+    /** 수정: the projects open to a teammate, or 끊기 to close chat to them. */
+    async function editGrant(person, grant, request) {
+      let closed = false;
+      const name = nameOf(person);
+      const close = button(`${name} 끊기`, { kind: "danger", onClick: async (event) => {
+        const target = event.currentTarget;
+        const ok = await confirmWindow({ title: `${name}을 끊을까요?`, text: `${name}은 내 기억에 더 이상 chat으로 묻지 못합니다.`, confirm: "끊기", danger: true });
+        if (!ok) return;
+        await busy(target, async () => {
+          await teamCall("/api/team/grant", { email: grant.email, request: request?.id || "", close: true });
+          closed = true;
+          target.closest("dialog")?.close();
+        }, { done: `${name}을 끊었습니다` });
+      } });
+      const projects = await chooseProjects({
+        title: `${name}에게 연 프로젝트`,
+        lead: `${name}가 chat으로 물을 때 답에 쓸 프로젝트입니다.`,
+        chosen: grant.chat.projects,
+        confirm: "적용",
+        extra: close,
+      });
+      if (projects && !closed) {
+        await teamCall("/api/team/grant", { email: grant.email, peer: grant.peer, projects, request: request?.id || "" });
+        post("/api/team/scopes", {}).catch(() => {});
+      }
+      await draw();
     }
 
     clear(body, spinner());

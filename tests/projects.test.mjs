@@ -8,7 +8,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { conversationProjects, datedParent, systemTempFolders, transcriptFiles } from "../scripts/projects.mjs";
+import {
+  conversationProjects,
+  datedParent,
+  gitRemote,
+  normalizeRemote,
+  projectFolder,
+  projectScope,
+  systemTempFolders,
+  transcriptFiles,
+} from "../scripts/projects.mjs";
 
 async function tempDir(t) {
   const directory = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-bridge-projects-")));
@@ -69,7 +78,8 @@ test("sessions are grouped by the repository their folder sits in, newest first"
   assert.equal(result.ok, true);
   assert.equal(result.scanned, 7);
   assert.equal(result.withoutFolder, 0);
-  assert.deepEqual(result.projects, [
+  assert.ok(result.projects.every((project) => /^p-[0-9a-f]{12}$/.test(project.scope)));
+  assert.deepEqual(result.projects.map(({ scope, ...project }) => project), [
     { path: worktree, name: "worktree", sessions: 1, lastAt: "2026-10-04T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: true, git: true, folded: false, folders: 1, temp: false },
     { path: repo, name: "repo", sessions: 3, lastAt: "2026-10-03T10:00:00.000Z", agents: { claude: 1, codex: 2 }, exists: true, git: true, folded: false, folders: 2, temp: false },
     { path: home, name: "~", sessions: 1, lastAt: "2026-09-03T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: true, git: false, folded: false, folders: 1, temp: false },
@@ -105,7 +115,7 @@ test("one-off folders outside a repository count under the folder that holds the
 
   const temp = [[path.join(home, "tmp-link"), scratch], [scratch, scratch]];
   const result = await conversationProjects({ home, temp });
-  assert.deepEqual(result.projects, [
+  assert.deepEqual(result.projects.map(({ scope, ...project }) => project), [
     { path: codexApp, name: "Codex", sessions: 4, lastAt: "2026-10-02T10:00:00.000Z", agents: { claude: 1, codex: 3 }, exists: true, git: false, folded: true, folders: 4, temp: false },
     { path: repo, name: "repo", sessions: 1, lastAt: "2026-09-29T10:00:00.000Z", agents: { claude: 0, codex: 1 }, exists: true, git: true, folded: false, folders: 1, temp: false },
     { path: scratch, name: "scratch", sessions: 2, lastAt: "2026-09-27T10:00:00.000Z", agents: { claude: 2, codex: 0 }, exists: true, git: false, folded: true, folders: 2, temp: true },
@@ -196,4 +206,40 @@ test("a second look reads again only the transcripts that changed", async (t) =>
 
   const after = await conversationProjects({ home });
   assert.deepEqual(after.projects.map((project) => project.path), [longer, first]);
+});
+
+test("a project's scope follows its repository's origin, so every clone of it has the same one", async (t) => {
+  const home = await tempDir(t);
+  const first = path.join(home, "dev", "honcho");
+  const second = path.join(home, "work", "honcho-copy");
+  const worktree = path.join(home, "dev", "honcho-wt");
+  const plain = path.join(home, "dev", "notes");
+  for (const folder of [path.join(first, ".git"), path.join(second, ".git"), worktree, plain]) await fsp.mkdir(folder, { recursive: true });
+  await fsp.writeFile(path.join(first, ".git", "config"), '[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://github.com/someone/else.git\n[remote "origin"]\n\turl = git@github.com:Team/Honcho.git\n');
+  await fsp.writeFile(path.join(second, ".git", "config"), '[remote "origin"]\n\turl = https://user@github.com/team/honcho/\n');
+  // A worktree's .git is a file naming its gitdir, whose commondir holds the config.
+  await fsp.mkdir(path.join(first, ".git", "worktrees", "wt"), { recursive: true });
+  await fsp.writeFile(path.join(first, ".git", "worktrees", "wt", "commondir"), "../..\n");
+  await fsp.writeFile(path.join(worktree, ".git"), `gitdir: ${path.join(first, ".git", "worktrees", "wt")}\n`);
+
+  assert.equal(normalizeRemote("git@github.com:Team/Honcho.git"), "github.com/team/honcho");
+  assert.equal(normalizeRemote("ssh://git@github.com:22/team/honcho.git"), "github.com/team/honcho");
+  assert.equal(normalizeRemote("file:///srv/repo"), null);
+  assert.equal(await gitRemote(first), "github.com/team/honcho");
+  assert.equal(await gitRemote(worktree), "github.com/team/honcho");
+  assert.equal(await gitRemote(plain), null);
+
+  const [a, b, c, d] = await Promise.all([first, second, worktree, plain].map((folder) => projectScope(folder)));
+  assert.match(a.id, /^p-[0-9a-f]{12}$/);
+  assert.equal(a.id, b.id, "two clones of one repository share a scope");
+  assert.equal(a.id, c.id, "so does a worktree of it");
+  assert.equal(a.name, "honcho");
+  assert.equal(b.name, "honcho-copy");
+  assert.notEqual(d.id, a.id);
+  assert.equal((await projectScope(path.join(home, "elsewhere", "notes"))).id, d.id, "a folder with no remote goes by its name");
+
+  // A session's project is its repository's root, as in the list.
+  assert.equal(await projectFolder(path.join(first, ".git"), { home }), first);
+  assert.equal(await projectFolder("/", { home }), null);
+  assert.equal(await projectFolder("relative/path", { home }), null);
 });

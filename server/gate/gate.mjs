@@ -841,7 +841,11 @@ function forward(req, res, target, headers, rewritten = null) {
     answer.on("error", () => res.destroy());
   });
   let refused = false;
-  upstream.on("error", () => { if (!refused) reply(res, 502, { error: "upstream_unavailable" }); });
+  upstream.on("error", (error) => {
+    // The cause by its code only (ECONNREFUSED and the like), never a header or a body.
+    log({ gate: "upstream_error", code: String(error?.code || error?.name || "error") });
+    if (!refused) reply(res, 502, { error: "upstream_unavailable" });
+  });
   // A caller that goes away mid-stream ends the upstream request too.
   res.on("close", () => { if (!res.writableFinished) upstream.destroy(); });
 

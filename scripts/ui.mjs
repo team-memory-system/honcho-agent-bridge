@@ -26,6 +26,8 @@ import { conversationProjects } from "./projects.mjs";
 import { redactSecrets } from "./redact.mjs";
 import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
 import { API_TOKEN_ENV, codexLogin, INVITE_ENV, teamAddress, teammateAdd, teamName } from "./team-access.mjs";
+import { handleLoginCallback, runTeamRoute, TEAM_READ_ROUTES, teamRoute } from "./team-app.mjs";
+import { CALLBACK_PATH, TEAM_AUTH_ENV, teamAuthPaths } from "./team-auth.mjs";
 
 const execFileAsync = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -308,6 +310,15 @@ const TEAM_ROUTES = {
   "/api/teammates/codex-login": async (body) => codexLogin({ name: body?.name }),
   // Removes the shared-bridge settings 0.3.28 and before saved; nothing uses them now.
   "/api/bridge/disconnect": async () => runCli(["bridge", "disconnect"], { timeout: 30_000 }),
+  // The team hub (team-hub.mjs): made once with the admin's API token, which reaches
+  // the CLI through its environment only.
+  "/api/team/make": async (body) => runCli(["team", "make", ...inlineOption("name", body?.name), ...inlineOption("email", body?.email),
+    ...inlineOption("zone", body?.zone), ...inlineOption("hub", body?.hub)], { timeout: 600_000, env: secretEnvironment(body, CLOUDFLARE_SECRET_FIELDS) }),
+  // This computer's server at the address the team makes for it; the tunnel token
+  // goes from the hub to the CLI's own process and nowhere else.
+  "/api/team/share": async (body) => runCli(["team", "share", ...inlineOption("label", body?.label), ...(body?.replace === true ? ["--replace"] : [])], { timeout: 900_000 }),
+  // Fills the scopes of the projects opened to teammates (scope-sync.mjs).
+  "/api/team/scopes": async () => runCli(["team", "scopes"], { timeout: 3_600_000 }),
 };
 
 /**
@@ -354,6 +365,8 @@ export function targetInvocation(action, body = {}) {
       ...inlineOption("workspace", body.workspace),
       ...inlineOption("user-peer", body.userPeer),
       ...inlineOption("agents", agentsValue(body.agents)),
+      // A team's server: kept off until its owner approves (team-app.mjs turns it on).
+      ...(body.team === true ? ["--team"] : []),
     );
   } else if (action === "set") {
     if (body.folders !== undefined) args.push(...inlineOption("folders", foldersValue(body.folders)));
@@ -619,6 +632,9 @@ export function createUiServer() {
       if (req.method !== "GET" && req.method !== "HEAD") return json(res, 405, { error: "Method not allowed" });
       const rejection = rejectUnsafeRequest(req);
       if (rejection) return json(res, rejection.status, { error: rejection.error });
+      // The team login comes back here from the browser; it finishes only a login
+      // this app started (its state is unguessable), so a link cannot forge one.
+      if (url.pathname === CALLBACK_PATH) return handleLoginCallback(url, res);
       return staticFile(req, res);
     }
     const rejection = rejectUnsafeRequest(req);
@@ -688,6 +704,17 @@ export function createUiServer() {
       if (invocation.error) return json(res, 400, { ok: false, error: invocation.error });
       return json(res, 200, await runCli(invocation.args, { timeout: 60_000 }));
     }
+    // The team's routes run in this process (team-app.mjs says why).
+    const teamHandler = teamRoute(url.pathname);
+    if (teamHandler) {
+      if (!TEAM_READ_ROUTES.has(url.pathname) && req.method !== "POST") return json(res, 405, { ok: false, error: "Method not allowed" });
+      let body = {};
+      if (req.method === "POST") {
+        try { body = await readJsonBody(req); }
+        catch (error) { return json(res, 400, { error: String(error?.message || error) }); }
+      }
+      return json(res, 200, await runTeamRoute(teamHandler, body, req));
+    }
     const route = ROUTES[url.pathname];
     const hostRoute = HOST_ROUTES[url.pathname];
     if (!route && !hostRoute) return json(res, 404, { error: "Not found" });
@@ -721,6 +748,8 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
+  // Where the team login lives, for every request to a team server (fetchHoncho).
+  if (!process.env[TEAM_AUTH_ENV]) process.env[TEAM_AUTH_ENV] = teamAuthPaths(await loadConfig().catch(() => null)).authFile;
   createUiServer().listen(port, host, () => {
     process.stdout.write(`Team Memory: http://${host}:${port}\n`);
   });

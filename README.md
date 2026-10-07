@@ -542,7 +542,148 @@ Three things still assume the gateway is on this computer:
 
 `server verify --profile personal` performs a production-shaped, non-destructive diagnostic: combined server status including the gateway's router health, a local Ollama embedding request proven to exceed 2048 evaluated tokens with truncation disabled and exactly 1536 output dimensions, Docker API-container access to both host services (Ollama and the router's `/health`), and Honcho health. It makes no model call by default. Add `--live-completion` only when an actual minimal completion through the router is intended; it uses the installed `.env`'s router address, key, model and effort, reads the key internally, never places it on a command line, sends it nowhere but this machine, returns only success and model, and discards the completion body.
 
+## A team / 팀
+
+A team is a few people who each keep their own memory server and ask each other's
+memory, and who may also send some projects' conversations to one shared server (the
+company's). Since 0.5 nobody copies a token for any of it: people and programs come
+in through Cloudflare Access with Google, and each server decides for itself who may
+do what on it.
+
+- **The team hub.** One Cloudflare Worker per team, at `https://team.<zone>` (the 팀
+  주소 the admin sends people), with one Durable Object holding the team: its name,
+  who is in it (the roster), each person's peer name and server address, and the
+  requests between people with their answers. Its code is `server/hub/hub.mjs`.
+- **Two Access applications.** The hub's, open to any Google login (the hub then
+  says who is on the roster, so a stranger is told which email it saw), and the
+  servers', one application whose destinations are every member's server (at most
+  50) and whose policy is the roster. Both have Managed OAuth with dynamic client
+  registration for loopback redirects and a one-year grant, so one browser login
+  per application lasts, and one servers login reaches every server.
+- **The app's login.** The app registers itself as an OAuth client, the browser logs
+  in once, and the app keeps an opaque access token (15 minutes) and a refresh token
+  in `<data>/state/team-auth.json` (owner-only), refreshing it under a lock so two
+  collectors never spend one refresh token twice. Every request to a team host goes
+  out with it (`fetchHoncho` adds it), and Access turns it into the signed assertion
+  the hub and the gates check. The login comes back to the app at
+  `http://127.0.0.1:<port>/oauth/callback`, which only finishes a login this app
+  started (`scripts/team-auth.mjs`, `scripts/team-app.mjs`).
+- **Device keys.** A computer that writes to a server registers once with its gate
+  (`POST /team-memory/devices`) and keeps the key it gets back, beside its login.
+  The key goes with every request to that server only, in `X-Team-Memory-Device`,
+  so one computer can be cut off without the others. Nobody sees it.
+- **Each server's gate** (`server/gate/gate.mjs`) reads `runtime/gate/access.json`,
+  which the server's owner writes (`scripts/gate-access.mjs`): the owners (every
+  computer of theirs may register and write), the people chat is opened to with the
+  projects opened to each, the people who may collect into it, and the computers cut
+  off. It writes `runtime/gate/devices.json` itself: each registered computer, its
+  email, its name, a hash of its key and when it was last seen.
+- **Projects.** The collector tags each session with its project (`project_id`,
+  `project_name` in the session's metadata): `p-` and 12 hex of a hash of the
+  repository's origin remote, so a repository has the same id on every computer that
+  cloned it, or of the folder's name without one. When the owner opens a project to
+  someone, `team scopes` (`scripts/scope-sync.mjs`) puts its sessions into the
+  Honcho scope of that id, and keeps adding new ones; sessions sent before the tag
+  are found by their folder. A teammate's `chat` then answers from one scope at a
+  time (the MCP bridge sends `scope`), never from the owner's whole memory.
+
+### Making a team (the admin, once) / 새 팀 만들기
+
+In Cloudflare, by hand: a domain (zone) on the account; Zero Trust turned on with
+Google as a login method; and an API token with these permissions:
+
+- Account → Cloudflare Tunnel → Edit
+- Account → Access: Apps and Policies → Edit
+- Account → Access: Organizations, Identity Providers, and Groups → Read
+- Account → Workers Scripts → Edit
+- Zone → DNS → Edit, and Zone → Zone → Read, on that zone
+
+Then, in the app's first setup (새 팀 만들기) or in a terminal:
+
+```sh
+# The API token goes in the environment, never on the command line.
+CLOUDFLARE_API_TOKEN='<api token>' node scripts/cli.mjs team make --name '<team name>' --email <admin's Google email> [--zone <zone>] [--hub team]
+```
+
+`team make` keeps the roster in the reusable Access policy "Team Memory people" (the
+admin's email first), makes the policy "Team Memory everyone" and the hub's Access
+application, and deploys the hub: the Worker script `team-memory-hub` with the
+Durable Object class `TeamHub`, the team's ids as the plain-text binding `TEAM`, and
+the API token as the secret `CF_API_TOKEN`, which the hub uses to make each member's
+server address. Its `workers.dev` address is turned off and it answers at
+`team.<zone>` through a Workers custom domain. What it made goes into
+`runtime/team-access.json`, and the token into `runtime/cloudflare/api-token`. Running
+it again (a new token: 관리자 → token 바꾸기) deploys the hub again and keeps the team,
+which lives in the Durable Object.
+
+### Joining, and a server of one's own / 팀에 들어가기
+
+The app's first setup: 팀에 들어가기 takes the 팀 주소 (or a team link,
+`http://127.0.0.1:4180/#/start?team=<address>`, which the hub's own page offers) and
+logs in with Google. The hub answers who this is: not on the roster (the window says
+which email to send the admin), or a member with a peer name made from the email
+(the one this computer already used is kept), whether they already have a server,
+the company server, and the members who have a server.
+
+- **이 컴퓨터에 새로 만들기**: the server is installed and started as before; then
+  `team share` asks the hub for this person's address (`memory-<peer>.<zone>`, or
+  `<name>.<zone>` for the admin's first, the company server), and the hub makes the
+  tunnel, its ingress to the gate, the CNAME, and the host in the servers application.
+  The tunnel token goes from the hub to the CLI's own process and into the server's
+  `.env`; the owner's email goes into `access.json` as its owner; and the share
+  services start. A person who already has a server and makes one here moves the
+  address here: the old tunnel is deleted.
+- **내 서버 (찾음)**: a server made on another computer. This computer logs in to the
+  servers application, registers with that server's gate, and its collector writes
+  there with its login and device key.
+- **쌓지 않기**: only asking teammates.
+
+```sh
+node scripts/cli.mjs team status          # who this computer is signed in as; no token
+node scripts/cli.mjs team share [--label <name>] [--replace]
+```
+
+### Asking, approving / 요청과 승인
+
+Everything one member opens to another starts with a request, kept by the hub, and
+everything the owner has to answer, or the asker has to press, goes to the bell.
+
+- **chat.** The 팀 page's 팀원 기억 lists the members; chat 요청 goes to the owner.
+  Their 승인 opens a window with this computer's projects: the chosen ones go into
+  `access.json` for that email, their sessions into their scopes, and only then does
+  the hub hear "approved", with the project names. The asker's bell shows 연결,
+  which adds `team-<peer>` to Claude Code and Codex (`teammates connect`); each agent
+  logs in to the servers application itself. The gate passes such a person's `/mcp`
+  to the MCP bridge with `x-honcho-scope-mode: projects` and the opened projects, and
+  the bridge answers `chat` from one project's scope at a time. 내 기억을 여는 팀원
+  lists who has what, with 수정 for the projects and for closing it.
+- **Collecting into the company server.** 함께 쌓을 서버 → 회사 in the server step,
+  with the folders in the project step's 회사 서버 column, sends a collect request and
+  keeps that server off (`target add --team`). Once the owner approves, the asker's
+  app registers with the company server's gate, turns the column on and sends the
+  chosen folders' past conversations, with nothing to press. The gate lets such a
+  person make sessions, add messages and read back their own sessions' messages in
+  the server's workspace and nothing else, only as their own peer (or `assistant_*`,
+  `automation_*`), and every session id they send gets their prefix
+  (`tm-<12 hex of the email's hash>_`), so they never reach anyone else's.
+- **Computers.** 서버 → 공유 lists the computers that write to this server, the
+  owner's own marked 내 컴퓨터, each with 끊기, which cuts that one computer off
+  (`revokedDevices`) from its next request.
+
+### The admin / 관리자
+
+관리자 shows to every admin: the team's name, the 팀 주소 to copy, and the roster.
+팀원 더하기 takes a Google email and nothing else; the hub adds it to the roster and
+to the people policy. 팀에서 빼기 takes it off both, removes that person's server
+address and closes their requests, so they can no longer log in, ask or collect.
+On the computer that made the team, the Cloudflare block holds the zone and
+token 바꾸기.
+
 ## Sending to this server from other computers (Cloudflare) / 다른 컴퓨터에서 이 서버로 보내기
+
+What follows is how a server was shared before teams (0.4), and still is outside a
+team: one gate token for every other computer of the owner's, and invites for
+teammates' servers.
 
 A personal server listens only on `127.0.0.1`. Sharing puts it behind a Cloudflare Tunnel with three Compose services under the `share` profile, all on the server's computer (see `server/README.md`):
 

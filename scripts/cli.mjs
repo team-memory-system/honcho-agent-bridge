@@ -42,12 +42,17 @@ import { hostPlan, hostPrepare, hostStart, hostStatus, hostStop } from "./host-m
 import {
   shareDisable,
   shareEnable,
+  shareEnableTeam,
   shareJoin,
   shareRotate,
   shareStatus,
   shareToken,
   TUNNEL_TOKEN_ENV,
 } from "./share-manager.mjs";
+import { gateDevices, gateGrants, gateStatePaths, readGateAccess } from "./gate-access.mjs";
+import { syncScopes } from "./scope-sync.mjs";
+import { TEAM_AUTH_ENV, teamAuthPaths, teamLoginStatus } from "./team-auth.mjs";
+import { computerName, hubCall, madeTeam, teamMake } from "./team-hub.mjs";
 import {
   API_TOKEN_ENV,
   INVITE_ENV,
@@ -1269,6 +1274,11 @@ async function targetAdd(id, options = {}) {
   }
   if (issues.length) return { ok: false, saved: false, issues, warnings };
 
+  // A team's server (a company server) is reached with this computer's team login,
+  // never a token, and takes nothing until its owner approves; the app turns it on then.
+  const team = options.team === true;
+  if (team && (token || accessId)) return { ok: false, saved: false, issues: ["a team server takes the team login, not a token"], warnings };
+  const teamPeer = team ? (await teamLoginStatus({ paths: teamAuthPaths(base.config) })).peer : null;
   const target = {
     id,
     label: optionString(options.label, id),
@@ -1278,13 +1288,29 @@ async function targetAdd(id, options = {}) {
       ...(token ? { apiToken: token } : {}),
       ...(accessId && accessSecret ? { access: { clientId: accessId, clientSecret: accessSecret } } : {}),
     },
-    ...(optionString(options.userPeer, "") ? { userPeerId: optionString(options.userPeer, "") } : {}),
+    ...(optionString(options.userPeer, "") || teamPeer ? { userPeerId: optionString(options.userPeer, "") || teamPeer } : {}),
     folders: parsedFolders.folders,
     ...(parsedAgents.agents ? { agents: parsedAgents.agents } : {}),
-    enabled: true,
+    ...(team ? { team: true } : {}),
+    enabled: !team,
   };
   if (!Object.values(targetAgents(base.config, target)).some(Boolean)) {
     return { ok: false, saved: false, issues: ["none of this target's agents is collected here; pass --agents claude,codex or enable them in setup"], warnings };
+  }
+  if (team) {
+    const saved = await updateTargets(async (targets) => {
+      if (targets.some((item) => item?.id === id)) return { ok: false, saved: false, issues: [`a target named ${id} already exists`] };
+      targets.push(target);
+      return { ok: true, saved: true };
+    });
+    if (!saved.ok) return { ...saved, warnings };
+    return {
+      ok: true,
+      saved: true,
+      target: await targetSummary(saved.config, findTarget(saved.config, id)),
+      warnings,
+      note: `Kept off until the owner of ${publicUrl(url)} approves; the app turns it on then`,
+    };
   }
   // The server has to answer before anything is saved.
   const probe = await probeTarget(base.config, target);
@@ -1711,9 +1737,10 @@ function openBrowser(url) {
 async function uiOpen(options = {}) {
   const port = Number(process.env.HONCHO_AGENT_BRIDGE_UI_PORT || 4180);
   const url = `http://${UI_HOST}:${port}/`;
-  // `--screen models` opens the app on that screen (its #/models route).
+  // `--screen models` opens the app on that screen (its #/models route), and
+  // `--screen start?team=team.example.com` first setup at that team's login.
   const screen = typeof options.screen === "string" ? options.screen.replace(/^[#/]+/, "") : "";
-  if (screen && !/^[a-z0-9/_-]+$/i.test(screen)) return { ok: false, url, error: `Not a screen name: ${screen}` };
+  if (screen && !/^[a-z0-9/_-]+(?:\?team=[a-z0-9.-]+)?$/i.test(screen)) return { ok: false, url, error: `Not a screen name: ${screen}` };
   const pageUrl = screen ? `${url}#/${screen}` : url;
   const state = await uiState(url);
   if (state === "other") {
@@ -1773,6 +1800,12 @@ function usage() {
       "server share disable",
       "server share token",
       "server share rotate",
+      "team make --name <team name> --email <admin Google email> [--zone <zone>] [--hub <label>] (the Cloudflare API token in CLOUDFLARE_API_TOKEN; it needs Workers Scripts: Edit as well)",
+      "team status",
+      "team share [--label <name>] [--replace] (after logging in to the team in the app)",
+      "team scopes",
+      "team grants",
+      "team devices",
       "teammates list",
       "teammates add <email> [--share <name> --invite-out <file>] (the Cloudflare API token in CLOUDFLARE_API_TOKEN, else the saved one)",
       "teammates remove <email>",
@@ -1893,6 +1926,80 @@ async function teammatesCommand(args) {
 }
 
 /**
+ * `team <action>`: the team this computer belongs to (team-hub.mjs, team-auth.mjs).
+ *   make     on the admin's first computer: the team hub, with the Cloudflare API
+ *            token in CLOUDFLARE_API_TOKEN (never on the command line)
+ *   status   the team made here and who this computer is signed in as; no token
+ *   share    this computer's server at the address the team makes for it; the
+ *            tunnel token goes from the hub to this process and nowhere else
+ *   scopes   fills the scopes of the projects opened to teammates (scope-sync.mjs)
+ *   grants, devices   what this server opened to whom, and the computers writing to it
+ * Logging in needs a browser coming back to the app, so it is the app's (team-app.mjs).
+ */
+async function teamCommand(args) {
+  const action = args[0] && !args[0].startsWith("--") ? args.shift() : "status";
+  const options = parseOptions(args);
+  const refused = secretOnCommandLine(options);
+  if (refused) return refused;
+  const config = await loadConfig();
+  const gate = gateStatePaths({ serverDirectory: config?.paths?.serverDir });
+  if (action === "make") {
+    for (const key of ["name", "email", "zone", "hub", "idp"]) {
+      if (options[key] !== undefined && typeof options[key] !== "string") return { ok: false, error: `--${key} takes a value` };
+    }
+    return teamMake({
+      name: optionString(options.name, ""),
+      email: optionString(options.email, ""),
+      zone: optionString(options.zone, ""),
+      hubLabel: optionString(options.hub, ""),
+      idp: optionString(options.idp, ""),
+    });
+  }
+  if (action === "status") {
+    return { ok: true, made: await madeTeam(), login: await teamLoginStatus({ paths: teamAuthPaths(config) }) };
+  }
+  if (action === "share") {
+    const paths = teamAuthPaths(config);
+    const login = await teamLoginStatus({ paths });
+    if (!login.hub || !login.email) return { ok: false, error: "Log in to the team in the app first" };
+    if (options.label !== undefined && typeof options.label !== "string") return { ok: false, error: "--label takes a short name" };
+    let made;
+    try {
+      made = await hubCall("POST", "/api/servers", {
+        ...(options.label ? { label: options.label } : {}),
+        workspace: config?.honcho?.workspaceId || "memory",
+        device: computerName(),
+        ...(options.replace === true ? { replace: true } : {}),
+      }, { paths });
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error), ...(error?.code ? { code: error.code } : {}), ...(error?.payload?.server ? { server: error.payload.server } : {}) };
+    }
+    const shared = await shareEnableTeam({
+      host: made.server?.host,
+      teamDomain: made.teamDomain,
+      aud: made.aud,
+      owners: [login.email],
+      peer: login.peer || config?.user?.peerId || "",
+      workspace: config?.honcho?.workspaceId || "memory",
+      env: { ...process.env, [TUNNEL_TOKEN_ENV]: made.tunnelToken },
+    });
+    return { ...shared, server: made.server };
+  }
+  if (action === "scopes") {
+    if (!config) return { ok: false, error: "Run setup apply first" };
+    const access = await readGateAccess(gate);
+    const projects = new Map();
+    for (const person of Object.values(access.people)) {
+      for (const project of person.chat?.projects || []) projects.set(project.id, project);
+    }
+    return syncScopes({ config, projects: [...projects.values()] });
+  }
+  if (action === "grants") return { ok: true, grants: await gateGrants(gate) };
+  if (action === "devices") return { ok: true, devices: await gateDevices(gate) };
+  return { ok: false, error: `Unknown team action: ${action}. Expected make, status, share, scopes, grants or devices.` };
+}
+
+/**
  * `prereqs [--features server,sync]`: what this computer needs before setup,
  * for the features chosen on it.
  */
@@ -1912,6 +2019,8 @@ async function main() {
   // `setup apply --help` ran apply in the 2026-09-30 install test. Help never acts.
   if (args.some((item) => item === "--help" || item === "-h")) return usage();
   const command = args.shift() || "help";
+  // Where the team login lives, for every request to a team server (fetchHoncho).
+  if (!process.env[TEAM_AUTH_ENV]) process.env[TEAM_AUTH_ENV] = teamAuthPaths(await loadConfig().catch(() => null)).authFile;
   if (command === "detect") return detect();
   if (command === "prereqs") return prereqs(parseOptions(args));
   if (command === "doctor" || command === "status") return doctor();
@@ -1978,6 +2087,7 @@ async function main() {
     if (subcommand === "status") return ownBackfillStatus();
   }
   if (command === "teammates") return teammatesCommand(args);
+  if (command === "team") return teamCommand(args);
   if (command === "backup") {
     const subcommand = args.shift() || "status";
     const positional = [];

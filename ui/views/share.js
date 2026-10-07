@@ -1,13 +1,16 @@
 // 서버 → 공유: this computer's memory server opened through a Cloudflare Tunnel.
-// The owner's other computers come in through the gate with the server token, and
-// teammates' Claude Code and Codex ask at /mcp after a Google login (Cloudflare
-// Access). With it on, one block says where it is and how it stands; with it off,
-// the ways to turn it on. The team it opens to is 관리자 (admin.js). Only the way
+//
+// In a team the team made its address (team share): everyone comes in with a Google
+// login, the owner's other computers and approved teammates' computers each with
+// their own device key, so 이 서버에 쌓는 컴퓨터 lists them and 끊기 cuts one off.
+// Outside a team, the owner's other computers come in through the gate with the
+// server token, and the share screen offers the ways to turn it on. Only the way
 // the team's admin takes names Cloudflare; a teammate sees the invite code.
-import { cli } from "../lib/api.js";
+import { cli, get, post } from "../lib/api.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { screenTabs } from "../lib/tabs.js";
-import { block, confirmWindow, kv } from "../lib/kit.js";
+import { block, confirmWindow, kv, list, listItem } from "../lib/kit.js";
+import { ago, teamCall } from "../lib/team.js";
 import { button, busy, errorNotice, notice, pageHead, spinner, statusTag, tag, toast } from "../lib/ui.js";
 
 /** 서버 → 공유: the switch, and with it on, the address and the server token. */
@@ -24,6 +27,10 @@ export default {
         return;
       }
       const tunnelOn = share.tunnel?.enabled ?? share.enabled;
+      if (share.team) {
+        clear(box, tunnelOn ? await teamShareOn(share, draw) : teamShareOff(draw));
+        return;
+      }
       clear(box, tunnelOn ? shareOn(share, draw) : shareOff(share, draw));
     };
     const refresh = button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침", onClick: () => busy(refresh, () => draw(false)) });
@@ -34,6 +41,62 @@ export default {
     await draw(false);
   },
 };
+
+/** The computers that write to this server: this one, then each that registered with its gate. */
+async function teamShareOn(share, redraw) {
+  const [devices, flow] = await Promise.all([
+    teamCall("/api/team/devices", {}).catch(() => ({ devices: [] })),
+    get("/api/app/flow").catch(() => null),
+  ]);
+  const lastHere = flow?.collect?.lastSentAt || flow?.collect?.lastAt || null;
+  const rows = [listItem({ title: "이 컴퓨터", tags: [" ", tag("서버")], sub: lastHere ? `${ago(lastHere)} 쌓음` : "아직 쌓지 않음" })];
+  for (const device of (devices.devices || []).filter((item) => !item.revoked)) {
+    const mine = device.owner;
+    rows.push(listItem({
+      title: device.name || "컴퓨터",
+      tags: [" ", tag(mine ? "내 컴퓨터" : device.peer || device.email)],
+      sub: device.lastSeenAt ? `${ago(device.lastSeenAt)} 쌓음` : "아직 쌓지 않음",
+      end: button("끊기", { kind: "small danger", onClick: async (event) => {
+        const target = event.currentTarget;
+        const name = device.name || "이 컴퓨터";
+        const ok = await confirmWindow({
+          title: `${name}를 끊을까요?`,
+          text: `${name}는 이 서버에 더 이상 대화를 쌓지 못합니다. 다시 붙이려면 그 컴퓨터의 기억 설정에서 수정을 누르세요.`,
+          confirm: "끊기",
+          danger: true,
+        });
+        if (!ok) return;
+        await busy(target, async () => { await teamCall("/api/team/devices", { revoke: device.id }); await redraw(false); }, { done: `${name}를 끊었습니다` });
+      } }),
+    }));
+  }
+  return h("div", { style: { display: "flex", flexDirection: "column", gap: "12px" } },
+    (share.issues || []).length ? notice("warn", h("ul", {}, share.issues.map((issue) => h("li", {}, issue)))) : null,
+    block({
+      title: "공유",
+      tag: statusTag(share.tunnel?.running, ["켜짐", "멈춤"]),
+      actions: [button("공유 끄기", { kind: "small", onClick: async (event) => {
+        const target = event.currentTarget;
+        const ok = await confirmWindow({ title: "공유를 끌까요?", text: "Tunnel과 gate를 이 컴퓨터에서 멈춥니다. 내 다른 컴퓨터의 대화는 다시 켤 때까지 그 컴퓨터에 쌓였다가 이어서 옵니다. 팀원은 그동안 묻지 못합니다.", confirm: "끄기", danger: true });
+        if (!ok) return;
+        await busy(target, async () => { await cli("/api/server/share/disable", {}); await redraw(false); }, { done: "공유를 껐습니다" });
+      } })],
+    },
+    kv("이 서버의 주소", h("span", { class: "mono" }, share.publicUrl || ""),
+      button("", { kind: "small icon-only", iconName: "copy", title: "주소 복사", onClick: async () => { await copyText(share.publicUrl); toast("주소를 복사했습니다"); } }))),
+    list({ title: "이 서버에 쌓는 컴퓨터" }, rows));
+}
+
+/** Sharing through the team, turned off: on again at the same address. */
+function teamShareOff(redraw) {
+  return block({ title: "공유", tag: tag("꺼짐") },
+    kv("팀", "내 다른 컴퓨터와 승인한 팀원이 이 서버에 닿지 못합니다.",
+      button("다시 켜기", { kind: "primary small", onClick: (event) => busy(event.currentTarget, async () => {
+        const result = await post("/api/team/share", { replace: true });
+        if (!result.ok) throw new Error(result.error || "다시 켜지 못했습니다.");
+        await redraw(false);
+      }, { done: "공유를 켰습니다" }) })));
+}
 
 const PUBLIC_STATES = {
   ok: ["ok", "밖에서 닿습니다", ""],

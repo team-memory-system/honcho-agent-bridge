@@ -58,6 +58,22 @@ export function honchoHeaders({ token = "", access = null } = {}, extra = {}) {
 }
 
 /**
+ * A team server this computer registered with (team-auth.mjs) takes its team login
+ * and its device key in place of a bearer token or a service token, so those are
+ * dropped for it. Any other server gets the headers as they were. Loaded when
+ * asked: team-auth.mjs reads config.mjs, which reads this file.
+ */
+async function withTeamLogin(target, headers) {
+  if (target.protocol !== "https:") return headers;
+  const { teamAuthPaths, teamHeaders } = await import("./team-auth.mjs");
+  const team = await teamHeaders(target.toString(), { paths: teamAuthPaths(null, process.env) });
+  if (!Object.keys(team).length) return headers;
+  const entries = headers instanceof Headers ? [...headers.entries()] : Object.entries(headers || {});
+  const kept = entries.filter(([name]) => !/^(authorization|cf-access-client-id|cf-access-client-secret)$/i.test(name));
+  return { ...Object.fromEntries(kept), ...team };
+}
+
+/**
  * fetch with redirects followed only within the memory server's own origin.
  *
  * Access answers a request it refuses with a redirect to its login page on
@@ -67,7 +83,7 @@ export function honchoHeaders({ token = "", access = null } = {}, extra = {}) {
  */
 export async function fetchHoncho(url, init = {}) {
   let target = new URL(url);
-  let options = { ...init, redirect: "manual" };
+  let options = { ...init, redirect: "manual", headers: await withTeamLogin(target, init.headers) };
   for (let hop = 0; ; hop += 1) {
     const response = await fetch(target, options);
     if (!REDIRECT_STATUSES.has(response.status) || hop >= MAX_REDIRECTS) return response;

@@ -333,7 +333,9 @@ async function uiSources() {
 
 test("every server route the screens call exists", async () => {
   const screens = await uiSources();
-  const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
+  // The team's routes run in the app's process, from team-app.mjs (ui.mjs sends them there).
+  const server = (await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8"))
+    + (await fsp.readFile(path.join(ROOT, "scripts", "team-app.mjs"), "utf8"));
   const called = new Set([...screens.matchAll(/["`](\/api\/[a-z/-]+)/g)].map((match) => match[1].replace(/\/$/, "")));
   assert.ok(called.size >= 15, `only ${called.size} routes were found`);
   const relayed = ["/api/honcho/", "/api/dashboard/", "/api/gw/"];

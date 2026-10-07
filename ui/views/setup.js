@@ -1,12 +1,16 @@
 // 처음 설정: one window over an empty page until this computer is set up, and again
 // from the palette (처음 설정 다시 하기). The first choice decides the steps: 팀에
-// 들어가기 starts from the 팀 주소 the admin copied, 새 팀 만들기 from a Cloudflare API
-// token, and 혼자 쓰기 from nothing. Every way ends with 적용; the window then shows
-// each thing it does (적용 중) and what is left to do in the agents (할 일). Where
-// the conversations go, from which agents and which folders, are lib/collect.js's
-// steps, the same ones 기억 설정 → 대화 수집 → 수정 opens.
+// 들어가기 starts from the team's address, a team link (#/start?team=<address>) from
+// the Google login itself, 새 팀 만들기 from a Cloudflare API token, and 혼자 쓰기
+// from nothing. In a team the Google login comes first: the hub then says who this
+// is (the peer name comes from the email, so nobody types it), whether they already
+// have a server, the company server they may also collect into, and the teammates
+// whose memory they may ask. Every way ends with 적용; the window then shows each
+// thing it does (적용 중) and what is left to do (할 일). Where the conversations go,
+// from which agents and which folders, are lib/collect.js's steps, the same ones
+// 기억 설정 → 대화 수집 → 수정 opens.
 import { cli, post } from "../lib/api.js";
-import { h, clear } from "../lib/dom.js";
+import { h, clear, copyText } from "../lib/dom.js";
 import { number } from "../lib/format.js";
 import { counter, field, modal, opt, opts, progressList, stepper, todoList } from "../lib/kit.js";
 import {
@@ -18,23 +22,27 @@ import {
   detectAgents,
   explainWarning,
   loadProjects,
+  NEW_SERVER_SUB,
   projectsStep,
   serverStep,
   setupBody,
 } from "../lib/collect.js";
 import { gatewayLogin } from "../lib/login.js";
-import { clientOutcome, connectTeammate, parseTeamAddresses } from "../lib/team.js";
+import { registerWith, sendRequest, teamCall, teamDirectory, teamHostOf, teamLogin, teamMe } from "../lib/team.js";
 import { app, loadContext, refreshStatus, savePrefs } from "../lib/state.js";
-import { button, notice } from "../lib/ui.js";
+import { button, notice, spinner, tag } from "../lib/ui.js";
 
 const TITLE = "팀 메모리 시작하기";
 const STARTS = [
-  ["join", "팀에 들어가기", "관리자에게 받은 팀 주소로 들어갑니다.", "들어가기"],
+  ["join", "팀에 들어가기", "관리자에게 받은 팀 주소로 Google에 로그인합니다.", "들어가기"],
   ["make", "새 팀 만들기", "팀 관리자가 처음 한 번 합니다.", "만들기"],
-  ["solo", "혼자 쓰기", "팀 없이 내 컴퓨터에서만 씁니다.", "시작"],
+  ["solo", "혼자 쓰기", "로그인과 팀 없이 내 컴퓨터에서만 씁니다.", "시작"],
 ];
-const LABELS = { team: "팀 주소", make: "팀 만들기", server: "서버", model: "모델", agents: "에이전트", projects: "프로젝트", mates: "팀원" };
+const LABELS = { team: "팀 주소", make: "팀 만들기", login: "로그인", server: "서버", model: "모델", agents: "에이전트", projects: "프로젝트", mates: "팀원" };
 const BACKENDS = [["codex", "ChatGPT"], ["claude", "Claude"]];
+const TODO_BELL = { title: "알림", text: "팀원이 승인하면 오른쪽 위 종에 알림이 뜹니다. 그 알림에서 연결을 누르세요." };
+// The Cloudflare API token 새 팀 만들기 needs, in the words of Cloudflare's token screen.
+const TOKEN_PERMISSIONS = "Account의 Cloudflare Tunnel: Edit, Access: Apps and Policies: Edit, Access: Organizations, Identity Providers, and Groups: Read, Workers Scripts: Edit와, 쓸 zone의 DNS: Edit, Zone: Read";
 
 // Where `server prepare` stopped for the person to do something, in this window's words.
 const NEXT_ACTIONS = {
@@ -49,23 +57,41 @@ function problem(result, fallback) {
   return lines.join(" ") || fallback;
 }
 
+/** "alice와 bob", "alice, bob과 carol": names joined the way a sentence reads. */
+function joined(names) {
+  if (names.length < 2) return names.join("");
+  return `${names.slice(0, -1).join(", ")}와 ${names.at(-1)}`;
+}
+
+/** A blank tab opened in the click that asked, for the login to go to (a later one is blocked). */
+function loginTab(message) {
+  const tab = window.open("", "_blank");
+  try {
+    tab?.document.write(`<!doctype html><meta charset="utf-8"><title>팀 메모리</title><p style="font:15px system-ui,sans-serif;color:#57534b;margin:40px">${message}</p>`);
+  } catch {}
+  return tab;
+}
+
 /**
- * Opens the window. `firstRun` keeps it open until setup is done. `onDone(screen)`
- * hears which screen to open after it; `onCancel` that it was closed half way.
+ * Opens the window. `firstRun` keeps it open until setup is done; `team` is the
+ * team's address from a team link. `onDone(screen)` hears which screen to open
+ * after it; `onCancel` that it was closed half way.
  */
-export function openSetup({ firstRun, onDone, onCancel }) {
+export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
   const state = {
-    path: null,
-    team: { address: "", found: [], apiToken: "", email: "", zone: "", name: "memory" },
+    path: link ? "link" : null,
+    team: { hub: link, me: null, directory: null, name: "", apiToken: "", email: "", zone: "", hubLabel: "" },
+    login: { phase: "idle", error: "", tab: null, reopen: null, issuer: null },
     draft: collectDraft(app.context),
     models: { chosen: new Set(["codex"]), counts: { codex: 1, claude: 1 } },
     mates: new Set(),
     tasks: [],
     applied: null,
-    connected: [],
+    requested: [],
   };
   let at = 0;
   let steps = [];
+  let keys = [];
   const issue = h("div", {});
   const win = modal({
     title: TITLE,
@@ -73,31 +99,38 @@ export function openSetup({ firstRun, onDone, onCancel }) {
     onClose: (value) => { if (value !== "done") onCancel?.(); },
   });
 
+  const inTeam = () => ["join", "link", "make"].includes(state.path);
+  const me = () => state.team.me;
+  const myServer = () => me()?.servers?.[0] || null;
+  /** The server is the one this computer runs and already shares through the team. */
+  const thisComputers = (server) => Boolean(server && app.context?.localServer && server.host === app.context?.team?.localHost);
+  /** The team's company server, when this person is not its owner. */
+  const company = () => (state.team.directory?.servers || []).find((server) => server.company && server.owner !== me()?.email) || null;
+
   // ── The steps, which follow the first choice and the server chosen ──
 
   const needsModel = () => state.draft.server === "here" && !app.context?.localServer;
   const stepKeys = () => [
     ...(state.path === "join" ? ["team"] : []),
     ...(state.path === "make" ? ["make"] : []),
+    ...(inTeam() ? ["login"] : []),
     "server",
     ...(needsModel() ? ["model"] : []),
     ...(state.draft.server === "none" ? [] : ["agents", "projects"]),
-    ...(state.path === "join" ? ["mates"] : []),
+    ...(inTeam() && state.path !== "make" ? ["mates"] : []),
   ];
 
   function teamStep() {
-    const box = h("textarea", { class: "input mono", rows: "4", spellcheck: "false", placeholder: "memory https://memory.example.com/mcp\nalice https://memory-alice.example.com/mcp" });
-    box.value = state.team.address;
-    box.addEventListener("input", () => { state.team.address = box.value; });
+    const input = h("input", { class: "input mono", autocomplete: "off", spellcheck: "false", placeholder: "team.example.com", value: state.team.hub });
+    input.addEventListener("input", () => { state.team.hub = input.value; });
     return {
       body: h("div", {}, h("h3", {}, "팀 주소를 넣으세요"),
-        field("팀 주소", box, "관리자가 관리자 탭에서 복사해 보낸 팀 주소를 그대로 붙여 넣습니다. 주소 하나만 넣어도 됩니다.")),
+        field("팀 주소", input, "관리자가 보낸 팀 주소입니다. 들어가면 브라우저에서 Google 로그인을 합니다.")),
+      next: "Google로 로그인",
       check() {
-        const { found } = parseTeamAddresses(state.team.address);
-        if (!found.length) { box.focus(); return "알아볼 수 있는 주소가 없습니다. https://로 시작하는 주소나 memory-이름.도메인 꼴로 넣으세요."; }
-        // Everyone listed is offered in the 팀원 step; a teammate found again stays as chosen.
-        if (state.team.found.map((item) => item.name).join() !== found.map((item) => item.name).join()) state.mates = new Set(found.map((item) => item.name));
-        state.team.found = found;
+        const host = teamHostOf(state.team.hub);
+        if (!host) { input.focus(); return "팀 주소를 team.example.com 이나 https://로 시작하게 넣으세요."; }
+        state.team.hub = host;
         return null;
       },
     };
@@ -109,21 +142,177 @@ export function openSetup({ firstRun, onDone, onCancel }) {
       element.addEventListener("input", () => { state.team[key] = element.value; });
       return element;
     };
+    const name = input("name", { placeholder: "예: 우리 팀", maxlength: "60" });
     const token = input("apiToken", { type: "password", class: "input mono" });
     const email = input("email", { type: "email", class: "input mono", placeholder: "admin@example.com" });
     return {
       body: h("div", {}, h("h3", {}, "새 팀 만들기"),
-        field("Cloudflare API token", token, "Cloudflare에서 만든 API token을 여기에만 붙여 넣으세요. 이 컴퓨터에만 저장됩니다."),
-        field("관리자 Google 이메일", email, "팀 주소로 로그인할 때 쓰는 내 Google 계정입니다."),
+        field("팀 이름", name),
+        field("Cloudflare API token", token, "Cloudflare에서 만든 API token을 여기에만 붙여 넣으세요."),
+        field("관리자 Google 이메일", email, "팀 주소로 로그인할 내 Google 계정입니다."),
         h("details", { class: "fold" }, h("summary", {}, "token 권한과 팀 주소"),
-          h("p", { class: "hint" }, "token에는 Account의 Cloudflare Tunnel: Edit, Access: Apps and Policies: Edit, Access: Organizations, Identity Providers, and Groups: Read와, 쓸 zone의 DNS: Edit, Zone: Read만 줍니다."),
+          h("p", { class: "hint" }, `token에는 ${TOKEN_PERMISSIONS}만 줍니다.`),
           field("zone", input("zone", { class: "input mono", placeholder: "example.com" }), "비워 두면 token이 보는 zone이 하나일 때 그것을 씁니다."),
-          field("서버 이름", input("name", { class: "input mono", placeholder: "memory" }), "내 서버 주소는 <이름>.<zone>이 됩니다."))),
+          field("팀 주소 이름", input("hubLabel", { class: "input mono", placeholder: "team" }), "팀 주소는 <이름>.<zone>이 됩니다."))),
+      next: "만들고 로그인",
       check() {
+        if (!state.team.name.trim()) { name.focus(); return "팀 이름을 넣으세요."; }
         if (!state.team.apiToken.trim()) { token.focus(); return "Cloudflare API token을 넣으세요."; }
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(state.team.email.trim())) { email.focus(); return "관리자 Google 이메일을 넣으세요."; }
         return null;
       },
+      // Made before the login: the login is to the team this makes.
+      async run() {
+        const body = { name: state.team.name.trim(), email: state.team.email.trim(), apiToken: state.team.apiToken.trim() };
+        if (state.team.zone.trim()) body.zone = state.team.zone.trim();
+        if (state.team.hubLabel.trim()) body.hub = state.team.hubLabel.trim();
+        const made = await post("/api/team/make", body);
+        // Kept by the CLI on this computer and in the team hub; the window lets go of it.
+        state.team.apiToken = "";
+        if (!made.ok) throw new Error(problem(made, "팀을 만들지 못했습니다."));
+        state.team.hub = made.team.host;
+      },
+    };
+  }
+
+  function loginStep() {
+    const { login } = state;
+    const host = h("span", { class: "mono muted" }, state.team.hub);
+    if (login.phase === "denied") {
+      return {
+        body: h("div", {}, h("h3", {}, "이 이메일은 팀 명단에 없습니다"),
+          h("div", { class: "idbox" }, h("span", { class: "mono" }, login.email || "")),
+          h("p", { class: "lead", style: { marginTop: "12px" } }, "이 이메일을 팀 관리자에게 보내고, 등록되면 다시 로그인을 누르세요.")),
+        foot: [
+          button("다른 계정으로 로그인", { kind: "quiet", onClick: () => {
+            // Access forgets the login, so Google asks which account this time.
+            const issuer = login.issuer?.();
+            if (issuer) window.open(`${issuer}/cdn-cgi/access/logout`, "_blank", "noopener");
+            teamCall("/api/team/logout", {}).catch(() => {});
+            login.phase = "idle";
+            login.tab = loginTab("Google 로그인으로 넘어가는 중입니다…");
+            drawStep();
+          } }),
+          button("이메일 복사", { onClick: async () => { await copyText(login.email || ""); } }),
+          button("다시 로그인", { kind: "primary", onClick: (event) => recheck(event.currentTarget) }),
+        ],
+        check: () => "팀 명단에 들어간 뒤 다시 로그인을 누르세요.",
+      };
+    }
+    if (login.phase === "error") {
+      return {
+        body: h("div", {}, h("h3", {}, "로그인하지 못했습니다"), notice("bad", login.error)),
+        foot: [button("다시 로그인", { kind: "primary", onClick: () => {
+          login.phase = "idle";
+          login.tab = loginTab("Google 로그인으로 넘어가는 중입니다…");
+          drawStep();
+        } })],
+        check: () => login.error,
+      };
+    }
+    if (login.phase === "idle") startLogin();
+    return {
+      body: h("div", {}, h("h3", {}, "브라우저에서 Google 로그인을 마치세요"),
+        h("div", { class: "idbox" }, state.team.name ? h("b", {}, state.team.name) : null, host),
+        h("div", { class: "waitline" }, spinner(), "로그인을 기다리는 중입니다."),
+        h("div", { class: "hint" }, "브라우저가 열리지 않았으면 브라우저 다시 열기를 누르세요.")),
+      foot: [button("브라우저 다시 열기", { onClick: () => login.reopen?.() })],
+      check: () => "브라우저에서 로그인을 마치세요.",
+    };
+  }
+
+  /** The hub login, then who the hub says this is. */
+  async function startLogin() {
+    const { login } = state;
+    login.phase = "waiting";
+    const controller = new AbortController();
+    login.abort = () => controller.abort();
+    try {
+      const flow = teamLogin({ kind: "hub", hub: state.team.hub, tab: login.tab, signal: controller.signal });
+      login.reopen = flow.reopen;
+      login.issuer = flow.issuer;
+      await flow.done;
+      login.tab = null;
+      await admit();
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      login.phase = "error";
+      login.error = error?.message || String(error);
+      if (keys[at] === "login") drawStep();
+    }
+  }
+
+  /** Who the hub says this is: on the list, on to the server step; not, the 명단에 없음 screen. */
+  async function admit() {
+    const { login } = state;
+    const who = await teamMe(state.team.hub);
+    login.email = who.email;
+    if (!who.member) {
+      login.phase = "denied";
+      if (keys[at] === "login") drawStep();
+      return;
+    }
+    state.team.me = who;
+    state.team.name = who.team?.name || state.team.name;
+    state.team.directory = await teamDirectory().catch(() => null);
+    // A team's peer name comes from the email; nobody types it.
+    state.draft.userPeer = who.peer || state.draft.userPeer;
+    // Someone with a server starts from it; this computer's own server is "here".
+    state.draft.server = state.path === "make" || !who.servers?.length || thisComputers(who.servers[0]) ? "here" : "found";
+    login.phase = "done";
+    if (keys[at] === "login") { at += 1; drawStep(); }
+  }
+
+  async function recheck(target) {
+    target.disabled = true;
+    try { await admit(); } catch (error) { state.login.phase = "error"; state.login.error = error.message; drawStep(); }
+    finally { target.disabled = false; }
+  }
+
+  /** The server step in a team: the server this person has, a new one here, or none; and the company server. */
+  function teamServerStep() {
+    const draft = state.draft;
+    const here = thisComputers(myServer());
+    const mine = here ? null : myServer();
+    const local = app.context?.localServer;
+    const choices = state.path === "make" || !mine ? ["here", "none"] : ["found", "here", "none"];
+    if (!choices.includes(draft.server)) draft.server = choices[0];
+    const pick = (choice) => () => { draft.server = choice; };
+    const rows = choices.map((choice) => {
+      if (choice === "found") {
+        return opt({ name: "server", value: "found", checked: draft.server === "found", onChange: pick("found"),
+          title: ["내 서버 ", h("span", { class: "mono muted" }, mine.host)],
+          sub: mine.createdOn ? `${mine.createdOn}에서 만든 서버` : null,
+          end: tag("찾음", "ok") });
+      }
+      if (choice === "here") {
+        return local
+          ? opt({ name: "server", value: "here", checked: draft.server === "here", onChange: pick("here"),
+            title: ["이 컴퓨터 서버 ", h("span", { class: "mono muted" }, local.apiUrl.replace(/^https?:\/\//, ""))],
+            sub: here ? myServer().host : mine ? "내 서버 주소를 이 컴퓨터 서버로 옮깁니다." : null,
+            end: here ? tag("지금 쌓는 중", "ok") : tag("이 컴퓨터에 있음") })
+          : opt({ name: "server", value: "here", checked: draft.server === "here", onChange: pick("here"),
+            title: "이 컴퓨터에 새로 만들기", sub: mine ? `${NEW_SERVER_SUB} 내 서버 주소를 이 컴퓨터 서버로 옮깁니다.` : NEW_SERVER_SUB });
+      }
+      return opt({ name: "server", value: "none", checked: draft.server === "none", onChange: pick("none"), title: "쌓지 않기" });
+    });
+    const other = state.path === "make" ? null : company();
+    if (other && !draft.company) draft.company = { on: false, host: other.host, label: "회사 서버", owner: other.owner, folders: new Set() };
+    return {
+      body: h("div", {},
+        h("h3", {}, "어디에 쌓을까요?"),
+        mine || here ? h("div", { class: "label" }, "내 기억 서버") : h("p", { class: "lead" }, `${me()?.email || ""} 계정에는 아직 기억 서버가 없습니다.`),
+        opts(...rows),
+        other ? [h("div", { class: "label" }, "함께 쌓을 서버"), opts(opt({
+          type: "checkbox",
+          name: "company",
+          value: other.host,
+          checked: draft.company.on,
+          title: ["회사 ", h("span", { class: "mono muted" }, other.host)],
+          end: tag("승인 요청", "warn"),
+          onChange: (on) => { draft.company.on = on; },
+        }))] : null),
+      check: () => (draft.server === "none" && draft.company?.on ? "회사 서버에 쌓으려면 내 기억 서버를 먼저 고르세요." : null),
     };
   }
 
@@ -154,19 +343,32 @@ export function openSetup({ firstRun, onDone, onCancel }) {
     };
   }
 
+  /** The teammates who have a server: whose memory this computer's agents may ask, once they approve. */
   function matesStep() {
-    const rows = state.team.found.map((mate) => opt({
-      type: "checkbox",
-      name: "mates",
-      value: mate.name,
-      checked: state.mates.has(mate.name),
-      title: [mate.name, " ", h("span", { class: "mono muted" }, mate.host)],
-      onChange: (on) => { if (on) state.mates.add(mate.name); else state.mates.delete(mate.name); },
-    }));
+    const people = (state.team.directory?.people || []).filter((person) => person.email !== me()?.email);
+    const servers = new Map((state.team.directory?.servers || []).map((server) => [server.owner, server]));
+    if (!state.matesSeeded) {
+      for (const person of people) if (servers.has(person.email)) state.mates.add(person.email);
+      state.matesSeeded = true;
+    }
+    const rows = people.map((person) => {
+      const server = servers.get(person.email);
+      const name = person.peer || person.email.split("@")[0];
+      return opt({
+        type: "checkbox",
+        name: "mates",
+        value: person.email,
+        checked: Boolean(server) && state.mates.has(person.email),
+        disabled: !server,
+        title: server ? [name, " ", h("span", { class: "mono muted" }, server.host)] : name,
+        sub: server ? null : "서버 없음",
+        onChange: (on) => { if (on) state.mates.add(person.email); else state.mates.delete(person.email); },
+      });
+    });
     return {
       body: h("div", {}, h("h3", {}, "어느 팀원의 기억에 물을까요?"),
-        h("p", { class: "lead" }, "고른 팀원의 기억을 이 컴퓨터의 Claude Code와 Codex에 도구로 넣습니다."),
-        opts(...rows)),
+        h("p", { class: "lead" }, "고른 팀원에게 chat을 요청합니다. 승인되면 이 컴퓨터의 Claude Code와 Codex에 도구로 넣습니다."),
+        rows.length ? opts(...rows) : h("div", { class: "opts" }, h("div", { class: "list-empty" }, "아직 서버를 연 팀원이 없습니다."))),
       check: () => (state.draft.server === "none" && !state.mates.size ? "내 대화를 쌓지 않으면 팀원을 하나 이상 고르세요." : null),
     };
   }
@@ -175,15 +377,13 @@ export function openSetup({ firstRun, onDone, onCancel }) {
     const context = app.context;
     if (key === "team") return teamStep();
     if (key === "make") return makeStep();
+    if (key === "login") return loginStep();
     if (key === "model") return modelStep();
     if (key === "mates") return matesStep();
     if (key === "agents") return agentsStep(state.draft, context, { chatgpt: true });
     if (key === "projects") return projectsStep(state.draft, context);
-    const choices = state.path === "join" ? ["here", "remote", "none"] : state.path === "make" ? ["here"] : ["here", "remote"];
-    return serverStep(state.draft, context, {
-      choices,
-      lead: state.path === "make" ? "새 팀은 이 컴퓨터의 기억 서버로 엽니다." : null,
-    });
+    if (inTeam()) return teamServerStep();
+    return serverStep(state.draft, context, { choices: ["here", "remote"] });
   }
 
   // ── The window, one screen at a time ──
@@ -197,7 +397,8 @@ export function openSetup({ firstRun, onDone, onCancel }) {
         button(label, { kind: key === state.path ? "primary" : "", onClick: () => {
           state.path = key;
           // A server choice another way allowed is not one this way offers.
-          if (key === "make" || (key === "solo" && state.draft.server === "none")) state.draft.server = "here";
+          if (key === "solo" && !["here", "remote"].includes(state.draft.server)) state.draft.server = "here";
+          if (key !== "solo" && state.draft.server === "remote") state.draft.server = "here";
           at = 0;
           drawStep();
         } })))));
@@ -205,21 +406,49 @@ export function openSetup({ firstRun, onDone, onCancel }) {
   }
 
   function drawStep() {
-    const keys = stepKeys();
+    keys = stepKeys();
     at = Math.min(at, keys.length - 1);
-    steps = keys.map(buildStep);
+    steps = keys.map((key, index) => (index === at ? buildStep(key) : null));
+    const step = steps[at];
     clear(issue);
     win.steps(stepper(keys.map((key) => LABELS[key]), at));
-    win.body(steps[at].body, issue);
+    win.body(step.body, issue);
+    const back = button(keys[at] === "login" ? "취소" : "이전", { kind: "quiet", onClick: () => {
+      state.login.abort?.();
+      if (keys[at] === "login") state.login.phase = "idle";
+      if (at === 0 || (state.path === "link" && keys[at] === "login")) { state.path = link ? "link" : null; drawStart(); return; }
+      at -= 1;
+      drawStep();
+    } });
+    if (step.foot) {
+      win.foot(back, step.foot);
+      return;
+    }
     const last = at === keys.length - 1;
-    win.foot(button("이전", { kind: "quiet", onClick: () => { if (at === 0) drawStart(); else { at -= 1; drawStep(); } } }),
-      button(last ? "적용" : "다음", { kind: "primary", onClick: () => {
-        const problemText = steps[at].check();
-        if (problemText) { clear(issue, notice("warn", problemText)); return; }
-        if (last) { apply(); return; }
-        at += 1;
-        drawStep();
-      } }));
+    win.foot(back, button(step.next || (last ? "적용" : "다음"), { kind: "primary", onClick: async (event) => {
+      const problemText = step.check();
+      if (problemText) { clear(issue, notice("warn", problemText)); return; }
+      if (last) { apply(); return; }
+      // The login opens a tab: opened now, in the click, so the browser lets it.
+      if (keys[at + 1] === "login") state.login.tab = loginTab(step.run ? "팀을 만드는 중입니다. 다 되면 Google 로그인으로 넘어갑니다…" : "Google 로그인으로 넘어가는 중입니다…");
+      if (step.run) {
+        const target = event.currentTarget;
+        target.disabled = true;
+        clear(issue, h("div", { class: "waitline" }, spinner(), "팀을 만드는 중입니다. 1~2분 걸립니다."));
+        try {
+          await step.run();
+        } catch (error) {
+          state.login.tab?.close();
+          state.login.tab = null;
+          clear(issue, notice("bad", error.message));
+          target.disabled = false;
+          return;
+        }
+      }
+      state.login.phase = "idle";
+      at += 1;
+      drawStep();
+    } }));
   }
 
   // ── 적용 중: each thing the setup does, one row each ──
@@ -240,11 +469,14 @@ export function openSetup({ firstRun, onDone, onCancel }) {
       }
       tasks.push({ title: "기억 서버 준비", sub: "서버 설정을 쓰고 임베딩 모델을 받습니다. 처음에는 오래 걸립니다.", run: prepareAgain });
       tasks.push({ title: "기억 서버 켜기", run: start });
+    } else if (draft.server === "found") {
+      tasks.push({ title: "내 서버 연결", sub: myServer()?.host || "", run: connectFound });
     } else if (draft.server !== "none") {
       const host = draft.server === "remote" ? draft.remoteUrl.trim() : app.context?.localServer?.apiUrl || "";
       tasks.push({ title: draft.server === "remote" ? "내 서버 연결" : "이 컴퓨터 서버 연결", sub: host.replace(/^https?:\/\//, ""), run: check });
     }
-    if (state.path === "make") tasks.push({ title: "새 팀 만들기", sub: "Cloudflare에 내 서버 주소와 팀 로그인을 만듭니다.", run: makeTeam });
+    if (inTeam() && draft.server === "here" && !thisComputers(myServer())) tasks.push({ title: "팀에 내 서버 열기", sub: "팀원이 승인을 받아 물을 수 있는 내 서버 주소를 만듭니다.", run: shareTeam });
+    if (draft.company?.on) tasks.push({ title: "회사 서버에 승인 요청", sub: draft.company.host, run: requestCompany });
     if (draft.server !== "none") {
       tasks.push({ label: "에이전트" });
       const agents = Object.keys(AGENTS).filter((name) => draft.agents?.has(name));
@@ -252,11 +484,21 @@ export function openSetup({ firstRun, onDone, onCancel }) {
       if (draft.chatgpt) tasks.push({ title: "ChatGPT 기록 가져오기", sub: `${draft.chatgpt.name} · ${(draft.chatgpt.size / 1024 / 1024).toFixed(1)}MB`, run: importChatgpt });
       tasks.push({ title: "지난 대화 수집 시작", run: backfill });
     }
-    if (state.path === "join" && state.mates.size) {
+    const mates = matesChosen();
+    if (mates.length) {
       tasks.push({ label: "팀원" });
-      tasks.push({ title: `${[...state.mates].join("와 ")} 기억 연결`, run: connectMates });
+      tasks.push({ title: `${joined(mates.map((mate) => mate.name))}에게 chat 요청`, run: requestMates });
     }
     return tasks.map((task) => (task.label ? task : { state: "wait", ...task }));
+  }
+
+  /** The teammates ticked in the 팀원 step, with their servers. */
+  function matesChosen() {
+    if (!inTeam() || state.path === "make") return [];
+    const servers = new Map((state.team.directory?.servers || []).map((server) => [server.owner, server]));
+    return (state.team.directory?.people || [])
+      .filter((person) => state.mates.has(person.email) && servers.has(person.email))
+      .map((person) => ({ email: person.email, name: person.peer || person.email.split("@")[0], host: servers.get(person.email).host }));
   }
 
   async function prepare(task) {
@@ -297,19 +539,45 @@ export function openSetup({ firstRun, onDone, onCancel }) {
     if (!plan.ready) throw new Error(problem(plan, "이 서버에 쌓을 수 없습니다."));
   }
 
-  async function makeTeam() {
-    const body = { cloudflare: true, name: state.team.name.trim() || "memory", email: state.team.email.trim(), apiToken: state.team.apiToken.trim() };
-    if (state.team.zone.trim()) body.zone = state.team.zone.trim();
-    await cli("/api/server/share/enable", body);
-    // Saved on this computer by the CLI; the window does not keep it any longer.
-    state.team.apiToken = "";
-    await loadContext();
+  /** My server on another computer: this computer registers with its gate, then setup sends there. */
+  async function connectFound(task) {
+    const host = myServer().host;
+    await registerWith(host);
+    task.sub = host;
+  }
+
+  /** The address the team makes for this computer's server, and sharing on through it. */
+  async function shareTeam(task) {
+    const result = await post("/api/team/share", myServer() ? { replace: true } : {});
+    if (!result.ok) throw new Error(problem(result, "팀에 내 서버를 열지 못했습니다."));
+    task.sub = result.server?.host || result.host || "";
+  }
+
+  /** Asks the company server's owner; the server is written to only after they approve. */
+  async function requestCompany(task) {
+    const { company: chosen } = state.draft;
+    const folders = (state.draft.projects || []).filter((project) => chosen.folders.has(project.path)).map((project) => project.name);
+    await sendRequest({ kind: "collect", server: chosen.host, folders });
+    chosen.requested = true;
+    task.sub = `${chosen.host} · 승인 기다리는 중`;
   }
 
   async function applyNow() {
-    const outcome = await applySetup(setupBody(state.draft, app.context));
+    const body = setupBody(state.draft, app.context);
+    if (state.draft.server === "found") body.honchoUrl = `https://${myServer().host}`;
+    const outcome = await applySetup(body);
     if (!outcome.ok) throw new Error(problem(outcome.result, "설정하지 못했습니다."));
     state.applied = outcome.result;
+    // The company server takes nothing until its owner approves: kept, switched off.
+    if (state.draft.company?.requested) {
+      await post("/api/targets/add", {
+        id: "company",
+        label: "회사",
+        url: `https://${state.draft.company.host}`,
+        folders: [...state.draft.company.folders],
+        team: true,
+      }).catch(() => null);
+    }
   }
 
   async function afterApply() {
@@ -329,16 +597,19 @@ export function openSetup({ firstRun, onDone, onCancel }) {
     task.sub = "뒤에서 오래된 대화부터 보냅니다. 대시보드에서 남은 수를 봅니다.";
   }
 
-  async function connectMates(task) {
-    const chosen = state.team.found.filter((mate) => state.mates.has(mate.name) && !state.connected.includes(mate.name));
+  async function requestMates(task) {
     const failed = [];
-    for (const mate of chosen) {
-      const result = await connectTeammate(mate).catch((error) => ({ ok: false, error: error.message }));
-      if (result.ok) state.connected.push(mate.name);
-      else failed.push(`${mate.name}: ${result.error || clientOutcome(result).join(" · ") || "연결하지 못했습니다."}`);
+    for (const mate of matesChosen()) {
+      if (state.requested.includes(mate.email)) continue;
+      try {
+        await sendRequest({ kind: "chat", server: mate.host });
+        state.requested.push(mate.email);
+      } catch (error) {
+        failed.push(`${mate.name}: ${error.message}`);
+      }
     }
     if (failed.length) throw new Error(failed.join(" "));
-    task.sub = "Claude Code와 Codex에 넣었습니다.";
+    task.sub = "승인 기다리는 중";
   }
 
   function draw() {
@@ -382,29 +653,38 @@ export function openSetup({ firstRun, onDone, onCancel }) {
     run();
   }
 
-  // ── 할 일: what is left to do in the agents ──
+  // ── 할 일: what is left to do in the agents, and the bell ──
 
   function finish() {
-    savePrefs({ mode: state.path });
+    savePrefs({ mode: state.path === "link" ? "join" : state.path });
     refreshStatus();
     const items = state.applied ? agentTodo(state.applied, state.draft.agents) : [];
-    if (state.connected.length) {
-      items.push({ title: "팀원 기억", text: ["Claude Code는 열린 세션에서 ", h("span", { class: "mono" }, "/mcp"), ` 를 열고 team-${state.connected[0]} 을 골라 Authenticate를 누르세요. Codex는 팀 화면에서 Codex 로그인을 누르세요. 브라우저가 열리면 팀 Google 계정으로 로그인합니다.`] });
-    }
+    if (state.requested.length) items.push(TODO_BELL);
     if (state.path === "make") items.push({ title: "관리자 탭", text: "팀원 더하기로 팀원 이메일을 넣고, 팀 주소를 보내세요." });
     const agentsOnly = items.every((item) => Object.values(AGENTS).includes(item.title));
+    const chatOnly = state.draft.server === "none";
     const next = state.path === "make" ? ["관리자 탭 열기", "admin"]
-      : state.draft.server === "none" ? ["팀 화면 열기", "team"]
+      : chatOnly ? ["팀 화면 열기", "team"]
         : ["대시보드 열기", "dashboard"];
+    const names = matesChosen().filter((mate) => state.requested.includes(mate.email)).map((mate) => mate.name);
     win.body(
-      h("h3", {}, items.length ? `${agentsOnly ? "에이전트에서 할 일" : "할 일"} ${items.length}개` : "다 됐습니다"),
+      h("h3", {}, chatOnly ? "승인 기다리는 중" : items.length ? `${agentsOnly ? "에이전트에서 할 일" : "할 일"} ${items.length}개` : "다 됐습니다"),
+      chatOnly && names.length ? h("p", { class: "lead" }, `${joined(names)}에게 chat 요청을 보냈습니다.`) : null,
       items.length ? todoList(items) : h("p", { class: "lead" }, "이제 대화가 끝날 때마다 기억 서버에 쌓입니다."));
     win.foot(null, button(next[0], { kind: "primary", onClick: () => { win.close("done"); onDone?.(next[1]); } }));
   }
 
   detectAgents({ fresh: true });
   loadProjects({ fresh: true });
-  drawStart();
+  if (link) {
+    // A team link starts at the login; the tab is opened by the login step's own button
+    // if the browser blocks one opened without a click.
+    at = 0;
+    drawStep();
+  } else {
+    drawStart();
+  }
   win.open();
   return win;
 }
+

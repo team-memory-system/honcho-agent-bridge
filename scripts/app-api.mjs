@@ -23,6 +23,7 @@ import { publicUrl } from "./redact.mjs";
 import { installedServerModel, installedServerPorts } from "./server-manager.mjs";
 import { configuredTargets, countPending, sentSummary, targetSummary } from "./targets.mjs";
 import { readTeamState, registeredTeamServers, teamAccessPaths } from "./team-access.mjs";
+import { teamAuthPaths, teamLoginStatus } from "./team-auth.mjs";
 import { VERSION } from "./version.mjs";
 
 const DEFAULT_HONCHO_URL = "http://127.0.0.1:8001";
@@ -94,7 +95,7 @@ export async function appContext(options = {}) {
     // settings of 0.3.28 (no longer used) are still saved here.
     teamMemory: await teamMemoryContext(options),
     // Whether the team was made on this computer, which makes it the admin's (관리자).
-    team: await teamContext(options),
+    team: await teamContext({ ...options, config }),
     oldBridge: Boolean(config?.honcho?.mcpBridgeUrl || config?.honcho?.mcpBridgeToken),
     // Other servers that also receive the conversations from chosen folders. Read
     // from files on this computer only (config, spool, state): no request is made.
@@ -103,27 +104,62 @@ export async function appContext(options = {}) {
 }
 
 /**
- * The team this computer made with 새 팀 만들기, if it did: its admin's email, the zone
- * and the address of the admin's own server, and whether the Cloudflare API token
- * is saved. Names only, read from team-access.json; the token is never read.
+ * The team this computer belongs to, from its own files: who the hub said this is
+ * when it last logged in (team-auth.json: the team's address, the email, the peer,
+ * whether this is an admin) and, on the computer that made the team, what it made
+ * (team-access.json: the zone, the admin's email, whether the Cloudflare API token
+ * is saved here). Names only; no token is read.
  */
 async function teamContext(options = {}) {
   if (options.team !== undefined) return options.team;
+  const login = await teamLoginStatus({ paths: options.teamAuthPaths || teamAuthPaths(options.config ?? null) }).catch(() => null);
+  let made = null;
   try {
     const paths = teamAccessPaths(options.teamPaths || {});
     const state = await readTeamState(paths);
-    if (!state?.ownerEmail || !state?.peoplePolicyId) return { admin: false };
-    const hasApiToken = await fsp.stat(paths.apiTokenFile).then(() => true, () => false);
-    return { admin: true, ownerEmail: state.ownerEmail, zone: state.zone || "", host: state.owner?.host || "", hasApiToken };
-  } catch {
-    return { admin: false };
-  }
+    if (state?.ownerEmail && state?.peoplePolicyId) {
+      const hasApiToken = await fsp.stat(paths.apiTokenFile).then(() => true, () => false);
+      made = {
+        name: state.teamName || "",
+        hub: state.hub?.host || "",
+        ownerEmail: state.ownerEmail,
+        zone: state.zone || "",
+        host: state.owner?.host || "",
+        hasApiToken,
+        deployedAt: state.hub?.deployedAt || null,
+      };
+    }
+  } catch {}
+  // The address this computer's own server has in the team, when it shares through it.
+  const share = await readJson(path.join(teamAccessPaths(options.teamPaths || {}).runtimeDir, "share.json"), null);
+  return {
+    // 관리자: the hub says so, or this computer made the team.
+    admin: Boolean(login?.admin || made),
+    localHost: share?.team === true && typeof share.host === "string" ? share.host : null,
+    hub: login?.hub || made?.hub || null,
+    name: login?.team || made?.name || null,
+    email: login?.email || null,
+    peer: login?.peer || null,
+    signedIn: Boolean(login?.hubLogin?.signedIn),
+    serversSignedIn: Boolean(login?.serversLogin?.signedIn),
+    made,
+    // Kept for screens that ask for these by their old names.
+    ownerEmail: made?.ownerEmail || null,
+    zone: made?.zone || "",
+    host: made?.host || "",
+    hasApiToken: Boolean(made?.hasApiToken),
+  };
 }
 
 async function teamMemoryContext(options = {}) {
   const registered = await registeredTeamServers(options.teamOptions || {}).catch(() => ({ claude: {}, codex: {} }));
   const names = new Set([...Object.keys(registered.claude), ...Object.keys(registered.codex)]);
-  return { connected: names.size, claude: Object.keys(registered.claude).length, codex: Object.keys(registered.codex).length };
+  // The hosts they reach, so the bell knows which approved chat is connected already.
+  const hosts = new Set();
+  for (const entry of [...Object.values(registered.claude), ...Object.values(registered.codex)]) {
+    try { hosts.add(new URL(entry.url).hostname); } catch {}
+  }
+  return { connected: names.size, claude: Object.keys(registered.claude).length, codex: Object.keys(registered.codex).length, hosts: [...hosts] };
 }
 
 /**
@@ -174,8 +210,8 @@ async function targetsContext(config) {
   for (const target of configuredTargets(config)) {
     const summary = await targetSummary(config, target).catch(() => null);
     if (!summary) continue;
-    const { id, label, url, folders, enabled, hasToken, hasAccess, lastSentAt, pending } = summary;
-    targets.push({ id, label, url, folders, enabled, hasToken, hasAccess, lastSentAt, pending });
+    const { id, label, url, folders, enabled, team, hasToken, hasAccess, lastSentAt, pending } = summary;
+    targets.push({ id, label, url, folders, enabled, team, hasToken, hasAccess, lastSentAt, pending });
   }
   return targets;
 }

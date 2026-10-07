@@ -5,6 +5,7 @@
 import { get } from "./lib/api.js";
 import { h, clear, svg, $ } from "./lib/dom.js";
 import { mountBell, refreshBell } from "./lib/bell.js";
+import { watchRequests } from "./lib/requests.js";
 import { TABS } from "./lib/tabs.js";
 import { icon } from "./lib/icons.js";
 import { app, go, loadContext, me, onChange, refreshStatus, workspace } from "./lib/state.js";
@@ -75,13 +76,20 @@ function glyph(name) {
 let current = { name: "", gate: null, frame: null, cleanup: null, update: null };
 let setupWindow = null;
 
+/** The hash as a path and its query: #/start?team=team.example.com is a team link. */
+function hashParts() {
+  const [path = "", query = ""] = decodeURIComponent(location.hash.replace(/^#\/?/, "")).split("?");
+  return { path, query: new URLSearchParams(query) };
+}
+
 function route() {
-  const [name = "", ...rest] = decodeURIComponent(location.hash.replace(/^#\/?/, "")).split("/");
-  return { name: VIEWS[name] || name === "start" ? name : "", params: rest };
+  const { path, query } = hashParts();
+  const [name = "", ...rest] = path.split("/");
+  return { name: VIEWS[name] || name === "start" ? name : "", params: rest, query };
 }
 
 function movedTo() {
-  const [name = "", page = ""] = decodeURIComponent(location.hash.replace(/^#\/?/, "")).split("/");
+  const [name = "", page = ""] = hashParts().path.split("/");
   if (MOVED[`${name}/${page}`]) return MOVED[`${name}/${page}`];
   if (VIEWS[name] || name === "start") return null;
   return MOVED[name] || null;
@@ -105,15 +113,20 @@ function teamConnected() {
   return Boolean(app.context?.teamMemory?.connected);
 }
 
+/** Logged in to a team, and first setup ran to its end on this computer. */
+function teamJoined() {
+  return Boolean(app.context?.team?.hub && app.context?.team?.signedIn && app.prefs.mode);
+}
+
 function setupDone() {
   const context = app.context;
-  return Boolean(context?.configured || teamConnected() || context?.localServer || memoryAnswers());
+  return Boolean(context?.configured || teamConnected() || teamJoined() || context?.localServer || memoryAnswers());
 }
 
 /** Stores nothing and only asks teammates' memories: 기억 and 서버 mean nothing here. */
 function chatOnly() {
   const context = app.context;
-  return Boolean(context && !context.configured && !context.localServer && teamConnected() && !memoryAnswers());
+  return Boolean(context && !context.configured && !context.localServer && (teamConnected() || teamJoined()) && !memoryAnswers());
 }
 
 /** A server here, one about to be installed here, or a gateway answering here. */
@@ -123,7 +136,7 @@ function serverHere() {
 
 /** Someone who chose 혼자 쓰기 has no team, unless they made or joined one since. */
 function teamHere() {
-  return Boolean(app.context?.team?.admin || teamConnected() || app.prefs.mode !== "solo");
+  return Boolean(app.context?.team?.admin || app.context?.team?.hub || teamConnected() || app.prefs.mode !== "solo");
 }
 
 /** Screens that mean nothing on this computer are left out of the menu. */
@@ -233,15 +246,17 @@ function gatedPage(frame, name, blocked) {
 }
 
 /** First setup, or setup again from the palette: one window, over whatever is on the page. */
-function showSetup({ firstRun }) {
+function showSetup({ firstRun, team = "" }) {
   if (setupWindow) return;
   setupWindow = openSetup({
     firstRun,
+    team,
     onDone: async (next = "dashboard") => {
+      // The address first: a context change on the way must not find #/start and open setup again.
+      history.replaceState(null, "", `#/${next}`);
       setupWindow = null;
       await loadContext().catch(() => {});
       await refreshStatus().catch(() => {});
-      history.replaceState(null, "", `#/${next}`);
       show({ force: true });
     },
     onCancel: () => { setupWindow = null; },
@@ -261,13 +276,13 @@ async function show({ force = false } = {}) {
     try { current.cleanup?.(); } catch {}
     current = { name: "", gate: null, frame: null, cleanup: null, update: null };
     clear(page);
-    showSetup({ firstRun: true });
+    showSetup({ firstRun: true, team: route().query.get("team") || "" });
     return;
   }
-  let { name, params } = route();
+  let { name, params, query } = route();
   if (name === "start") {
     history.replaceState(null, "", `#/${current.name || "dashboard"}`);
-    showSetup({ firstRun: false });
+    showSetup({ firstRun: false, team: query.get("team") || "" });
     if (current.name) return;
     ({ name, params } = route());
   }
@@ -386,6 +401,9 @@ async function boot() {
     return;
   }
   mountBell($(".main"));
+  // The team's requests go to the bell once this computer is in a team.
+  if (app.context?.team?.hub) watchRequests();
+  onChange(() => { if (app.context?.team?.hub) watchRequests(); });
   window.addEventListener("hashchange", () => show());
   const firstStatus = refreshStatus();
   // Whether this computer is set up, and whether 기억 opens, depend on the first

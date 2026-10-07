@@ -23,6 +23,7 @@ import {
   setupBody,
   shortPath,
 } from "../lib/collect.js";
+import { sendRequest, teamDirectory } from "../lib/team.js";
 import { TOOL_GROUPS, TOOL_INFO } from "../lib/tools.js";
 import { app, loadContext, refreshStatus, savePrefs, workspace } from "../lib/state.js";
 import { button, busy, errorNotice, notice, pageHead, spinner, tag, toast, toggle } from "../lib/ui.js";
@@ -48,7 +49,7 @@ function serverLine(context) {
     : ["내 서버 ", h("span", { class: "mono muted" }, context.honcho?.url || "")];
   const targets = (context.targets || []).map((target) => h("div", { style: { marginTop: "6px" } },
     `${target.label || target.id} `, h("span", { class: "mono muted" }, String(target.url || "").replace(/^https?:\/\//, "")),
-    target.enabled === false ? [" ", tag("꺼 둠")] : null));
+    target.enabled === false ? [" ", target.team ? tag("승인 기다리는 중", "warn") : tag("꺼 둠")] : null));
   return [own, targets];
 }
 
@@ -66,14 +67,17 @@ function collectBlock(openCollect) {
       const { examined = 0, considered = 0 } = status.running;
       clear(past, `보내는 중 · ${number(examined)}/${number(considered)}`);
     } else if (status?.lastRun?.finishedAt) {
-      clear(past, `${ago(status.lastRun.finishedAt)}에 다 보냄`, status.lastRun.failed ? [" ", tag(`${number(status.lastRun.failed)}개 실패`, "warn")] : null);
+      clear(past, `${ago(status.lastRun.finishedAt)} 다 보냄`, status.lastRun.failed ? [" ", tag(`${number(status.lastRun.failed)}개 실패`, "warn")] : null);
     } else {
       clear(past, "새 대화만 수집 중");
     }
   }).catch(() => clear(past));
   return block({ title: "대화 수집", tag: tag("켜짐", "ok"), actions: [button("수정", { onClick: openCollect })] },
     kv("서버", serverLine(context)),
-    kv("peer 이름", [h("span", { class: "mono" }, context.user?.peerId || ""), context.workspace && context.workspace !== "memory" ? h("span", { class: "muted" }, ` · workspace ${context.workspace}`) : null]),
+    kv("peer 이름", [h("span", { class: "mono" }, context.user?.peerId || ""),
+      // In a team the peer name comes from the Google email.
+      context.team?.email ? h("span", { class: "muted" }, ` · ${context.team.email}에서`) : null,
+      context.workspace && context.workspace !== "memory" ? h("span", { class: "muted" }, ` · workspace ${context.workspace}`) : null]),
     kv("에이전트", agents),
     kv("프로젝트 폴더", folderSummary(context.collect)),
     kv("지난 대화", past));
@@ -85,11 +89,12 @@ function openCollectWindow(onApplied) {
   const draft = collectDraft(context);
   let at = 0;
   let steps = [];
+  let company = null;
   const problem = h("div", {});
   const win = modal({ title: "대화 수집 설정" });
 
   const build = () => [
-    serverStep(draft, context, { peer: !context.configured || !context.user?.peerId, others: Boolean(context.configured) }),
+    serverStep(draft, context, { peer: !context.configured || !context.user?.peerId, others: Boolean(context.configured), company }),
     agentsStep(draft, context),
     projectsStep(draft, context, { edit: context.configured }),
   ];
@@ -113,6 +118,17 @@ function openCollectWindow(onApplied) {
     // What was already there is skipped, so this only sends what the new choice adds.
     await post("/api/backfill/start", {}).catch(() => {});
     const failed = await applyTargets(draft);
+    // The company server: its owner is asked, and it stays off until they approve.
+    if (draft.company?.on) {
+      try {
+        const folders = (draft.projects || []).filter((project) => draft.company.folders.has(project.path)).map((project) => project.name);
+        await sendRequest({ kind: "collect", server: draft.company.host, folders });
+        const added = await post("/api/targets/add", { id: "company", label: "회사", url: `https://${draft.company.host}`, folders: [...draft.company.folders], team: true });
+        if (added.ok === false) failed.push(`회사: ${added.error || (added.issues || []).join(" ")}`);
+      } catch (error) {
+        failed.push(`회사: ${error.message}`);
+      }
+    }
     if (failed.length) {
       await loadContext();
       clear(problem, notice("bad", h("b", {}, "내 서버에는 적용했지만 다른 서버는 다 바꾸지 못했습니다."), h("ul", {}, failed.map((line) => h("li", {}, line)))));
@@ -140,6 +156,13 @@ function openCollectWindow(onApplied) {
   loadProjects({ fresh: true });
   draw();
   win.open();
+  // In a team, the company server the hub names can be asked for from the server step.
+  if (context.team?.hub && context.team?.signedIn) {
+    teamDirectory().then((directory) => {
+      company = (directory.servers || []).find((server) => server.company && server.owner !== context.team.email) || null;
+      if (company && at === 0) draw();
+    }).catch(() => {});
+  }
 }
 
 // ── MCP 도구 ─────────────────────────────────────────────

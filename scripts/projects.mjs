@@ -12,6 +12,7 @@
 // list covers exactly the conversations a backfill would look at.
 //
 // Importing this module does nothing on its own.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -224,6 +225,91 @@ async function gitRoot(directory, memo) {
 }
 
 /**
+ * The project a session's folder belongs to, by the rule the list below uses: its
+ * repository's root, else the folder that holds one-off folders, else the folder.
+ * null for no folder, or one only automation runs in.
+ */
+export async function projectFolder(cwd, { home = userHome(), temps = systemTempFolders(path.resolve(home)), memo = new Map() } = {}) {
+  if (typeof cwd !== "string" || !cwd || !path.isAbsolute(cwd) || automationCwd(cwd)) return null;
+  const folder = path.resolve(cwd);
+  const root = (await isDirectory(folder)) ? await gitRoot(folder, memo) : null;
+  return root || tempParent(folder, temps) || datedParent(folder) || folder;
+}
+
+/**
+ * A remote's address as the same repository reads on every computer: no scheme,
+ * user, port, `.git` or trailing slash, lower case. `git@host:owner/repo.git` and
+ * `https://host/owner/repo` are both `host/owner/repo`.
+ */
+export function normalizeRemote(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return null;
+  const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(raw);
+  let host;
+  let rest;
+  if (scp) {
+    [, host, rest] = scp;
+  } else {
+    try {
+      const parsed = new URL(raw);
+      if (parsed.protocol === "file:") return null;
+      host = parsed.hostname;
+      rest = parsed.pathname;
+    } catch {
+      return null;
+    }
+  }
+  const pathPart = rest.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\.git$/i, "");
+  return host && pathPart ? `${host}/${pathPart}`.toLowerCase() : null;
+}
+
+/** The git config of the repository at `root`, following a worktree's or a submodule's `.git` file. */
+async function gitConfigFile(root) {
+  const dotGit = path.join(root, ".git");
+  let stat;
+  try { stat = await fsp.lstat(dotGit); } catch { return null; }
+  if (stat.isDirectory()) return path.join(dotGit, "config");
+  const text = await fsp.readFile(dotGit, "utf8").catch(() => "");
+  const gitdir = /^gitdir:\s*(.+)$/m.exec(text)?.[1]?.trim();
+  if (!gitdir) return null;
+  const directory = path.resolve(root, gitdir);
+  const common = (await fsp.readFile(path.join(directory, "commondir"), "utf8").catch(() => "")).trim();
+  return path.join(common ? path.resolve(directory, common) : directory, "config");
+}
+
+/** The repository's `origin` remote at `root`, normalized, or null. */
+export async function gitRemote(root) {
+  const file = await gitConfigFile(root);
+  if (!file) return null;
+  const text = await fsp.readFile(file, "utf8").catch(() => "");
+  let inOrigin = false;
+  for (const line of text.split(/\r?\n/)) {
+    const section = /^\s*\[\s*remote\s+"([^"]+)"\s*\]/.exec(line);
+    if (section) { inOrigin = section[1] === "origin"; continue; }
+    if (/^\s*\[/.test(line)) { inOrigin = false; continue; }
+    const url = inOrigin && /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
+    if (url) return normalizeRemote(url[1]);
+  }
+  return null;
+}
+
+/** A project's scope id: `p-` and 12 hex. */
+export const PROJECT_SCOPE = /^p-[0-9a-f]{12}$/;
+
+/**
+ * The Honcho scope a project's conversations go to when its owner opens it to a
+ * teammate: `p-` and 12 hex of a hash of the repository's origin remote, so a
+ * repository has the same scope on every computer that cloned it. A folder with no
+ * remote is known by its name.
+ */
+export async function projectScope(projectPath) {
+  const name = path.basename(projectPath) || projectPath;
+  const remote = await gitRemote(projectPath);
+  const key = remote ? `git:${remote}` : `name:${name.toLowerCase()}`;
+  return { id: `p-${crypto.createHash("sha256").update(key).digest("hex").slice(0, 12)}`, name };
+}
+
+/**
  * This computer's conversation projects, newest first:
  * `{ ok: true, projects: [{ path, name, sessions, lastAt, agents: { claude, codex }, exists, git, folded, folders, temp }], scanned, withoutFolder }`.
  * `git` is a repository root, `folded` a folder that holds one-off folders,
@@ -296,19 +382,22 @@ export async function conversationProjects({ config, home: given, temp } = {}) {
     projects.set(projectPath, project);
   }
 
-  const list = [...projects.values()]
-    .sort((left, right) => right.lastMs - left.lastMs || left.path.localeCompare(right.path))
-    .map((project) => ({
-      path: project.path,
-      name: project.name,
-      sessions: project.sessions,
-      lastAt: new Date(project.lastMs).toISOString(),
-      agents: project.agents,
-      exists: project.exists,
-      git: project.git,
-      folded: project.folded,
-      folders: project.folders,
-      temp: temps.some(([, folder]) => folder === project.path),
-    }));
+  const sorted = [...projects.values()]
+    .sort((left, right) => right.lastMs - left.lastMs || left.path.localeCompare(right.path));
+  const scopes = await mapLimit(sorted, CONCURRENCY, (project) => projectScope(project.path));
+  const list = sorted.map((project, index) => ({
+    path: project.path,
+    name: project.name,
+    sessions: project.sessions,
+    lastAt: new Date(project.lastMs).toISOString(),
+    agents: project.agents,
+    exists: project.exists,
+    git: project.git,
+    folded: project.folded,
+    folders: project.folders,
+    temp: temps.some(([, folder]) => folder === project.path),
+    // The scope the project's conversations go to when it is opened to a teammate.
+    scope: scopes[index].id,
+  }));
   return { ok: true, projects: list, scanned, withoutFolder };
 }

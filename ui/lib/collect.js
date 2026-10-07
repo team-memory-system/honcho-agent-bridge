@@ -75,12 +75,15 @@ export function collectDraft(context) {
       id: target.id,
       label: target.label || target.id,
       url: target.url || "",
+      team: Boolean(target.team),
       enabled: target.enabled !== false,
       wasEnabled: target.enabled !== false,
       folders: new Set(target.folders || []),
       was: new Set(target.folders || []),
     })),
     extra: { on: false, label: "", url: "", apiToken: "", accessClientId: "", accessClientSecret: "", folders: new Set() },
+    // The team's company server, once this person asks to collect into it: { on, host, folders }.
+    company: null,
   };
 }
 
@@ -89,6 +92,7 @@ export function activeTargets(draft) {
   return [
     ...draft.targets.filter((target) => target.enabled),
     ...(draft.extra.on ? [{ id: null, label: draft.extra.label.trim() || "새 서버", url: draft.extra.url, folders: draft.extra.folders, extra: true }] : []),
+    ...(draft.company?.on ? [{ id: "company", label: "회사 서버", url: `https://${draft.company.host}`, folders: draft.company.folders, company: true }] : []),
   ];
 }
 
@@ -99,7 +103,7 @@ export function activeTargets(draft) {
  * server, made now when there is none), "remote" (my server on another computer)
  * and "none" (store nothing, for someone who only asks teammates).
  */
-export function serverStep(draft, context, { choices = ["here", "remote"], peer = true, lead, others = false } = {}) {
+export function serverStep(draft, context, { choices = ["here", "remote"], peer = true, lead, others = false, company = null } = {}) {
   const localUrl = context?.localServer?.apiUrl || "";
   const current = context?.configured ? (sameServer(context.honcho?.url, localUrl) ? "here" : "remote") : "";
   if (!choices.includes(draft.server)) draft.server = choices[0];
@@ -138,7 +142,7 @@ export function serverStep(draft, context, { choices = ["here", "remote"], peer 
       title: "쌓지 않기", sub: "내 대화는 어디에도 쌓지 않고, 팀원 기억에 묻기만 합니다." });
   });
   const peerInput = h("input", { class: "input mono", value: draft.userPeer, placeholder: "예: minji", pattern: "[A-Za-z0-9_\\-]+", oninput: (event) => { draft.userPeer = event.target.value; } });
-  const extra = others ? otherServers(draft) : null;
+  const extra = others ? otherServers(draft, company) : null;
   const body = h("div", {},
     h("h3", {}, "어디에 쌓을까요?"),
     lead ? h("p", { class: "lead" }, lead) : null,
@@ -168,8 +172,12 @@ export function serverStep(draft, context, { choices = ["here", "remote"], peer 
   };
 }
 
-/** 함께 쌓을 서버: other servers (a company's) that also take the folders chosen for them. */
-function otherServers(draft) {
+/**
+ * 함께 쌓을 서버: other servers that also take the folders chosen for them. In a team,
+ * the company server (`company`, from the team hub) is one tick away: asking its
+ * owner first, then taking the folders chosen for it once approved.
+ */
+function otherServers(draft, company) {
   const input = (key, attributes = {}) => h("input", { class: "input mono", autocomplete: "off", spellcheck: "false", value: draft.extra[key], oninput: (event) => { draft.extra[key] = event.target.value; }, ...attributes });
   const url = input("url", { type: "url", placeholder: "https://memory.company.example" });
   const fields = h("div", { class: "subfields", hidden: !draft.extra.on },
@@ -179,15 +187,39 @@ function otherServers(draft) {
     h("details", { class: "fold" }, h("summary", {}, "Access 서비스 토큰"),
       field("서비스 토큰 ID", input("accessClientId", { type: "password" })),
       field("서비스 토큰 비밀", input("accessClientSecret", { type: "password" }))));
-  const rows = draft.targets.map((target) => opt({
-    type: "checkbox",
-    name: "targets",
-    value: target.id,
-    checked: target.enabled,
-    title: [target.label, " ", h("span", { class: "mono muted" }, String(target.url).replace(/^https?:\/\//, ""))],
-    sub: `폴더 ${number(target.folders.size)}개를 이 서버에도 쌓습니다`,
-    onChange: (on) => { target.enabled = on; },
-  }));
+  const rows = draft.targets.map((target) => (target.team && !target.wasEnabled
+    // Asked, not approved yet: nothing to tick until its owner answers.
+    ? opt({
+      type: "checkbox",
+      name: "targets",
+      value: target.id,
+      checked: false,
+      disabled: true,
+      title: [target.label, " ", h("span", { class: "mono muted" }, String(target.url).replace(/^https?:\/\//, ""))],
+      end: tag("승인 기다리는 중", "warn"),
+    })
+    : opt({
+      type: "checkbox",
+      name: "targets",
+      value: target.id,
+      checked: target.enabled,
+      title: [target.label, " ", h("span", { class: "mono muted" }, String(target.url).replace(/^https?:\/\//, ""))],
+      sub: `폴더 ${number(target.folders.size)}개를 이 서버에도 쌓습니다`,
+      onChange: (on) => { target.enabled = on; },
+    })));
+  const asked = company && draft.targets.some((target) => target.team && String(target.url).replace(/^https?:\/\//, "") === company.host);
+  if (company && !asked) {
+    if (!draft.company) draft.company = { on: false, host: company.host, folders: new Set() };
+    rows.unshift(opt({
+      type: "checkbox",
+      name: "company",
+      value: company.host,
+      checked: draft.company.on,
+      title: ["회사 ", h("span", { class: "mono muted" }, company.host)],
+      end: tag("승인 요청", "warn"),
+      onChange: (on) => { draft.company.on = on; },
+    }));
+  }
   rows.push(opt({
     type: "checkbox",
     name: "targets",
@@ -373,7 +405,7 @@ function matrix(draft, servers, restBox, onChange) {
   return h("div", { class: "pt" },
     h("div", { class: "pr m g", style: template }, h("span", {}), h("span", {}), h("span", { class: "gl" }, "쌓을 곳")),
     h("div", { class: "pr m h", style: template }, h("span", {}, "폴더"), h("span", { class: "c" }, "대화"),
-      columns.map((column) => h("span", { class: "ch" }, column.label))),
+      columns.map((column) => h("span", { class: "ch" }, column.label, column.company ? [h("br"), tag("승인 요청", "warn")] : null))),
     h("div", { class: "pt-scroll" }, rows),
     h("div", { class: "pr m", style: template }, h("span", { class: "pn" }, h("b", {}, "새로 생기는 폴더")), h("span", {}),
       columns.map((column) => (column.own ? h("span", { class: "pr-c" }, restBox) : cell(false, () => {}, { disabled: true, label: `새로 생기는 폴더 → ${column.label}` })))));
