@@ -427,9 +427,20 @@ export async function teammateUnshare(options = {}) {
 //
 // A teammate's memory is a remote MCP server at https://<host>/mcp. Claude Code and
 // Codex each keep it as `team-<name>` and log in to it themselves (OAuth through
-// Cloudflare Access), so no token is written here or into either entry. Both are
-// changed with their own CLI, run with an argument array and no shell; a missing
-// one is reported and the other is still done.
+// Cloudflare Access), so no token is written here or into either entry. Claude Code
+// is changed with its own CLI, run with an argument array and no shell; a missing
+// client is reported and the other is still done.
+//
+// Codex's entry is written into its config.toml here instead (only when a codex CLI
+// is found): `codex mcp add` starts its own login in the system's default browser
+// as soon as it sees the server takes OAuth, and that browser may be signed in to
+// another Google account. The login is `codexLogin` below, from the page. The entry
+// also gets `[mcp_servers.team-<name>.tools.chat]` with approval_mode = "approve":
+// Codex asks before each MCP tool call, with approval_policy = "never" it refuses
+// the call instead, and no Codex command sets that (`chat` only asks the teammate's
+// memory). `codex mcp remove` takes the entry away with that table. Left alone
+// without its entry the table would stop Codex from reading its config at all, so
+// it is only written beside the entry, and disconnecting removes one that stayed.
 //
 // Which servers this computer knows is read from files only:
 //   <runtime>/share.json       the invite's team list, on a teammate's computer
@@ -448,6 +459,17 @@ const SAFE_ARGUMENT = /^[A-Za-z0-9._:/@=#-]+$/;
 const UNSAFE_PATH = /["%^&|<>!\r\n]/;
 const LOGIN_WAIT_MS = 8_000;
 const LOGIN_LIMIT_MS = 10 * 60_000;
+// The Codex login this process last started for each entry, by config file and
+// entry: {child, state, error}, until codexLoginStatus reads its end back.
+const codexLogins = new Map();
+const CODEX_APPROVED_TOOL = "chat";
+// Codex CLIs the ChatGPT app ships on macOS (host-plugins.mjs knows the bin/ one
+// too), tried for the login when the codex on PATH has no --no-browser. They read
+// the same CODEX_HOME.
+const MACOS_APP_CODEX_CLIS = Object.freeze([
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+]);
 
 /** The short name in `team-<name>`: lower-case letters, digits and -, up to 32. */
 export function teamName(value) {
@@ -518,6 +540,7 @@ function clientContext(options = {}) {
     },
     clientRunner: options.clientRunner || null,
     loginSpawner: options.loginSpawner || null,
+    appCodexClis: options.appCodexClis ?? ((options.platform || process.platform) === "darwin" ? MACOS_APP_CODEX_CLIS : []),
     options,
   };
 }
@@ -549,6 +572,158 @@ async function codexEntries(file) {
     if (url) entries[current].url = url[1];
   }
   return entries;
+}
+
+/** Lines with their own line ends, so a file put back together is the same file. */
+function tomlLines(text) {
+  return text.match(/[^\n]*\n|[^\n]+$/g) || [];
+}
+
+function bareLine(line) {
+  return line.replace(/\r?\n$/, "");
+}
+
+/** A `[mcp_servers.<key>...]` header, each key bare or "quoted"; `under` also takes its sub-tables. */
+function codexHeader(keys, { under = false } = {}) {
+  const dotted = ["mcp_servers", ...keys].map((key) => `(?:"${key}"|${key})`).join("\\s*\\.\\s*");
+  return new RegExp(`^\\s*\\[\\s*${dotted}${under ? "\\s*\\." : "\\s*\\]\\s*(?:#.*)?$"}`);
+}
+
+/** Where the table whose header is line `at` ends: at the next header, or the end. */
+function tableEnd(lines, at) {
+  const next = lines.findIndex((line, index) => index > at && /^\s*\[/.test(line));
+  return next < 0 ? lines.length : next;
+}
+
+const APPROVED_LINE = /^\s*approval_mode\s*=\s*"approve"\s*(?:#.*)?$/;
+const URL_LINE = /^(\s*url\s*=\s*)(?:"[^"]*"|'[^']*')(.*)$/;
+
+/** `text` with `block` as lines of its own at the end, one blank line before them. */
+function appendLines(text, block) {
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const gap = !text ? "" : text.endsWith("\n") ? eol : `${eol}${eol}`;
+  return `${text}${gap}${block.join(eol)}${eol}`;
+}
+
+/** Writes a client's file back over the real file (a link stays a link, its mode kept), or makes it. */
+async function writeClientFile(file, text) {
+  let target;
+  try {
+    target = await fsp.realpath(file);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, text, { flag: "wx" });
+    return;
+  }
+  const { mode } = await fsp.stat(target);
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fsp.writeFile(temporary, text, { mode: mode & 0o777, flag: "wx" });
+    await fsp.rename(temporary, target);
+  } catch (error) {
+    await fsp.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Lets Codex call the entry's `chat` without asking: `approval_mode = "approve"` in
+ * its tools.chat table, added when there is none. A mode already there, or tools the
+ * entry sets some other way, is the user's and stays. Nothing is added for an entry
+ * the text does not have. Answers {text, approval}.
+ */
+function withCodexApproval(text, entry) {
+  const lines = tomlLines(text);
+  const own = lines.findIndex((line) => codexHeader([entry]).test(bareLine(line)));
+  if (own < 0) return { text, approval: "failed", approvalError: `${entry} is not in Codex's config.toml` };
+  const at = lines.findIndex((line) => codexHeader([entry, "tools", CODEX_APPROVED_TOOL]).test(bareLine(line)));
+  if (at >= 0) {
+    const mode = lines.slice(at + 1, tableEnd(lines, at)).map((line) => bareLine(line).match(/^\s*approval_mode\s*=\s*"([^"]*)"/)).find(Boolean);
+    if (mode) return { text, approval: mode[1] === "approve" ? "unchanged" : "kept" };
+    const eol = lines[at].endsWith("\r\n") ? "\r\n" : "\n";
+    lines.splice(at + 1, 0, `${lines[at].endsWith("\n") ? "" : eol}approval_mode = "approve"${eol}`);
+    return { text: lines.join(""), approval: "set" };
+  }
+  const toolsElsewhere = lines.slice(own + 1, tableEnd(lines, own)).some((line) => /^\s*"?tools"?\s*[.=]/.test(line))
+    || lines.some((line) => codexHeader([entry, "tools"]).test(bareLine(line)) || codexHeader([entry, "tools"], { under: true }).test(line));
+  if (toolsElsewhere) return { text, approval: "kept" };
+  return { text: appendLines(text, [`[mcp_servers.${entry}.tools.${CODEX_APPROVED_TOOL}]`, 'approval_mode = "approve"']), approval: "set" };
+}
+
+/**
+ * Puts `team-<name>` into Codex's config.toml as `codex mcp add --url` writes it,
+ * without the OAuth probe and browser login that command starts: appended when it
+ * is not there, its url replaced in place (the rest of it kept) when it points
+ * elsewhere, left as it is at the same address. Its `chat` is approved in each case.
+ * Only with a codex CLI on this computer, so one without Codex is reported missing.
+ */
+async function connectCodex(ctx, entry, url, current) {
+  const found = await runClient(ctx, "codex", ["--version"]);
+  if (found.missing) return missingClient("codex");
+  if (found.code !== 0) return { ok: false, action: "failed", error: clientFailure(found) };
+  const file = ctx.files.codex;
+  try {
+    let before = await fsp.readFile(file, "utf8").catch((error) => (error?.code === "ENOENT" ? "" : Promise.reject(error)));
+    let text = before;
+    let action = "unchanged";
+    const lines = tomlLines(text);
+    let own = lines.findIndex((line) => codexHeader([entry]).test(bareLine(line)));
+    if (own >= 0 && current?.url !== url) {
+      const end = tableEnd(lines, own);
+      const at = lines.findIndex((line, index) => index > own && index < end && URL_LINE.test(bareLine(line)));
+      if (at >= 0) {
+        const bare = bareLine(lines[at]);
+        const [, lead, rest] = bare.match(URL_LINE);
+        lines[at] = `${lead}"${url}"${rest}${lines[at].slice(bare.length)}`;
+        text = lines.join("");
+        action = "replaced";
+      } else {
+        // An entry with no address (a command, say): Codex takes it out, and it goes in anew.
+        const removed = await runClient(ctx, "codex", REMOVE_ARGS.codex(entry));
+        if (removed.code !== 0) return { ok: false, action: "failed", error: clientFailure(removed) };
+        before = text = await fsp.readFile(file, "utf8").catch(() => "");
+        if (tomlLines(text).some((line) => codexHeader([entry]).test(bareLine(line)))) return { ok: false, action: "failed", error: `codex mcp remove left ${entry} in place` };
+        own = -1;
+      }
+    }
+    if (own < 0) {
+      // As a key of [mcp_servers] or a dotted key, a second [mcp_servers.<entry>] would break the file.
+      const name = `(?:"${entry}"|${entry})`;
+      if (tomlLines(text).some((line) => new RegExp(`^\\s*(?:mcp_servers\\s*\\.\\s*)?${name}\\s*[.=]`).test(line))) {
+        return { ok: false, action: "failed", error: `${entry} is set in Codex's config.toml in a form this app does not change; take it out there first` };
+      }
+      text = appendLines(text, [`[mcp_servers.${entry}]`, `url = "${url}"`]);
+      action = current ? "replaced" : "added";
+    }
+    const approved = withCodexApproval(text, entry);
+    if (approved.text !== before) await writeClientFile(file, approved.text);
+    return { ok: true, action, approval: approved.approval, ...(approved.approvalError ? { approvalError: approved.approvalError } : {}) };
+  } catch (error) {
+    return { ok: false, action: "failed", error: String(error?.message || error) };
+  }
+}
+
+/**
+ * Once the entry is gone: its tools.chat table, when it holds only what connecting
+ * wrote. Codex reads no config at all with that table and no entry. A table with
+ * anything else in it is the user's and stays, and so do comments.
+ */
+async function dropCodexApproval(file, entry) {
+  const text = await fsp.readFile(file, "utf8").catch(() => "");
+  const lines = tomlLines(text);
+  if (lines.some((line) => codexHeader([entry]).test(bareLine(line)))) return {};
+  const at = lines.findIndex((line) => codexHeader([entry, "tools", CODEX_APPROVED_TOOL]).test(bareLine(line)));
+  if (at < 0) return {};
+  const end = tableEnd(lines, at);
+  const body = lines.slice(at + 1, end).map(bareLine);
+  if (!body.every((line) => !line.trim() || /^\s*#/.test(line) || APPROVED_LINE.test(line))) return {};
+  const kept = body.map((line, index) => (/^\s*#/.test(line) ? lines[at + 1 + index] : null)).filter(Boolean);
+  // The blank line connecting put before the table goes with it.
+  const start = at > 0 && !bareLine(lines[at - 1]).trim() ? at - 1 : at;
+  lines.splice(start, end - start, ...kept);
+  try { await writeClientFile(file, lines.join("")); } catch (error) { return { approval: "failed", approvalError: String(error?.message || error) }; }
+  return { approval: "removed" };
 }
 
 /** The team-* entries Claude Code and Codex have, by name, from their own files. */
@@ -630,23 +805,21 @@ function missingClient(client) {
   return { ok: false, missing: true, error: `${CLIENT_NAMES[client]} (${client}) was not found on this computer` };
 }
 
-const ADD_ARGS = {
-  claude: (entry, url) => ["mcp", "add", "--transport", "http", "--scope", "user", entry, url],
-  codex: (entry, url) => ["mcp", "add", entry, "--url", url],
-};
+const CLAUDE_ADD_ARGS = (entry, url) => ["mcp", "add", "--transport", "http", "--scope", "user", entry, url];
 const REMOVE_ARGS = {
   claude: (entry) => ["mcp", "remove", entry, "--scope", "user"],
   codex: (entry) => ["mcp", "remove", entry],
 };
 
 async function connectClient(ctx, client, entry, url, current) {
-  if (current && current.url === url && (client !== "claude" || current.type === "http")) return { ok: true, action: "unchanged" };
+  if (client === "codex") return connectCodex(ctx, entry, url, current);
+  if (current && current.url === url && current.type === "http") return { ok: true, action: "unchanged" };
   if (current) {
     const removed = await runClient(ctx, client, REMOVE_ARGS[client](entry));
     if (removed.missing) return missingClient(client);
     if (removed.code !== 0) return { ok: false, action: "failed", error: clientFailure(removed) };
   }
-  const added = await runClient(ctx, client, ADD_ARGS[client](entry, url));
+  const added = await runClient(ctx, client, CLAUDE_ADD_ARGS(entry, url));
   if (added.missing) return missingClient(client);
   if (added.code !== 0) return { ok: false, action: "failed", error: clientFailure(added) };
   return { ok: true, action: current ? "replaced" : "added" };
@@ -655,14 +828,15 @@ async function connectClient(ctx, client, entry, url, current) {
 function loginSteps(entry) {
   return {
     claude: `In Claude Code, run /mcp, choose ${entry} and Authenticate`,
-    codex: `codex mcp login ${entry}`,
+    codex: `codex mcp login --no-browser ${entry}`,
   };
 }
 
 /**
- * Registers a teammate's server in Claude Code and Codex as `team-<name>` at
- * https://<host>/mcp. The same address again changes nothing; another address
- * replaces the entry. Logging in is left to each client.
+ * Registers a teammate's server in Claude Code (its CLI) and Codex (its config.toml,
+ * see connectCodex) as `team-<name>` at https://<host>/mcp, with Codex allowed to
+ * call its `chat` without asking. The same address again changes nothing; another
+ * address replaces the entry. Logging in is left to each client.
  */
 export async function teammateConnect(options = {}) {
   const name = teamName(options.name);
@@ -686,11 +860,11 @@ export async function teammateConnect(options = {}) {
     ...(missing.length ? { missing } : {}),
     ...(done.length ? {} : { error: missing.length === CLIENTS.length ? "Neither Claude Code (claude) nor Codex (codex) was found on this computer" : `${entry} was not added: ${CLIENTS.map((client) => clients[client].error).filter(Boolean).join("; ")}` }),
     login: loginSteps(entry),
-    next: `Log in once in each client: ${loginSteps(entry).claude}; in a terminal, ${loginSteps(entry).codex}`,
+    next: `Log in once in each client with the Google account on the team list: ${loginSteps(entry).claude}; in a terminal, ${loginSteps(entry).codex} and open the address it prints in the browser signed in to that account (a Codex without --no-browser: codex mcp login ${entry})`,
   };
 }
 
-/** Takes `team-<name>` out of Claude Code and Codex. */
+/** Takes `team-<name>` out of Claude Code and Codex, and Codex's approval for its `chat` with it. */
 export async function teammateDisconnect(options = {}) {
   const name = teamName(options.name);
   if (!name) return { ok: false, error: "teammates disconnect takes the short name given to teammates connect" };
@@ -699,10 +873,13 @@ export async function teammateDisconnect(options = {}) {
   const registered = await registeredTeamServers(ctx);
   const clients = {};
   for (const client of CLIENTS) {
-    if (!registered[client][entry]) { clients[client] = { ok: true, action: "absent" }; continue; }
-    const removed = await runClient(ctx, client, REMOVE_ARGS[client](entry));
-    clients[client] = removed.missing ? missingClient(client)
-      : removed.code === 0 ? { ok: true, action: "removed" } : { ok: false, action: "failed", error: clientFailure(removed) };
+    if (!registered[client][entry]) clients[client] = { ok: true, action: "absent" };
+    else {
+      const removed = await runClient(ctx, client, REMOVE_ARGS[client](entry));
+      clients[client] = removed.missing ? missingClient(client)
+        : removed.code === 0 ? { ok: true, action: "removed" } : { ok: false, action: "failed", error: clientFailure(removed) };
+    }
+    if (client === "codex") Object.assign(clients.codex, await dropCodexApproval(ctx.files.codex, entry));
   }
   const failed = CLIENTS.filter((client) => !clients[client].ok);
   return { ok: failed.length === 0, name, entry, clients, ...(failed.length ? { error: `${entry} is still in ${failed.map((client) => CLIENT_NAMES[client]).join(" and ")}` } : {}) };
@@ -765,18 +942,52 @@ export async function teammatesConnected(options = {}) {
   };
 }
 
-function defaultLoginSpawner(ctx, args) {
-  const binary = findClient("codex", ctx);
-  if (!binary) return null;
-  const { command, args: list, extra } = clientCommand(binary, args, ctx.platform, ctx.env);
-  return spawn(command, list, { env: ctx.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...extra });
+// stdin stays open: with --no-browser Codex also reads a pasted callback address
+// from it, and gives the login up as soon as it closes. `binary` null is the codex on PATH.
+function defaultLoginSpawner(ctx, args, binary) {
+  const found = binary || findClient("codex", ctx);
+  if (!found) return null;
+  const { command, args: list, extra } = clientCommand(found, args, ctx.platform, ctx.env);
+  return spawn(command, list, { env: ctx.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], ...extra });
+}
+
+function executableFile(candidate, platform) {
+  try {
+    if (!fs.statSync(candidate).isFile()) return false;
+    if (platform !== "win32") fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Starts `codex mcp login team-<name>`, which opens the browser for the OAuth login
- * and waits for it. Answers when it ends, or after a few seconds with the address it
- * printed, so the page can offer it if no browser opened; the login keeps waiting
- * (at most ten minutes).
+ * The codex to log in with: the one on PATH when it takes `mcp login --no-browser`
+ * (0.154 has no such option, 0.160 has), else the first of the ChatGPT app's that
+ * does, else the one on PATH as it is. {binary (null: PATH), noBrowser}.
+ */
+async function loginCodex(ctx) {
+  const takesNoBrowser = async (binary) => {
+    const help = await runClient(ctx, "codex", ["mcp", "login", "--help"], { binary, timeoutMs: 15_000 });
+    return !help.missing && help.code === 0 && /(?:^|\s)--no-browser\b/.test(`${help.stdout}\n${help.stderr}`);
+  };
+  if (await takesNoBrowser(null)) return { binary: null, noBrowser: true };
+  for (const candidate of ctx.appCodexClis) {
+    if (executableFile(candidate, ctx.platform) && await takesNoBrowser(candidate)) return { binary: candidate, noBrowser: true };
+  }
+  return { binary: null, noBrowser: false };
+}
+
+/**
+ * Starts `codex mcp login --no-browser team-<name>`. Codex prints the login address
+ * and waits for the browser to come back to its port on 127.0.0.1; the page opens
+ * that address in the browser it runs in, the one the team login used, since the
+ * system's default browser may be signed in to another Google account. When the
+ * codex on PATH lacks --no-browser, the ChatGPT app's codex logs in instead (same
+ * CODEX_HOME); with none that has it, `codex mcp login team-<name>` opens the
+ * default browser itself (`noBrowser: false`). Answers when the login ends, or
+ * after a few seconds with the address printed; the login keeps waiting (at most
+ * ten minutes).
  */
 export async function codexLogin(options = {}) {
   const name = teamName(options.name);
@@ -785,19 +996,32 @@ export async function codexLogin(options = {}) {
   const entry = teamEntryName(name);
   const registered = await registeredTeamServers(ctx);
   if (!registered.codex[entry]) return { ok: false, error: `${entry} is not in Codex yet; connect it first` };
+  const { binary, noBrowser } = await loginCodex(ctx);
+  // Starting again ends the login before it, whose tab then has nothing to come back to.
+  const key = `${ctx.files.codex}\n${entry}`;
+  try { codexLogins.get(key)?.child?.kill(); } catch {}
   let child;
-  try { child = (ctx.loginSpawner || defaultLoginSpawner)(ctx, ["mcp", "login", entry]); }
+  try { child = (ctx.loginSpawner || defaultLoginSpawner)(ctx, ["mcp", "login", ...(noBrowser ? ["--no-browser"] : []), entry], binary); }
   catch (error) { return { ok: false, error: String(error?.message || error) }; }
   if (!child) return missingClient("codex");
+  const login = { child, state: "waiting", error: null };
+  codexLogins.set(key, login);
   const waitMs = options.waitMs ?? LOGIN_WAIT_MS;
   return new Promise((resolve) => {
     let output = "";
     let settled = false;
+    let timedOut = false;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(waiting);
-      resolve({ entry, ...result });
+      resolve({ entry, noBrowser, ...result });
+    };
+    // Kept for codexLoginStatus while this is still the entry's latest login, and
+    // answered to the page if it is still waiting.
+    const end = (result) => {
+      if (codexLogins.get(key) === login) Object.assign(login, { child: null, state: result.ok ? "done" : "failed", error: result.error ?? null });
+      finish(result);
     };
     const loginUrl = () => output.match(/https:\/\/[^\s"'<>]+/)?.[0] || null;
     const read = (chunk) => {
@@ -806,13 +1030,43 @@ export async function codexLogin(options = {}) {
     };
     child.stdout?.on("data", read);
     child.stderr?.on("data", read);
-    child.on("error", (error) => finish({ ok: false, error: String(error?.message || error) }));
-    child.on("exit", (code) => finish(code === 0
+    child.on("error", (error) => end({ ok: false, error: String(error?.message || error) }));
+    child.on("exit", (code) => end(code === 0
       ? { ok: true, state: "done" }
-      : { ok: false, state: "failed", error: output.trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, 300) || `exit ${code}` }));
+      : { ok: false, state: "failed", error: (timedOut ? "Codex login was not finished within ten minutes" : output.trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, 300)) || `exit ${code}` }));
     const waiting = setTimeout(() => finish({ ok: true, state: "waiting", loginUrl: loginUrl() }), waitMs);
-    const limit = setTimeout(() => { try { child.kill(); } catch {} }, LOGIN_LIMIT_MS);
+    const limit = setTimeout(() => { timedOut = true; try { child.kill(); } catch {} }, LOGIN_LIMIT_MS);
     limit.unref?.();
     child.on("exit", () => clearTimeout(limit));
   });
+}
+
+/**
+ * Whether Codex is logged in to team-<name>, for the page to show: `waiting` while
+ * the login this app started last still runs, then once its end, `done` or `failed`
+ * with the error; otherwise what Codex itself says, `done` for an OAuth login it
+ * holds and `needed` for anything else. Only that state leaves here, since `codex
+ * mcp list --json` also prints every server's headers, secrets among them.
+ */
+export async function codexLoginStatus(options = {}) {
+  const name = teamName(options.name);
+  if (!name) return { ok: false, error: "Codex login takes the short name of a connected teammate's server" };
+  const ctx = clientContext(options);
+  const entry = teamEntryName(name);
+  const key = `${ctx.files.codex}\n${entry}`;
+  const login = codexLogins.get(key);
+  if (login?.state === "waiting") return { ok: true, entry, state: "waiting" };
+  if (login) {
+    codexLogins.delete(key);
+    return { ok: true, entry, state: login.state, ...(login.error ? { error: login.error } : {}) };
+  }
+  const listed = await runClient(ctx, "codex", ["mcp", "list", "--json"], { timeoutMs: 30_000 });
+  if (listed.missing) return missingClient("codex");
+  if (listed.code !== 0) return { ok: false, error: clientFailure({ ...listed, stdout: "" }) };
+  let servers = null;
+  try { servers = JSON.parse(listed.stdout); } catch {}
+  if (!Array.isArray(servers)) return { ok: false, error: "codex mcp list --json printed no list" };
+  const server = servers.find((item) => item?.name === entry);
+  if (!server) return { ok: false, error: `${entry} is not in Codex yet; connect it first` };
+  return { ok: true, entry, state: server.auth_status === "o_auth" ? "done" : "needed" };
 }

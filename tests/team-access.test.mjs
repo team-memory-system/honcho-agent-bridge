@@ -14,6 +14,7 @@ import { shareEnable } from "../scripts/share-manager.mjs";
 import { EventEmitter } from "node:events";
 import {
   codexLogin,
+  codexLoginStatus,
   decodeInvite,
   encodeInvite,
   knownTeamServers,
@@ -303,7 +304,11 @@ test("a team address is a host, https://host or https://host/mcp, and the íŒ€ ì£
 });
 
 // Claude Code and Codex as their CLIs would leave their files, without running either.
-async function clientFixture(t, { missing = [] } = {}) {
+// `codex mcp remove` takes the entry's sub-tables with it, as 0.154 and 0.160 do; with
+// `keepsTools` it leaves them. `loginHelp` is what `codex mcp login --help` prints, or
+// a function of the codex asked (null: the one on PATH). No desktop app's codex is
+// looked at unless a test names some in `appCodexClis`.
+async function clientFixture(t, { missing = [], keepsTools = false, loginHelp = "" } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-team-clients-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const home = path.join(root, "home");
@@ -313,25 +318,32 @@ async function clientFixture(t, { missing = [] } = {}) {
   await fsp.writeFile(claudeFile, JSON.stringify({ numStartups: 3, mcpServers: { other: { type: "stdio", command: "other" } } }, null, 2));
   await fsp.writeFile(codexFile, 'model = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other"\n');
   const calls = [];
-  const clientRunner = async (client, args) => {
+  const helpAsked = [];
+  const clientRunner = async (client, args, { binary = null } = {}) => {
     calls.push([client, ...args]);
     if (missing.includes(client)) return { missing: true };
+    if (args[0] === "--version") return { code: 0, stdout: `${client} 1.0.0\n`, stderr: "" };
     if (client === "claude") {
       const document = JSON.parse(await fsp.readFile(claudeFile, "utf8"));
       if (args[1] === "add") document.mcpServers[args[6]] = { type: args[3], url: args[7] };
       if (args[1] === "remove") delete document.mcpServers[args[2]];
       await fsp.writeFile(claudeFile, JSON.stringify(document, null, 2));
+    } else if (args[1] === "login") {
+      helpAsked.push(binary);
+      return { code: 0, stdout: typeof loginHelp === "function" ? loginHelp(binary) : loginHelp, stderr: "" };
     } else {
       let text = await fsp.readFile(codexFile, "utf8");
       const name = args[2];
-      text = text.replace(new RegExp(`\\n\\[mcp_servers\\.${name}\\]\\n[^\\[]*`), "\n");
+      const tables = keepsTools ? `\\[mcp_servers\\.${name}\\]` : `\\[mcp_servers\\.${name}(?:\\.[^\\]]+)?\\]`;
+      const table = new RegExp(`\\n${tables}\\n[^\\[]*`);
+      while (table.test(text)) text = text.replace(table, "\n");
       if (args[1] === "add") text += `\n[mcp_servers.${name}]\nurl = "${args[4]}"\n`;
       await fsp.writeFile(codexFile, text);
     }
     return { code: 0, stdout: "", stderr: "" };
   };
   const serverDirectory = path.join(root, "app", "server");
-  return { root, home, claudeFile, codexFile, calls, serverDirectory, options: { homeDir: home, env: {}, clientRunner, serverDirectory } };
+  return { root, home, claudeFile, codexFile, calls, helpAsked, serverDirectory, options: { homeDir: home, env: {}, clientRunner, serverDirectory, appCodexClis: [] } };
 }
 
 test("teammates connect adds team-<name> to Claude Code and Codex with no token; the same address again changes nothing, another replaces it", async (t) => {
@@ -340,13 +352,18 @@ test("teammates connect adds team-<name> to Claude Code and Codex with no token;
   assert.equal(added.ok, true, JSON.stringify(added));
   assert.equal(added.entry, "team-alice");
   assert.equal(added.url, "https://memory-alice.example.com/mcp");
-  assert.deepEqual(added.clients, { claude: { ok: true, action: "added" }, codex: { ok: true, action: "added" } });
+  assert.deepEqual(added.clients, { claude: { ok: true, action: "added" }, codex: { ok: true, action: "added", approval: "set" } });
   assert.deepEqual(f.calls, [
     ["claude", "mcp", "add", "--transport", "http", "--scope", "user", "team-alice", "https://memory-alice.example.com/mcp"],
-    ["codex", "mcp", "add", "team-alice", "--url", "https://memory-alice.example.com/mcp"],
-  ]);
+    ["codex", "--version"],
+  ], "Codex's entry is written here, since codex mcp add would start its own browser login");
   assert.match(added.login.claude, /\/mcp/);
-  assert.equal(added.login.codex, "codex mcp login team-alice");
+  assert.equal(added.login.codex, "codex mcp login --no-browser team-alice");
+  assert.equal(await fsp.readFile(f.codexFile, "utf8"), [
+    'model = "gpt-5"', "", "[mcp_servers.other]", 'command = "other"', "",
+    "[mcp_servers.team-alice]", 'url = "https://memory-alice.example.com/mcp"', "",
+    "[mcp_servers.team-alice.tools.chat]", 'approval_mode = "approve"', "",
+  ].join("\n"), "the entry as codex mcp add writes it, chat approved; nothing else changes");
   const claude = JSON.parse(await fsp.readFile(f.claudeFile, "utf8"));
   assert.deepEqual(claude.mcpServers["team-alice"], { type: "http", url: "https://memory-alice.example.com/mcp" }, "no header, no token");
   assert.deepEqual(claude.mcpServers.other, { type: "stdio", command: "other" });
@@ -357,13 +374,16 @@ test("teammates connect adds team-<name> to Claude Code and Codex with no token;
 
   f.calls.length = 0;
   const again = await teammateConnect({ ...f.options, name: "alice", address: "https://memory-alice.example.com/mcp" });
-  assert.deepEqual(again.clients, { claude: { ok: true, action: "unchanged" }, codex: { ok: true, action: "unchanged" } });
-  assert.deepEqual(f.calls, [], "the same address runs neither CLI");
+  assert.deepEqual(again.clients, { claude: { ok: true, action: "unchanged" }, codex: { ok: true, action: "unchanged", approval: "unchanged" } });
+  assert.deepEqual(f.calls, [["codex", "--version"]], "the same address adds or removes nothing");
+
+  f.calls.length = 0;
 
   const moved = await teammateConnect({ ...f.options, name: "alice", address: "https://memory-alice2.example.com" });
-  assert.deepEqual(moved.clients, { claude: { ok: true, action: "replaced" }, codex: { ok: true, action: "replaced" } });
-  assert.deepEqual(f.calls.map((call) => `${call[0]} ${call[2]}`), ["claude remove", "claude add", "codex remove", "codex add"]);
+  assert.deepEqual(moved.clients, { claude: { ok: true, action: "replaced" }, codex: { ok: true, action: "replaced", approval: "unchanged" } });
+  assert.deepEqual(f.calls.map((call) => call.slice(0, 3).join(" ")), ["claude mcp remove", "claude mcp add", "codex --version"]);
   assert.equal((await registeredTeamServers({ homeDir: f.home, env: {} })).codex["team-alice"].url, "https://memory-alice2.example.com/mcp");
+  assert.match(await fsp.readFile(f.codexFile, "utf8"), /\[mcp_servers\.team-alice\]\nurl = "https:\/\/memory-alice2\.example\.com\/mcp"\n\n\[mcp_servers\.team-alice\.tools\.chat\]\napproval_mode = "approve"\n$/, "the url changed in place");
 
   for (const [name, address] of [["a b", "memory-alice.example.com"], ["alice", "http://memory-alice.example.com"], ["alice", "--url=x"]]) {
     const refused = await teammateConnect({ ...f.options, name, address });
@@ -376,16 +396,87 @@ test("teammates connect adds team-<name> to Claude Code and Codex with no token;
   assert.deepEqual(f.calls, [["claude", "mcp", "remove", "team-alice", "--scope", "user"], ["codex", "mcp", "remove", "team-alice"]]);
   const absent = await teammateDisconnect({ ...f.options, name: "alice" });
   assert.deepEqual(absent.clients, { claude: { ok: true, action: "absent" }, codex: { ok: true, action: "absent" } });
-  assert.match(await fsp.readFile(f.codexFile, "utf8"), /\[mcp_servers\.other\]/, "other entries stay");
+  const codexText = await fsp.readFile(f.codexFile, "utf8");
+  assert.doesNotMatch(codexText, /team-alice/, "the approval went with the entry");
+  assert.match(codexText, /^model = "gpt-5"\n\n\[mcp_servers\.other\]\ncommand = "other"\n/, "other entries stay");
+});
+
+test("Codex's approval for chat: a mode the user set stays, a table left without its entry goes, and nothing is written without the entry", async (t) => {
+  const f = await clientFixture(t);
+  await teammateConnect({ ...f.options, name: "alice", address: "memory-alice.example.com" });
+  const own = (await fsp.readFile(f.codexFile, "utf8")).replace('approval_mode = "approve"', 'approval_mode = "prompt"');
+  await fsp.writeFile(f.codexFile, own);
+  const kept = await teammateConnect({ ...f.options, name: "alice", address: "memory-alice.example.com" });
+  assert.equal(kept.clients.codex.approval, "kept");
+  assert.equal(await fsp.readFile(f.codexFile, "utf8"), own, "the user's own mode is not touched");
+  await fsp.writeFile(f.codexFile, own.replace('approval_mode = "prompt"\n', "# mine\n"));
+  assert.equal((await teammateConnect({ ...f.options, name: "alice", address: "memory-alice.example.com" })).clients.codex.approval, "set");
+  assert.match(await fsp.readFile(f.codexFile, "utf8"), /\[mcp_servers\.team-alice\.tools\.chat\]\napproval_mode = "approve"\n# mine\n/);
+
+  // A Codex whose remove left the table: Codex would read no config at all, so disconnect takes it away.
+  const old = await clientFixture(t, { keepsTools: true });
+  await teammateConnect({ ...old.options, name: "alice", address: "memory-alice.example.com" });
+  const gone = await teammateDisconnect({ ...old.options, name: "alice" });
+  assert.deepEqual(gone.clients.codex, { ok: true, action: "removed", approval: "removed" });
+  assert.equal(await fsp.readFile(old.codexFile, "utf8"), 'model = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other"\n');
+  // One with more in it than connecting wrote is the user's.
+  const theirs = 'model = "gpt-5"\n\n[mcp_servers.team-bob.tools.chat]\napproval_mode = "approve"\nenabled = false\n';
+  await fsp.writeFile(old.codexFile, theirs);
+  assert.deepEqual((await teammateDisconnect({ ...old.options, name: "bob" })).clients.codex, { ok: true, action: "absent" });
+  assert.equal(await fsp.readFile(old.codexFile, "utf8"), theirs);
+
+  // Another address changes only the url line; the rest of the entry stays.
+  const more = await clientFixture(t);
+  await fsp.appendFile(more.codexFile, '\n[mcp_servers.team-alice]\nurl = "https://memory-alice.example.com/mcp"  # theirs\nstartup_timeout_sec = 30\n');
+  const moved = await teammateConnect({ ...more.options, name: "alice", address: "memory-alice2.example.com" });
+  assert.deepEqual(moved.clients.codex, { ok: true, action: "replaced", approval: "set" });
+  assert.match(await fsp.readFile(more.codexFile, "utf8"), /\[mcp_servers\.team-alice\]\nurl = "https:\/\/memory-alice2\.example\.com\/mcp"  # theirs\nstartup_timeout_sec = 30\n\n\[mcp_servers\.team-alice\.tools\.chat\]/);
+  // An entry with no address is taken out by Codex and goes in anew.
+  await fsp.writeFile(more.codexFile, 'model = "gpt-5"\n\n[mcp_servers.team-alice]\ncommand = "alice"\n');
+  more.calls.length = 0;
+  assert.equal((await teammateConnect({ ...more.options, name: "alice", address: "memory-alice.example.com" })).clients.codex.action, "replaced");
+  assert.deepEqual(more.calls.filter((call) => call[0] === "codex"), [["codex", "--version"], ["codex", "mcp", "remove", "team-alice"]]);
+  assert.doesNotMatch(await fsp.readFile(more.codexFile, "utf8"), /command/);
+  // An entry kept as a key of [mcp_servers] is not touched: a second table would break the file.
+  const inline = 'model = "gpt-5"\n\n[mcp_servers]\nteam-alice = { command = "alice" }\n';
+  await fsp.writeFile(more.codexFile, inline);
+  const refused = await teammateConnect({ ...more.options, name: "alice", address: "memory-alice.example.com" });
+  assert.equal(refused.clients.codex.ok, false);
+  assert.match(refused.clients.codex.error, /form this app does not change/);
+  assert.equal(await fsp.readFile(more.codexFile, "utf8"), inline);
+  // No config.toml yet: it is made, under CODEX_HOME when that is set.
+  const fresh = path.join(more.root, "fresh-codex-home");
+  const made = await teammateConnect({ ...more.options, env: { CODEX_HOME: fresh }, name: "dave", address: "memory-dave.example.com" });
+  assert.equal(made.clients.codex.action, "added");
+  assert.equal(await fsp.readFile(path.join(fresh, "config.toml"), "utf8"), '[mcp_servers.team-dave]\nurl = "https://memory-dave.example.com/mcp"\n\n[mcp_servers.team-dave.tools.chat]\napproval_mode = "approve"\n');
+
+  // CODEX_HOME is where Codex keeps it; a config.toml that is a link stays one, its mode kept, CRLF kept.
+  if (process.platform !== "win32") {
+    const codexHome = path.join(f.root, "codex-home");
+    const real = path.join(f.root, "dotfiles", "config.toml");
+    await fsp.mkdir(codexHome, { recursive: true });
+    await fsp.mkdir(path.dirname(real), { recursive: true });
+    await fsp.writeFile(real, 'model = "gpt-5"\r\n', { mode: 0o600 });
+    await fsp.symlink(real, path.join(codexHome, "config.toml"));
+    const env = { CODEX_HOME: codexHome };
+    const runner = async () => ({ code: 0, stdout: "", stderr: "" });
+    const linked = await teammateConnect({ ...f.options, env, clientRunner: runner, name: "carol", address: "memory-carol.example.com" });
+    assert.equal(linked.clients.codex.approval, "set");
+    assert.equal((await fsp.lstat(path.join(codexHome, "config.toml"))).isSymbolicLink(), true);
+    assert.equal((await fsp.stat(real)).mode & 0o777, 0o600);
+    assert.equal(await fsp.readFile(real, "utf8"), 'model = "gpt-5"\r\n\r\n[mcp_servers.team-carol]\r\nurl = "https://memory-carol.example.com/mcp"\r\n\r\n[mcp_servers.team-carol.tools.chat]\r\napproval_mode = "approve"\r\n');
+  }
 });
 
 test("a missing client is named and the other is still connected; with neither, nothing is", async (t) => {
   const one = await clientFixture(t, { missing: ["codex"] });
+  const codexBefore = await fsp.readFile(one.codexFile, "utf8");
   const result = await teammateConnect({ ...one.options, name: "alice", address: "memory-alice.example.com" });
   assert.equal(result.ok, true);
   assert.deepEqual(result.missing, ["codex"]);
   assert.equal(result.clients.claude.action, "added");
   assert.match(result.clients.codex.error, /Codex \(codex\) was not found/);
+  assert.equal(await fsp.readFile(one.codexFile, "utf8"), codexBefore, "without a codex CLI its config is not written");
 
   const none = await clientFixture(t, { missing: ["claude", "codex"] });
   const nothing = await teammateConnect({ ...none.options, name: "alice", address: "memory-alice.example.com" });
@@ -429,38 +520,155 @@ function fakeChild() {
   return child;
 }
 
-test("Codex login runs codex mcp login team-<name> and answers with the address it printed, or when it ends", async (t) => {
-  const f = await clientFixture(t);
+// What Codex 0.160.1 printed for `codex mcp login --no-browser`, its query shortened.
+const NO_BROWSER_HELP = "Usage: codex mcp login [OPTIONS] <NAME>\n\nOptions:\n      --no-browser\n          Print the authorization URL and accept the callback URL without opening a browser\n";
+const NO_BROWSER_OUTPUT = "Authorize the MCP server by opening this URL in your browser:\nhttps://team.cloudflareaccess.com/cdn-cgi/access/oauth/authorization?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A53299%2Fcallback%2Fx\n\nAfter signing in, copy the full URL from your browser's address bar.\nIf the callback page cannot load, paste that URL here anyway.\n\n";
+
+test("Codex login runs codex mcp login --no-browser team-<name> and hands the page the address it printed; a Codex without the option opens its own browser", async (t) => {
+  const f = await clientFixture(t, { loginHelp: NO_BROWSER_HELP });
   assert.match((await codexLogin({ ...f.options, name: "alice" })).error, /not in Codex yet/);
   await teammateConnect({ ...f.options, name: "alice", address: "memory-alice.example.com" });
 
+  f.calls.length = 0;
   const spawned = [];
   const printing = fakeChild();
-  const waiting = await codexLogin({ ...f.options, name: "alice", waitMs: 5_000, loginSpawner: (_ctx, args) => {
-    spawned.push(args);
-    setImmediate(() => printing.stderr.emit("data", "Open this address to log in: https://login.example.com/authorize?client=team\n"));
+  const waiting = await codexLogin({ ...f.options, name: "alice", waitMs: 5_000, loginSpawner: (_ctx, args, binary) => {
+    spawned.push([args, binary]);
+    setImmediate(() => { printing.stdout.emit("data", NO_BROWSER_OUTPUT); printing.stderr.emit("data", "Callback URL (input hidden): "); });
     return printing;
   } });
-  assert.deepEqual(spawned, [["mcp", "login", "team-alice"]]);
-  assert.deepEqual(waiting, { entry: "team-alice", ok: true, state: "waiting", loginUrl: "https://login.example.com/authorize?client=team" });
+  assert.deepEqual(f.calls, [["codex", "mcp", "login", "--help"]]);
+  assert.deepEqual(spawned, [[["mcp", "login", "--no-browser", "team-alice"], null]], "the codex on PATH");
+  assert.deepEqual(waiting, {
+    entry: "team-alice",
+    noBrowser: true,
+    ok: true,
+    state: "waiting",
+    loginUrl: "https://team.cloudflareaccess.com/cdn-cgi/access/oauth/authorization?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A53299%2Fcallback%2Fx",
+  });
   printing.emit("exit", 0);
 
   const quick = fakeChild();
   const done = await codexLogin({ ...f.options, name: "alice", waitMs: 5_000, loginSpawner: () => { setImmediate(() => quick.emit("exit", 0)); return quick; } });
-  assert.deepEqual(done, { entry: "team-alice", ok: true, state: "done" });
+  assert.deepEqual(done, { entry: "team-alice", noBrowser: true, ok: true, state: "done" });
 
   const failing = fakeChild();
   const failed = await codexLogin({ ...f.options, name: "alice", waitMs: 5_000, loginSpawner: () => {
-    setImmediate(() => { failing.stderr.emit("data", "Error: the server refused the login\n"); failing.emit("exit", 1); });
+    setImmediate(() => { failing.stderr.emit("data", "Error: No OAuth callback URL received before input closed\n"); failing.emit("exit", 1); });
     return failing;
   } });
-  assert.deepEqual(failed, { entry: "team-alice", ok: false, state: "failed", error: "Error: the server refused the login" });
+  assert.deepEqual(failed, { entry: "team-alice", noBrowser: true, ok: false, state: "failed", error: "Error: No OAuth callback URL received before input closed" });
 
   const silent = fakeChild();
   const quiet = await codexLogin({ ...f.options, name: "alice", waitMs: 10, loginSpawner: () => silent });
-  assert.deepEqual(quiet, { entry: "team-alice", ok: true, state: "waiting", loginUrl: null });
+  assert.deepEqual(quiet, { entry: "team-alice", noBrowser: true, ok: true, state: "waiting", loginUrl: null });
   silent.emit("exit", 0);
   assert.equal((await codexLogin({ ...f.options, name: "alice", loginSpawner: () => null })).missing, true);
+
+  // The codex on PATH is 0.154, without --no-browser: the ChatGPT app's codex that has it logs in instead.
+  const OLD_HELP = "Usage: codex mcp login [OPTIONS] <NAME>\n\nOptions:\n      --scopes <SCOPE,SCOPE>\n";
+  const apps = await clientFixture(t);
+  const app = (name) => path.join(apps.root, "apps", name, "codex");
+  for (const name of ["old", "new", "plain"]) {
+    await fsp.mkdir(path.dirname(app(name)), { recursive: true });
+    await fsp.writeFile(app(name), "#!/bin/sh\n", { mode: name === "plain" && process.platform !== "win32" ? 0o644 : 0o755 });
+  }
+  const helps = { [app("new")]: NO_BROWSER_HELP, [app("plain")]: NO_BROWSER_HELP };
+  const appOptions = { ...apps.options, appCodexClis: [app("gone"), app("plain"), app("old"), app("new")] };
+  const appRunner = async (client, args, options = {}) => (args[1] === "login" && args[2] === "--help"
+    ? (apps.helpAsked.push(options.binary ?? null), { code: 0, stdout: helps[options.binary] ?? OLD_HELP, stderr: "" })
+    : apps.options.clientRunner(client, args, options));
+  await teammateConnect({ ...appOptions, name: "alice", address: "memory-alice.example.com" });
+  const fromApp = [];
+  const appLogin = await codexLogin({ ...appOptions, clientRunner: appRunner, name: "alice", waitMs: 5_000, loginSpawner: (_ctx, args, binary) => {
+    fromApp.push([args, binary]);
+    const child = fakeChild();
+    setImmediate(() => child.stdout.emit("data", NO_BROWSER_OUTPUT));
+    return child;
+  } });
+  assert.deepEqual(apps.helpAsked, process.platform === "win32" ? [null, app("plain")] : [null, app("old"), app("new")], "a missing or non-executable one is not asked");
+  assert.deepEqual(fromApp, [[["mcp", "login", "--no-browser", "team-alice"], process.platform === "win32" ? app("plain") : app("new")]]);
+  assert.equal(appLogin.noBrowser, true);
+  assert.match(appLogin.loginUrl, /^https:\/\/team\.cloudflareaccess\.com\//);
+
+  // None has --no-browser: today's login, which opens the default browser itself.
+  const older = await clientFixture(t, { loginHelp: OLD_HELP });
+  await teammateConnect({ ...older.options, name: "alice", address: "memory-alice.example.com" });
+  const plain = [];
+  const opening = fakeChild();
+  const fallback = await codexLogin({ ...older.options, appCodexClis: [app("old")], name: "alice", waitMs: 5_000, loginSpawner: (_ctx, args, binary) => {
+    plain.push(args);
+    assert.equal(binary, null);
+    setImmediate(() => opening.stdout.emit("data", "Authorize `team-alice` by opening this URL in your browser:\nhttps://login.example.com/authorize?client=team\n"));
+    return opening;
+  } });
+  assert.deepEqual(older.helpAsked, [null, app("old")]);
+  assert.deepEqual(plain, [["mcp", "login", "team-alice"]]);
+  assert.deepEqual(fallback, { entry: "team-alice", noBrowser: false, ok: true, state: "waiting", loginUrl: "https://login.example.com/authorize?client=team" });
+  opening.emit("exit", 0);
+  // A help that fails to run counts as no option, too.
+  const broken = await codexLogin({ ...older.options, name: "alice", waitMs: 10, clientRunner: async () => ({ code: 2, stdout: "--no-browser", stderr: "" }), loginSpawner: (_ctx, args) => { plain.push(args); return fakeChild(); } });
+  assert.equal(broken.noBrowser, false);
+  assert.deepEqual(plain.at(-1), ["mcp", "login", "team-alice"]);
+});
+
+test("the Codex login status: the login this app started while it runs and once when it ends, else what Codex holds, and nothing but the state", async (t) => {
+  const f = await clientFixture(t, { loginHelp: NO_BROWSER_HELP });
+  let auth = "not_logged_in";
+  let listFails = false;
+  const SECRET = "Bearer header-secret-0123";
+  // `codex mcp list --json` as 0.154 and 0.160 print it: every server in config.toml, with its headers.
+  const listing = async () => JSON.stringify([
+    { name: "other", enabled: true, auth_status: "unsupported", transport: { type: "streamable_http", url: "https://other.example.com/mcp", http_headers: { Authorization: SECRET } } },
+    ...((await fsp.readFile(f.codexFile, "utf8")).includes("[mcp_servers.team-alice]")
+      ? [{ name: "team-alice", enabled: true, auth_status: auth, transport: { type: "streamable_http", url: "https://memory-alice.example.com/mcp", http_headers: null } }]
+      : []),
+  ]);
+  const options = { ...f.options, clientRunner: async (client, args, more) => (args.join(" ") === "mcp list --json"
+    ? (f.calls.push([client, ...args]), { code: listFails ? 1 : 0, stdout: await listing(), stderr: listFails ? "Error: config.toml is broken\n" : "" })
+    : f.options.clientRunner(client, args, more)) };
+  assert.match((await codexLoginStatus({ ...options, name: "Not A Name" })).error, /short name/);
+  assert.match((await codexLoginStatus({ ...options, name: "alice" })).error, /not in Codex yet/);
+  await teammateConnect({ ...options, name: "alice", address: "memory-alice.example.com" });
+
+  // No login started here: what Codex holds.
+  const needed = await codexLoginStatus({ ...options, name: "alice" });
+  assert.deepEqual(needed, { ok: true, entry: "team-alice", state: "needed" });
+  auth = "o_auth";
+  const held = await codexLoginStatus({ ...options, name: "alice" });
+  assert.deepEqual(held, { ok: true, entry: "team-alice", state: "done" });
+  listFails = true;
+  const broken = await codexLoginStatus({ ...options, name: "alice" });
+  assert.deepEqual(broken, { ok: false, error: "Error: config.toml is broken" });
+  for (const answer of [needed, held, broken]) assert.equal(JSON.stringify(answer).includes(SECRET), false);
+  listFails = false;
+
+  // A login started: waiting while it runs, without asking Codex; done once it ends, then Codex again.
+  const first = fakeChild();
+  const login = (child) => codexLogin({ ...options, name: "alice", waitMs: 5_000, loginSpawner: () => { setImmediate(() => child.stdout.emit("data", NO_BROWSER_OUTPUT)); return child; } });
+  assert.equal((await login(first)).state, "waiting");
+  f.calls.length = 0;
+  assert.deepEqual(await codexLoginStatus({ ...options, name: "alice" }), { ok: true, entry: "team-alice", state: "waiting" });
+  assert.deepEqual(f.calls, []);
+  first.emit("exit", 0);
+  auth = "not_logged_in";
+  assert.deepEqual(await codexLoginStatus({ ...options, name: "alice" }), { ok: true, entry: "team-alice", state: "done" });
+  assert.deepEqual(await codexLoginStatus({ ...options, name: "alice" }), { ok: true, entry: "team-alice", state: "needed" }, "read back once");
+
+  // Starting again ends the login before it, whose end then changes nothing; the new one's failure is told once.
+  const older = fakeChild();
+  const newer = fakeChild();
+  await login(older);
+  await login(newer);
+  assert.equal(older.killed, true);
+  older.emit("exit", null);
+  assert.deepEqual(await codexLoginStatus({ ...options, name: "alice" }), { ok: true, entry: "team-alice", state: "waiting" });
+  newer.stderr.emit("data", "Error: OAuth provider returned `access_denied`\n");
+  newer.emit("exit", 1);
+  assert.deepEqual(await codexLoginStatus({ ...options, name: "alice" }), { ok: true, entry: "team-alice", state: "failed", error: "Error: OAuth provider returned `access_denied`" });
+  assert.equal((await codexLoginStatus({ ...options, name: "alice" })).state, "needed");
+
+  assert.equal((await codexLoginStatus({ ...options, name: "alice", clientRunner: async () => ({ missing: true }) })).missing, true);
 });
 
 test("the CLI connects, lists and disconnects through the real client commands on PATH", { skip: process.platform === "win32" }, async (t) => {
@@ -488,9 +696,8 @@ if (${JSON.stringify(client)} === "claude") {
 } else {
   const file = path.join(home, ".codex", "config.toml");
   let text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-  text = text.split("\\n[mcp_servers." + args[2] + "]")[0];
-  if (args[1] === "add") text += "\\n[mcp_servers." + args[2] + "]\\nurl = \\"" + args[4] + "\\"\\n";
-  fs.writeFileSync(file, text);
+  const at = args[1] === "remove" ? text.indexOf("[mcp_servers." + args[2] + "]") : -1;
+  if (at >= 0) fs.writeFileSync(file, text.slice(0, at));
 }
 `;
   for (const client of ["claude", "codex"]) await fsp.writeFile(path.join(bin, client), shim(client), { mode: 0o755 });
@@ -505,11 +712,13 @@ if (${JSON.stringify(client)} === "claude") {
   };
   const connected = await cli(["teammates", "connect", "alice", "https://memory-alice.example.com/mcp"], env);
   assert.equal(connected.code, 0, connected.stdout + connected.stderr);
-  assert.deepEqual(connected.json.clients, { claude: { ok: true, action: "added" }, codex: { ok: true, action: "added" } });
+  assert.deepEqual(connected.json.clients, { claude: { ok: true, action: "added" }, codex: { ok: true, action: "added", approval: "set" } });
+  assert.equal(await fsp.readFile(path.join(home, ".codex", "config.toml"), "utf8"),
+    '[mcp_servers.team-alice]\nurl = "https://memory-alice.example.com/mcp"\n\n[mcp_servers.team-alice.tools.chat]\napproval_mode = "approve"\n');
   const calls = (await fsp.readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(calls, [
     ["claude", "mcp", "add", "--transport", "http", "--scope", "user", "team-alice", "https://memory-alice.example.com/mcp"],
-    ["codex", "mcp", "add", "team-alice", "--url", "https://memory-alice.example.com/mcp"],
+    ["codex", "--version"],
   ]);
   const listed = await cli(["teammates", "connected"], env);
   assert.equal(listed.json.connected, 1);
@@ -517,6 +726,7 @@ if (${JSON.stringify(client)} === "claude") {
   assert.equal((await cli(["teammates", "connect", "alice", "memory-alice.example.com"], env)).json.clients.codex.action, "unchanged");
   const gone = await cli(["teammates", "disconnect", "alice"], env);
   assert.deepEqual(gone.json.clients, { claude: { ok: true, action: "removed" }, codex: { ok: true, action: "removed" } });
+  assert.equal(await fsp.readFile(path.join(home, ".codex", "config.toml"), "utf8"), "");
   const bad = await cli(["teammates", "connect", "alice", "http://memory-alice.example.com"], env);
   assert.equal(bad.json.ok, false);
   assert.match(bad.json.error, /https/);

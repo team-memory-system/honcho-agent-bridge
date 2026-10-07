@@ -5,7 +5,8 @@
 import { get } from "./lib/api.js";
 import { h, clear, svg, $ } from "./lib/dom.js";
 import { mountBell, refreshBell } from "./lib/bell.js";
-import { watchRequests } from "./lib/requests.js";
+import { requestsLoginRefused, watchRequests } from "./lib/requests.js";
+import { joinedTeam, watchTeamLogin } from "./lib/team.js";
 import { TABS } from "./lib/tabs.js";
 import { icon } from "./lib/icons.js";
 import { app, go, loadContext, me, onChange, refreshStatus, workspace } from "./lib/state.js";
@@ -113,9 +114,9 @@ function teamConnected() {
   return Boolean(app.context?.teamMemory?.connected);
 }
 
-/** Logged in to a team, and first setup ran to its end on this computer. */
+/** Logged in to a team (or its login ended, to be done again), and first setup ran to its end on this computer. */
 function teamJoined() {
-  return Boolean(app.context?.team?.hub && app.context?.team?.signedIn && app.prefs.mode);
+  return joinedTeam(app.context?.team, app.prefs.mode);
 }
 
 function setupDone() {
@@ -401,9 +402,15 @@ async function boot() {
     return;
   }
   mountBell($(".main"));
-  // The team's requests go to the bell once this computer is in a team.
-  if (app.context?.team?.hub) watchRequests();
-  onChange(() => { if (app.context?.team?.hub) watchRequests(); });
+  // The team's requests, and a team login that ended, go to the bell once this
+  // computer is in a team.
+  const watchTeam = () => {
+    if (!app.context?.team?.hub) return;
+    watchRequests();
+    watchTeamLogin({ onDone: () => show({ force: true }), refused: requestsLoginRefused });
+  };
+  watchTeam();
+  onChange(watchTeam);
   window.addEventListener("hashchange", () => show());
   const firstStatus = refreshStatus();
   // Whether this computer is set up, and whether 기억 opens, depend on the first

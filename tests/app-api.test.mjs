@@ -284,7 +284,18 @@ test("the team as the page sees it: who the hub said this is, what was made here
   }));
   const member = await context();
   assert.deepEqual([member.team.admin, member.team.email, member.team.peer, member.team.name, member.team.signedIn, member.team.serversSignedIn], [false, "bob@example.com", "bob", "예시 팀", true, false]);
+  assert.equal(member.team.loginEnded, null);
   for (const secret of ["cf-secret-token", "oauth:secret-access", "secret-refresh", "s".repeat(43)]) {
     assert.equal(JSON.stringify(member).includes(secret), false, "no token reaches the page");
   }
+
+  // The hub login Access stopped refreshing: still this team's member, with the login to do again.
+  const ended = { at: "2026-10-07T00:00:00.000Z", email: "bob@example.com", host: "team.example.com" };
+  await fsp.writeFile(authFile, JSON.stringify({
+    hub: "team.example.com", email: "bob@example.com", me: { peer: "bob", admin: false, team: "예시 팀" },
+    logins: {}, ended: { hub: ended },
+  }));
+  const gone = (await context()).team;
+  assert.deepEqual([gone.hub, gone.email, gone.signedIn], ["team.example.com", "bob@example.com", false]);
+  assert.deepEqual(gone.loginEnded, ended);
 });

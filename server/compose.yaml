@@ -97,6 +97,12 @@ services:
       # The Team Memory app is the screen; this container keeps only the /api routes
       # the app relays (tool switches, audit log) and sends a browser to the app.
       DASHBOARD_APP_URL: "http://127.0.0.1:${HONCHO_AGENT_BRIDGE_UI_PORT:-4180}/"
+      # 조회 기록: the audit log is read from the mcp service's /audit, with the team
+      # MCP token that service checks. mcp runs only while the server is shared, so
+      # otherwise the read fails (502) and the app says sharing is off; nothing here
+      # waits for it.
+      HONCHO_MCP_AUDIT_URL: http://mcp:8765/audit
+      HONCHO_MCP_BEARER_TOKEN: ${HONCHO_TEAM_MCP_TOKEN:-}
     ports:
       - "127.0.0.1:${HONCHO_DASHBOARD_PORT:-4173}:4173"
     volumes:
@@ -154,7 +160,8 @@ services:
   # caller sent, so with HONCHO_MCP_SCOPE_FROM_GATE the bridge trusts these, and a
   # teammate's `chat` answers only from the projects opened to them. It answers
   # `chat` alone, over one workspace as one peer; callers cannot point it at another
-  # by header or argument.
+  # by header or argument. Its /audit, the record of those calls, is for the
+  # dashboard only: it is not under /mcp, so the gate never passes it on.
   mcp:
     image: honcho-agent-bridge-mcp:${HONCHO_IMAGE_TAG:-local}
     build:
@@ -175,7 +182,18 @@ services:
       # Every call is recorded, with the caller's email, in a schema of its own here.
       HONCHO_AUDIT_DSN: postgresql://postgres:${POSTGRES_PASSWORD}@database:5432/postgres
       HONCHO_AUDIT_BRIDGE: team
+      HONCHO_AUDIT_READ: "1"
       HONCHO_MCP_SCOPE_FROM_GATE: "1"
+      # Jev judges each teammate's `chat` question first and refuses one about the
+      # owner's private life rather than shared work. Off while HONCHO_JEV_GATE is
+      # empty; on with 1 and a TYPESAFE_API_KEY, both only in the private .env.
+      HONCHO_JEV_GATE: ${HONCHO_JEV_GATE:-}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      TYPESAFE_BASE_URL: ${TYPESAFE_BASE_URL:-}
+      HONCHO_JEV_MODEL: ${HONCHO_JEV_MODEL:-}
+      HONCHO_JEV_THRESHOLD: ${HONCHO_JEV_THRESHOLD:-0.7}
+      HONCHO_JEV_FAIL_MODE: ${HONCHO_JEV_FAIL_MODE:-open}
+      HONCHO_JEV_TOOLS: ${HONCHO_JEV_TOOLS:-chat}
     # The bridge has no health route; any HTTP answer (401 without the token) means
     # it is serving.
     healthcheck:

@@ -1,5 +1,6 @@
 // The app's own read-only routes for the folder picker, the project list and the
-// dashboard's flow, and the hour the nightly backup runs at.
+// dashboard's flow, the projects the memory server can open to a teammate, and the
+// hour the nightly backup runs at.
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -120,6 +121,51 @@ test("the project route reads the transcripts the configuration names", async ()
   assert.deepEqual(listed.agents, { claude: 1, codex: 1 });
   assert.equal(listed.exists, true);
   assert.match(listed.lastAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+});
+
+test("the projects to open to a teammate are the memory server's, and one that cannot be read says so", async () => {
+  // A stand-in memory server: one project's session from another computer, and one
+  // an automation ran at /.
+  const sessions = [
+    { id: "a", metadata: { project_id: "p-0123456789ab", project_name: "flypiano", cwd: "/Users/someone/dev/flypiano", last_imported_at: "2026-10-07T10:00:00.000Z" } },
+    { id: "b", metadata: { cwd: "/" } },
+  ];
+  const honcho = http.createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      const url = new URL(request.url, "http://honcho");
+      if (request.method !== "POST" || url.pathname !== "/v3/workspaces/memory/sessions/list") {
+        response.writeHead(404).end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ items: sessions, total: sessions.length, page: 1, size: 100, pages: 1 }));
+    });
+  });
+  await new Promise((resolve) => honcho.listen(0, "127.0.0.1", resolve));
+  const empty = path.join(workdir, "no-transcripts");
+  await fsp.mkdir(empty, { recursive: true });
+  await fsp.mkdir(process.env.HONCHO_AGENT_BRIDGE_HOME, { recursive: true });
+  await fsp.writeFile(path.join(process.env.HONCHO_AGENT_BRIDGE_HOME, "config.json"), JSON.stringify({
+    version: 1,
+    honcho: { baseUrl: `http://127.0.0.1:${honcho.address().port}`, workspaceId: "memory" },
+    sources: { claude: { root: empty }, codex: { root: empty } },
+  }));
+
+  assert.equal((await send("/api/team/projects")).status, 405);
+  const listed = await send("/api/team/projects", { method: "POST", body: { keep: [{ id: "p-abcdef012345", name: "kept" }, { id: "nope" }] } });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.ok, true);
+  assert.deepEqual(listed.body.projects, [
+    { id: "p-0123456789ab", name: "flypiano", sessions: 1, lastAt: "2026-10-07T10:00:00.000Z", folder: "/Users/someone/dev/flypiano" },
+    { id: "p-abcdef012345", name: "kept", sessions: 0, lastAt: null, folder: null },
+  ]);
+
+  await new Promise((resolve) => honcho.close(resolve));
+  const down = await send("/api/team/projects", { method: "POST", body: {} });
+  assert.equal(down.body.ok, false);
+  assert.equal(down.body.projects, undefined);
+  assert.match(down.body.error, /^기억 서버에서 프로젝트를 읽지 못했습니다 \(ECONNREFUSED\)\.$/);
 });
 
 test("the flow route counts what waits to go and what went, for the agents that collect", async () => {

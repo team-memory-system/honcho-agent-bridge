@@ -28,7 +28,7 @@ import {
   setupBody,
 } from "../lib/collect.js";
 import { gatewayLogin } from "../lib/login.js";
-import { registerWith, sendRequest, teamCall, teamDirectory, teamHostOf, teamLogin, teamMe } from "../lib/team.js";
+import { GOOGLE_ADD_ACCOUNT, loginTab, registerWith, sameAccountAgain, sendRequest, switchAccount, teamDirectory, teamHostOf, teamLogin, teamMe } from "../lib/team.js";
 import { app, loadContext, refreshStatus, savePrefs } from "../lib/state.js";
 import { button, notice, spinner, tag } from "../lib/ui.js";
 
@@ -63,15 +63,6 @@ function joined(names) {
   return `${names.slice(0, -1).join(", ")}와 ${names.at(-1)}`;
 }
 
-/** A blank tab opened in the click that asked, for the login to go to (a later one is blocked). */
-function loginTab(message) {
-  const tab = window.open("", "_blank");
-  try {
-    tab?.document.write(`<!doctype html><meta charset="utf-8"><title>팀 메모리</title><p style="font:15px system-ui,sans-serif;color:#57534b;margin:40px">${message}</p>`);
-  } catch {}
-  return tab;
-}
-
 /**
  * Opens the window. `firstRun` keeps it open until setup is done; `team` is the
  * team's address from a team link. `onDone(screen)` hears which screen to open
@@ -81,7 +72,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
   const state = {
     path: link ? "link" : null,
     team: { hub: link, me: null, directory: null, name: "", apiToken: "", email: "", zone: "", hubLabel: "" },
-    login: { phase: "idle", error: "", tab: null, reopen: null, issuer: null },
+    login: { phase: "idle", error: "", tab: null, reopen: null, logouts: null, switchFrom: null, sameAccount: false },
     draft: collectDraft(app.context),
     models: { chosen: new Set(["codex"]), counts: { codex: 1, claude: 1 } },
     mates: new Set(),
@@ -184,16 +175,26 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
       return {
         body: h("div", {}, h("h3", {}, "이 이메일은 팀 명단에 없습니다"),
           h("div", { class: "idbox" }, h("span", { class: "mono" }, login.email || "")),
+          // Google picks the only account a browser is signed in to without asking.
+          login.sameAccount ? notice("warn", "Google이 같은 계정을 다시 골랐습니다. 브라우저에 Google 계정이 하나뿐이면 Google은 묻지 않고 그 계정으로 로그인합니다. ",
+            h("a", { href: GOOGLE_ADD_ACCOUNT, target: "_blank", rel: "noreferrer" }, "다른 Google 계정 추가"),
+            "에서 쓸 계정을 브라우저에 더한 뒤 다른 계정으로 로그인을 다시 누르세요.") : null,
           h("p", { class: "lead", style: { marginTop: "12px" } }, "이 이메일을 팀 관리자에게 보내고, 등록되면 다시 로그인을 누르세요.")),
         foot: [
           button("다른 계정으로 로그인", { kind: "quiet", onClick: () => {
-            // Access forgets the login, so Google asks which account this time.
-            const issuer = login.issuer?.();
-            if (issuer) window.open(`${issuer}/cdn-cgi/access/logout`, "_blank", "noopener");
-            teamCall("/api/team/logout", {}).catch(() => {});
-            login.phase = "idle";
-            login.tab = loginTab("Google 로그인으로 넘어가는 중입니다…");
+            // Access forgets the login on both of its domains, then the login starts
+            // again in the same tab and Google is asked which account.
+            const tab = loginTab("로그아웃하는 중입니다…");
+            const logouts = login.logouts?.() || [];
+            login.switchFrom = login.email || null;
+            login.phase = "leaving";
+            login.reopen = null;
             drawStep();
+            switchAccount(tab, logouts).then(() => {
+              login.phase = "idle";
+              login.tab = tab;
+              if (keys[at] === "login") drawStep();
+            });
           } }),
           button("이메일 복사", { onClick: async () => { await copyText(login.email || ""); } }),
           button("다시 로그인", { kind: "primary", onClick: (event) => recheck(event.currentTarget) }),
@@ -213,12 +214,13 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
       };
     }
     if (login.phase === "idle") startLogin();
+    const leaving = login.phase === "leaving";
     return {
       body: h("div", {}, h("h3", {}, "브라우저에서 Google 로그인을 마치세요"),
         h("div", { class: "idbox" }, state.team.name ? h("b", {}, state.team.name) : null, host),
-        h("div", { class: "waitline" }, spinner(), "로그인을 기다리는 중입니다."),
-        h("div", { class: "hint" }, "브라우저가 열리지 않았으면 브라우저 다시 열기를 누르세요.")),
-      foot: [button("브라우저 다시 열기", { onClick: () => login.reopen?.() })],
+        h("div", { class: "waitline" }, spinner(), leaving ? "이전 계정에서 로그아웃하는 중입니다." : "로그인을 기다리는 중입니다."),
+        h("div", { class: "hint" }, "브라우저가 열리지 않았거나 로그인 창이 오류를 보이면 브라우저 다시 열기를 누르세요. 로그인을 새로 시작합니다.")),
+      foot: [button("브라우저 다시 열기", { disabled: leaving, onClick: () => login.reopen?.() })],
       check: () => "브라우저에서 로그인을 마치세요.",
     };
   }
@@ -232,7 +234,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     try {
       const flow = teamLogin({ kind: "hub", hub: state.team.hub, tab: login.tab, signal: controller.signal });
       login.reopen = flow.reopen;
-      login.issuer = flow.issuer;
+      login.logouts = flow.logouts;
       await flow.done;
       login.tab = null;
       await admit();
@@ -249,6 +251,9 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     const { login } = state;
     const who = await teamMe(state.team.hub);
     login.email = who.email;
+    // After 다른 계정으로 로그인: the same email again means Google chose the same account.
+    login.sameAccount = !who.member && sameAccountAgain(login.switchFrom, who.email);
+    login.switchFrom = null;
     if (!who.member) {
       login.phase = "denied";
       if (keys[at] === "login") drawStep();

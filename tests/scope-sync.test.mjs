@@ -1,14 +1,16 @@
 // Filling the scope of each project opened to a teammate. What matters: a session
 // the collector tagged with the project goes in, so do the project's sessions sent
-// before the tag (by their folder here, or a folder of the same name elsewhere),
-// nothing else does, and a second run sends only what is new.
+// before the tag (by their folder's project here, or a folder of the same name
+// elsewhere), each to one project only, never to one in a folder above it; nothing
+// else does, and a second run sends only what is new. The window that opens projects
+// lists exactly the ones the server would fill, with what they would get.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { scopeStatePath, syncScopes } from "../scripts/scope-sync.mjs";
+import { scopeStatePath, serverProjects, syncScopes } from "../scripts/scope-sync.mjs";
 
 const HONCHO = { id: "p-0123456789ab", name: "honcho" };
 const OTHER = { id: "p-abcdef012345", name: "web-app" };
@@ -52,14 +54,31 @@ async function tempConfig(t) {
   return { version: 1, honcho: { baseUrl: "http://honcho.test", workspaceId: "memory" }, paths: { dataDir: path.join(dir, "data") } };
 }
 
+/** A home folder on disk (its real path), for the folders sessions ran in to be read as projects. */
+async function tempHome(t) {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "scope-sync-home-")));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const home = path.join(dir, "home");
+  await fs.mkdir(home, { recursive: true });
+  return home;
+}
+
+/** A repository at `folder`, with the folders inside it named in `inside`. */
+async function repository(folder, ...inside) {
+  await fs.mkdir(path.join(folder, ".git"), { recursive: true });
+  for (const name of inside) await fs.mkdir(path.join(folder, name), { recursive: true });
+  return folder;
+}
+
 test("an opened project's scope gets its tagged sessions and its earlier ones, once each", async (t) => {
   const config = await tempConfig(t);
-  const here = path.join(os.tmpdir(), "dev", "honcho");
+  const home = await tempHome(t);
+  const here = await repository(path.join(home, "dev", "honcho"), "server");
   const sessions = [
     { id: "tagged", metadata: { project_id: HONCHO.id, cwd: "/elsewhere" } },
     { id: "here-before-tags", metadata: { cwd: path.join(here, "server") } },
     { id: "same-name-other-computer", metadata: { cwd: "C:\\Users\\x\\dev\\Honcho" } },
-    { id: "unrelated", metadata: { cwd: "/home/me/dev/notes" } },
+    { id: "unrelated", metadata: { cwd: "/Users/me/dev/notes" } },
     { id: "other-project", metadata: { project_id: OTHER.id, cwd: path.join(here, "x") } },
     { id: "no-folder", metadata: {} },
   ];
@@ -68,7 +87,7 @@ test("an opened project's scope gets its tagged sessions and its earlier ones, o
   const fake = fakeHoncho(sessions);
   const local = [{ path: here, name: "honcho", scope: HONCHO.id }];
 
-  const first = await syncScopes({ config, projects: [HONCHO, { id: "bad", name: "x" }], fetchImpl: fake.fetchImpl, local });
+  const first = await syncScopes({ config, projects: [HONCHO, { id: "bad", name: "x" }], fetchImpl: fake.fetchImpl, local, home });
   assert.equal(first.ok, true);
   assert.equal(first.scopes.length, 1, "only a real scope id is synced");
   const members = fake.scopes.get(HONCHO.id);
@@ -84,7 +103,7 @@ test("an opened project's scope gets its tagged sessions and its earlier ones, o
   // Again: the earlier sessions are not looked for twice, and nothing is sent twice.
   sessions.push({ id: "new-turn", metadata: { project_id: HONCHO.id } });
   fake.calls.length = 0;
-  const second = await syncScopes({ config, projects: [HONCHO], fetchImpl: fake.fetchImpl, local });
+  const second = await syncScopes({ config, projects: [HONCHO], fetchImpl: fake.fetchImpl, local, home });
   assert.equal(second.scopes[0].added, 1);
   assert.equal(fake.calls.filter((call) => call.endsWith("/sessions/list")).length, 2, "two pages of the tagged listing, no full scan");
   const state = JSON.parse(await fs.readFile(scopeStatePath(config), "utf8"));
@@ -98,4 +117,77 @@ test("nothing opened, nothing asked", async (t) => {
   const result = await syncScopes({ config, projects: [], fetchImpl: fake.fetchImpl, local: [] });
   assert.deepEqual(result.scopes, []);
   assert.deepEqual(fake.calls, []);
+});
+
+test("the projects to open are the server's, counted as their scopes would fill, newest first", async (t) => {
+  const config = await tempConfig(t);
+  const home = await tempHome(t);
+  const here = await repository(path.join(home, "dev", "honcho"), "server");
+  const IDLE = { id: "p-111111111111", name: "idle" };
+  const KEPT = { id: "p-222222222222", name: "kept" };
+  const sessions = [
+    { id: "tagged", metadata: { project_id: HONCHO.id, project_name: "honcho", cwd: "/elsewhere/honcho", last_imported_at: "2026-10-01T00:00:00.000Z" } },
+    { id: "here-before-tags", metadata: { cwd: path.join(here, "server"), last_imported_at: "2026-09-01T00:00:00.000Z" } },
+    { id: "same-name-other-computer", metadata: { cwd: "C:\\Users\\x\\dev\\Honcho" } },
+    { id: "only-on-another-computer", metadata: { project_id: OTHER.id, project_name: "web-app", cwd: "/home/kim/dev/web-app/src", last_imported_at: "2026-10-05T00:00:00.000Z" } },
+    { id: "unrelated", metadata: { cwd: "/Users/me/dev/notes" } },
+    { id: "automation", metadata: { cwd: "/" } },
+    { id: "no-folder", metadata: {} },
+    { id: "odd-tag", metadata: { project_id: "x", cwd: path.join(here, "y") } },
+  ];
+  for (let index = 0; index < 250; index += 1) {
+    sessions.push({ id: `bulk-${index}`, created_at: "2026-08-01T00:00:00Z", metadata: { project_id: HONCHO.id, project_name: "honcho" } });
+  }
+  const fake = fakeHoncho(sessions);
+  // This computer's projects: one with sessions on the server, one with none there.
+  const local = [{ path: here, name: "honcho", scope: HONCHO.id }, { path: path.join(home, "dev", "idle"), name: "idle", scope: IDLE.id }];
+
+  const listed = await serverProjects({ config, keep: [KEPT, { id: "bad", name: "x" }], fetchImpl: fake.fetchImpl, local, home });
+  assert.equal(listed.ok, true);
+  assert.deepEqual(listed.projects.map((project) => [project.id, project.name, project.sessions, project.lastAt, project.folder]), [
+    [OTHER.id, "web-app", 1, "2026-10-05T00:00:00.000Z", "/home/kim/dev/web-app/src"],
+    [HONCHO.id, "honcho", 253, "2026-10-01T00:00:00.000Z", here],
+    [KEPT.id, "kept", 0, null, null],
+  ], "the idle project has nothing on the server; the kept one stays with none");
+  assert.equal(fake.calls.filter((call) => call.endsWith("/sessions/list")).length, 3, "one listing of the workspace");
+  assert.equal(fake.scopes.size, 0, "listing makes no scope");
+
+  // What the window shows is what opening those projects puts in their scopes.
+  await syncScopes({ config, projects: listed.projects, fetchImpl: fake.fetchImpl, local, home });
+  for (const project of listed.projects) assert.equal(fake.scopes.get(project.id).size, project.sessions, project.name);
+});
+
+test("a session sent before the tag goes to its own folder's project only, never to one in a folder above it", async (t) => {
+  const config = await tempConfig(t);
+  const home = await tempHome(t);
+  const repo = await repository(path.join(home, "dev", "repo"), "src");
+  await fs.mkdir(path.join(home, "notes"));
+  // This computer's projects: the home folder itself ("~") and a repository inside it.
+  const HOME = { id: "p-333333333333", name: "~" };
+  const REPO = { id: "p-444444444444", name: "repo" };
+  const local = [{ path: home, name: "~", scope: HOME.id }, { path: repo, name: "repo", scope: REPO.id }];
+  const sessions = [
+    { id: "in-the-repo", metadata: { cwd: path.join(repo, "src") } },
+    { id: "at-the-repo", metadata: { cwd: repo } },
+    { id: "in-home", metadata: { cwd: home } },
+    { id: "in-a-plain-folder-under-home", metadata: { cwd: path.join(home, "notes") } },
+    { id: "repo-on-another-computer", metadata: { cwd: "/Users/kim/dev/repo" } },
+    { id: "inside-it-on-another-computer", metadata: { cwd: "/Users/kim/dev/repo/src" } },
+  ];
+  const fake = fakeHoncho(sessions);
+
+  const listed = await serverProjects({ config, fetchImpl: fake.fetchImpl, local, home });
+  assert.deepEqual(listed.projects.map((project) => [project.name, project.sessions]).sort(), [["repo", 3], ["~", 1]]);
+
+  // Opening the home folder's project gives it what ran in the home folder and nothing under it.
+  await syncScopes({ config, projects: [HOME], fetchImpl: fake.fetchImpl, local, home });
+  assert.deepEqual([...fake.scopes.get(HOME.id)], ["in-home"]);
+  await syncScopes({ config, projects: [REPO], fetchImpl: fake.fetchImpl, local, home });
+  assert.deepEqual([...fake.scopes.get(REPO.id)].sort(), ["at-the-repo", "in-the-repo", "repo-on-another-computer"]);
+});
+
+test("a server that cannot be read is an error, not an empty list", async (t) => {
+  const config = await tempConfig(t);
+  const fetchImpl = async () => { throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) }); };
+  await assert.rejects(serverProjects({ config, fetchImpl, local: [] }), /fetch failed/);
 });

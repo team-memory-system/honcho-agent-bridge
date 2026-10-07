@@ -418,7 +418,7 @@ test("the team routes check every name, email and address before the CLI sees it
 });
 
 test("the team routes answer a same-origin POST only, and the shared-bridge routes are gone", async () => {
-  for (const route of ["/api/teammates", "/api/teammates/add", "/api/teammates/remove", "/api/teammates/unshare", "/api/teammates/connected", "/api/teammates/connect", "/api/teammates/disconnect", "/api/teammates/codex-login", "/api/bridge/disconnect", "/api/server/share/join"]) {
+  for (const route of ["/api/teammates", "/api/teammates/add", "/api/teammates/remove", "/api/teammates/unshare", "/api/teammates/connected", "/api/teammates/connect", "/api/teammates/disconnect", "/api/teammates/codex-login", "/api/teammates/codex-login-status", "/api/bridge/disconnect", "/api/server/share/join"]) {
     const read = await send(route);
     assert.equal(read.status, 405, route);
     const crossSite = await send(route, { method: "POST", body: {}, headers: { origin: "http://evil.example" } });

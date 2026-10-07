@@ -142,6 +142,9 @@ async function teamContext(options = {}) {
     peer: login?.peer || null,
     signedIn: Boolean(login?.hubLogin?.signedIn),
     serversSignedIn: Boolean(login?.serversLogin?.signedIn),
+    // A hub login Access stopped refreshing (when, whose, where): still in the team,
+    // with 다시 로그인 to do.
+    loginEnded: login?.hubLogin?.ended || null,
     made,
     // Kept for screens that ask for these by their old names.
     ownerEmail: made?.ownerEmail || null,

@@ -110,6 +110,7 @@ export const GATE_SERVICE = "gate";
 export const MCP_SERVICE = "mcp";
 export const TUNNEL_SERVICE = "tunnel";
 export const SHARE_SERVICES = Object.freeze([GATE_SERVICE, MCP_SERVICE, TUNNEL_SERVICE]);
+const DASHBOARD_SERVICE = "dashboard";
 /** What the gate needs before /mcp answers at all. */
 export const MCP_SETTINGS = Object.freeze(["HONCHO_ACCESS_TEAM_DOMAIN", "HONCHO_ACCESS_AUD", "HONCHO_TEAM_MCP_TOKEN"]);
 export const DEFAULT_SHARE_NAME = "memory";
@@ -570,8 +571,10 @@ async function openShare(ctx, values) {
   const updated = replaceEnvironment(text, next);
   if (updated !== text) await writeEnvironment(ctx, updated);
 
-  // A changed token or setting recreates that container; an unchanged one is left alone.
-  const up = await composeCall(ctx, ["up", "-d", ...SHARE_SERVICES], 900_000);
+  // A changed token or setting recreates that container; an unchanged one is left
+  // alone. The dashboard reads the audit log from mcp with the team MCP token, so it
+  // comes too: made here the first time, the token is new to it.
+  const up = await composeCall(ctx, ["up", "-d", ...SHARE_SERVICES, DASHBOARD_SERVICE], 900_000);
   if (!up.ok) {
     return {
       ok: false,

@@ -213,7 +213,7 @@ export default {
         const data = await get(`/api/dashboard/audit?${query}`);
         if (id !== request) return;
         if (data.enabled === false) {
-          drawUnavailable(notice("", "조회 기록이 켜져 있지 않습니다. 기억 서버의 브리지에 HONCHO_AUDIT_DSN을 설정하면 남기 시작합니다."));
+          drawUnavailable(notice("", h("b", {}, "이 기억 서버는 아직 조회 기록을 보여 주지 않습니다."), " 서버에서 기억 서버를 멈췄다가 다시 시작하면 보입니다."));
           return;
         }
         rows = data.rows || [];
@@ -225,9 +225,13 @@ export default {
         clear(callers, [...new Set(rows.map((row) => row.caller).filter(Boolean))].sort().map((name) => h("option", { value: name })));
       } catch (error) {
         if (id !== request) return;
+        // The dashboard names the address it could not reach (audit_url) when the team
+        // MCP bridge, which reads the log, is not running: almost always, sharing is off.
         drawUnavailable(error.unreachable
           ? notice("", "이 컴퓨터에서는 조회 기록에 닿지 않습니다. 기억 서버를 둔 컴퓨터에서 여세요.")
-          : errorNotice(error));
+          : error.payload?.audit_url
+            ? notice("", h("b", {}, "공유가 꺼져 있어 조회 기록을 볼 수 없습니다."), " 서버 → 공유에서 켜면 그동안 남은 기록이 다시 보입니다. 공유가 켜져 있는데도 이렇게 보이면 기억 서버를 다시 시작하세요.")
+            : errorNotice(error));
       }
     }
 

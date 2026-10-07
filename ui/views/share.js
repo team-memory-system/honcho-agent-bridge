@@ -10,7 +10,7 @@ import { cli, get, post } from "../lib/api.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { screenTabs } from "../lib/tabs.js";
 import { block, confirmWindow, kv, list, listItem } from "../lib/kit.js";
-import { ago, teamCall } from "../lib/team.js";
+import { ago, loginEndedText, teamCall } from "../lib/team.js";
 import { button, busy, errorNotice, notice, pageHead, spinner, statusTag, tag, toast } from "../lib/ui.js";
 
 /** 서버 → 공유: the switch, and with it on, the address and the server token. */
@@ -93,7 +93,7 @@ function teamShareOff(redraw) {
     kv("팀", "내 다른 컴퓨터와 승인한 팀원이 이 서버에 닿지 못합니다.",
       button("다시 켜기", { kind: "primary small", onClick: (event) => busy(event.currentTarget, async () => {
         const result = await post("/api/team/share", { replace: true });
-        if (!result.ok) throw new Error(result.error || "다시 켜지 못했습니다.");
+        if (!result.ok) throw new Error(result.code === "login_needed" ? loginEndedText({ kind: result.kind }) : result.error || "다시 켜지 못했습니다.");
         await redraw(false);
       }, { done: "공유를 켰습니다" }) })));
 }

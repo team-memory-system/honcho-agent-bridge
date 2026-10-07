@@ -3,12 +3,14 @@
 // date, how many conversations wait here to go, when the last one went, and how
 // many the server holds (/api/app/flow, the memory server's own count), asked again
 // every 10 seconds; under it, how far Honcho has got putting them in order. Then
-// the parts around it, asked every minute: the gateway, backup, and sharing.
+// the parts around it, asked every minute: the gateway, backup, and sharing. A team
+// login that ended says so on top, with 다시 로그인.
 import { get, honcho, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { ago, number } from "../lib/format.js";
 import { sameServer } from "../lib/collect.js";
 import { app, onChange, workspace } from "../lib/state.js";
+import { loginNotice } from "../lib/team.js";
 import { pageHead, spinner } from "../lib/ui.js";
 
 const FAST = 10_000;
@@ -169,10 +171,15 @@ export default {
     );
     let live = null;
     let around = null;
+    // Kept across redraws while the same login stays ended, so 다시 로그인 is not redrawn mid-login.
+    let ended = null;
 
     function draw() {
       if (!live || !around) { clear(body, spinner()); return; }
       const context = app.context || {};
+      const gone = context.team?.hub && !context.team.signedIn ? context.team.loginEnded : null;
+      if (!gone) ended = null;
+      else if (ended?.at !== gone.at) ended = { at: gone.at, node: loginNotice({ kind: "hub", email: gone.email || "", host: gone.host || "", onDone: draw }) };
       const shown = context.configured || context.localServer;
       const tiles = [
         serverHere() ? gatewayTile() : null,
@@ -180,6 +187,7 @@ export default {
         context.localServer ? shareTile(around.share) : teamTile(),
       ].filter(Boolean);
       clear(body,
+        ended?.node || null,
         shown ? h("section", { "aria-label": "동기화 현황" },
           h("h2", { class: "sec" }, "동기화 현황"),
           h("div", { class: "card" }, h("table", { class: "sync" },

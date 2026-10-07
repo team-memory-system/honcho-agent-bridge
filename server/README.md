@@ -56,12 +56,20 @@ The doors:
 Each refusal leaves a `refused` line with the door and its reason, never an email
 or a key, in the gate's log.
 
-`mcp` is honcho-selfhost's `local-mcp-bridge`, built from
-`honcho/local-mcp-bridge`. It answers `chat` only, pinned to
-`HONCHO_TEAM_WORKSPACE` (default `memory`) and `HONCHO_TEAM_PEER`; with
-`HONCHO_MCP_SCOPE_FROM_GATE` a teammate's `chat` answers only from the projects in
-the gate's scope headers. It records each call in the audit schema as bridge
-`team`, with the caller's email. It has no host port.
+`mcp` is honcho-selfhost's `local-mcp-bridge`, built from `honcho/local-mcp-
+bridge`. It answers `chat` only, pinned to `HONCHO_TEAM_WORKSPACE` (default
+`memory`) and `HONCHO_TEAM_PEER`; with `HONCHO_MCP_SCOPE_FROM_GATE` a teammate's
+`chat` answers only from the projects in the gate's scope headers. It records each
+call in the audit schema as bridge `team`, with the caller's email, and with
+`HONCHO_AUDIT_READ` serves that record at `/audit` to the team MCP token; the
+dashboard reads it there (`HONCHO_MCP_AUDIT_URL=http://mcp:8765/audit`) for the
+app's 조회 기록. The gate passes only `/mcp` and `/mcp/*` on, so `/audit` stays inside
+Compose, and `mcp` has no host port. Without the share profile there is no `mcp`,
+and the dashboard's audit read answers 502. The Jev judgment gate
+(`HONCHO_JEV_GATE`, `TYPESAFE_API_KEY`, and the optional `TYPESAFE_BASE_URL`,
+`HONCHO_JEV_MODEL`, `HONCHO_JEV_THRESHOLD`, `HONCHO_JEV_FAIL_MODE`,
+`HONCHO_JEV_TOOLS`) comes from the private `.env` and is off while
+`HONCHO_JEV_GATE` is empty; `.env.example` describes each.
 
 `tunnel` is `cloudflared` (pinned image tag). It runs the tunnel whose token is
 `HONCHO_TUNNEL_TOKEN` in `.env`, and the tunnel's ingress, set in Cloudflare, is

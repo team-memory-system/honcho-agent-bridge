@@ -2,8 +2,9 @@
 // Managed OAuth, and the app keeps refreshing a short token. What matters: the
 // login only finishes for a state this app started, PKCE binds the code to it, a
 // token is refreshed before it ends and by one process at a time, a refused
-// refresh token means logging in again, the hub's login is not the servers', and a
-// server's device key goes only to that server.
+// refresh token means logging in again and is remembered as an ended login, a
+// callback that failed is told to the page waiting for it, the hub's login is not
+// the servers', and a server's device key goes only to that server.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -151,9 +152,83 @@ test("a token near its end is refreshed, once, and a refused refresh token means
 
   // Access forgets the refresh token: the login is dropped, and the next ask says so.
   fake.state.refresh.clear();
-  await assert.rejects(accessToken({ kind: "hub", paths, fetchImpl: fake.fetch, force: true }), { code: "login_needed" });
+  await assert.rejects(accessToken({ kind: "hub", paths, fetchImpl: fake.fetch, force: true }), { code: "login_needed", kind: "hub" });
   assert.equal((await readTeamAuth(paths)).logins.hub, undefined);
-  await assert.rejects(accessToken({ kind: "hub", paths, fetchImpl: fake.fetch }), { code: "login_needed" });
+  await assert.rejects(accessToken({ kind: "hub", paths, fetchImpl: fake.fetch }), { code: "login_needed", kind: "hub" });
+});
+
+test("a login Access stops refreshing is remembered as ended, with whose it was, until the next login", async (t) => {
+  const paths = await tempPaths(t);
+  const fake = team();
+  await setTeam({ hub: HUB, email: "me@example.com" }, { paths });
+  await login(fake, paths);
+  // The team moved to another Google login: Access refuses the old refresh token.
+  fake.state.refresh.clear();
+  await assert.rejects(teamFetch(`https://${HUB}/api/me`, {}, { paths, fetchImpl: fake.fetch, now: () => Date.now() + 20 * 60_000 }), { code: "login_needed", kind: "hub", host: HUB });
+  const status = await teamLoginStatus({ paths });
+  assert.equal(status.hubLogin.signedIn, false);
+  assert.equal(status.hubLogin.ended.email, "me@example.com");
+  assert.equal(status.hubLogin.ended.host, HUB);
+  assert.ok(Date.parse(status.hubLogin.ended.at));
+  assert.equal(status.serversLogin.ended, undefined, "only the login that ended");
+  // Asked again, it still says which login and where, so the screens can offer it.
+  await assert.rejects(teamFetch(`https://${HUB}/api/me`, {}, { paths, fetchImpl: fake.fetch }), { code: "login_needed", kind: "hub", host: HUB });
+
+  await login(fake, paths);
+  const again = await teamLoginStatus({ paths });
+  assert.equal(again.hubLogin.signedIn, true);
+  assert.equal(again.hubLogin.ended, undefined, "logging in again clears it");
+});
+
+test("Access down while refreshing keeps the login and says so, not that it ended", async (t) => {
+  const paths = await tempPaths(t);
+  const fake = team();
+  await login(fake, paths);
+  const down = async (input, init) => (new URL(typeof input === "string" ? input : input.url).pathname.endsWith("/token")
+    ? new Response("{}", { status: 503 })
+    : fake.fetch(input, init));
+  await assert.rejects(accessToken({ kind: "hub", paths, fetchImpl: down, force: true }), { code: "login_failed", kind: "hub" });
+  assert.ok((await readTeamAuth(paths)).logins.hub, "the login is kept for the next try");
+  assert.equal((await teamLoginStatus({ paths })).hubLogin.ended, undefined);
+});
+
+test("a login names where to sign out of Access: the application's domain and the team domain", async (t) => {
+  const paths = await tempPaths(t);
+  const fake = team();
+  const started = await startLogin({ host: HUB, kind: "hub", redirectUri: REDIRECT, paths, fetchImpl: fake.fetch });
+  // The team domain is the issuer of the host's OAuth metadata.
+  assert.deepEqual(started.logouts, [`https://${HUB}/cdn-cgi/access/logout`, "https://example-team.cloudflareaccess.com/cdn-cgi/access/logout"]);
+  assert.match(started.id, /^[A-Za-z0-9_-]{12}$/);
+  assert.notEqual(started.id, started.state);
+  assert.equal(new URL(started.url).searchParams.has(started.id), false);
+});
+
+test("a callback that failed is told under the login's id; starting again is a new login that works", async (t) => {
+  const paths = await tempPaths(t);
+  const fake = team();
+  const first = await startLogin({ host: HUB, kind: "hub", redirectUri: REDIRECT, paths, fetchImpl: fake.fetch });
+  // The consent page reloaded: Access sends the browser back with an error, which spends the state.
+  await assert.rejects(finishLogin({ state: first.state, error: "invalid_request", errorDescription: "Consent request is malformed", paths, fetchImpl: fake.fetch }), /Consent request is malformed/);
+  let status = await teamLoginStatus({ paths });
+  assert.deepEqual(status.failed.map(({ id, kind, error, detail }) => ({ id, kind, error, detail })), [
+    { id: first.id, kind: "hub", error: "refused", detail: "Consent request is malformed" },
+  ]);
+  for (const secret of [first.state, "verifier"]) assert.equal(JSON.stringify(status).includes(secret), false);
+  // The old address is spent for good.
+  await assert.rejects(finishLogin({ state: first.state, code: "x", paths, fetchImpl: fake.fetch }), /not started here/);
+
+  // 브라우저 다시 열기 starts a new login, with its own state and id.
+  const second = await startLogin({ host: HUB, kind: "hub", redirectUri: REDIRECT, paths, fetchImpl: fake.fetch });
+  assert.notEqual(second.state, first.state);
+  assert.notEqual(second.id, first.id);
+  const back = new URL(fake.browserLogin(second.url));
+  await finishLogin({ state: back.searchParams.get("state"), code: back.searchParams.get("code"), paths, fetchImpl: fake.fetch });
+  status = await teamLoginStatus({ paths });
+  assert.equal(status.hubLogin.signedIn, true);
+  assert.equal(status.failed.some((item) => item.id === second.id), false);
+
+  // A failure is kept ten minutes, then forgotten.
+  assert.deepEqual((await teamLoginStatus({ paths, now: Date.now() + 11 * 60_000 })).failed, []);
 });
 
 test("the hub and the servers are two logins; one servers login reaches every server", async (t) => {

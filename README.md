@@ -553,7 +553,8 @@ do what on it.
 - **The team hub.** One Cloudflare Worker per team, at `https://team.<zone>` (the 팀
   주소 the admin sends people), with one Durable Object holding the team: its name,
   who is in it (the roster), each person's peer name and server address, and the
-  requests between people with their answers. Its code is `server/hub/hub.mjs`.
+  requests between people with their answers. Its code is
+  `server/hub/hub.mjs`.
 - **Two Access applications.** The hub's, open to any Google login (the hub then
   says who is on the roster, so a stranger is told which email it saw), and the
   servers', one application whose destinations are every member's server (at most
@@ -567,7 +568,24 @@ do what on it.
   out with it (`fetchHoncho` adds it), and Access turns it into the signed assertion
   the hub and the gates check. The login comes back to the app at
   `http://127.0.0.1:<port>/oauth/callback`, which only finishes a login this app
-  started (`scripts/team-auth.mjs`, `scripts/team-app.mjs`).
+  started (`scripts/team-auth.mjs`, `scripts/team-app.mjs`). Whatever comes back
+  spends that login's state. A failure (Access's error, no code, no token) is kept
+  for ten minutes in `team-login.json` under the login's id, and `/api/team/status`
+  lists it in `failed`, so the waiting page shows it at once with 다시 로그인;
+  브라우저 다시 열기 starts a new login rather than opening the spent address again.
+- **A login that ended.** A refresh Access refuses (400 or 401, as after the team
+  changed its Google login) ends that login: `team-auth.json` keeps when, whose
+  (the email) and where (the host) under `ended`, the status reports it as
+  `hubLogin.ended` or `serversLogin.ended`, and calls to the hub or a gate answer
+  `login_needed` with the login's `kind` and `host`. The bell, the 팀 page and 관리자
+  then say "팀 로그인이 끝났습니다" with 다시 로그인, which runs the same browser
+  login for that login and draws the page again; the next login clears `ended`.
+  Access failing to answer a refresh (an outage) keeps the login (`login_failed`).
+  A computer that was set up stays set up while its hub login is ended
+  (`team.loginEnded` in the app's context), so a teammate who only asks others'
+  memories lands where they were, with the notice on top of the 대시보드, instead of
+  the full setup. When the hub or a host refuses a login that still refreshes, the
+  bell offers 다시 로그인 as well.
 - **Device keys.** A computer that writes to a server registers once with its gate
   (`POST /team-memory/devices`) and keeps the key it gets back, beside its login.
   The key goes with every request to that server only, in `X-Team-Memory-Device`,
@@ -583,9 +601,14 @@ do what on it.
   repository's origin remote, so a repository has the same id on every computer that
   cloned it, or of the folder's name without one. When the owner opens a project to
   someone, `team scopes` (`scripts/scope-sync.mjs`) puts its sessions into the
-  Honcho scope of that id, and keeps adding new ones; sessions sent before the tag
-  are found by their folder. A teammate's `chat` then answers from one scope at a
-  time (the MCP bridge sends `scope`), never from the owner's whole memory.
+  Honcho scope of that id, and keeps adding new ones. A session sent before the tag
+  goes to one project only, by the folder it ran in: on the server's computer, the
+  project the app's project list puts that folder in (its repository, else the
+  folder that holds one-off folders, else the folder itself), never one in a folder
+  above it, so opening `~` gives only what ran in the home folder itself; from
+  another computer, the project of that folder's name. A teammate's `chat` then
+  answers from one scope at a time (the MCP bridge sends `scope`), never from the
+  owner's whole memory.
 
 ### Making a team (the admin, once) / 새 팀 만들기
 
@@ -627,6 +650,14 @@ which email to send the admin), or a member with a peer name made from the email
 (the one this computer already used is kept), whether they already have a server,
 the company server, and the members who have a server.
 
+다른 계정으로 로그인, on the not-on-the-roster screen, forgets this computer's login
+and, in one tab, signs the browser out of Access on the hub's own domain and then on
+the team domain (`<team>.cloudflareaccess.com`, the issuer in the hub's OAuth
+metadata), whose session would otherwise sign the same account straight back in;
+then it logs in again in that tab. Google still picks the only account a browser is
+signed in to without asking, so when the same email comes back the window says so
+and links to adding another Google account (`accounts.google.com/AddSession`).
+
 - **이 컴퓨터에 새로 만들기**: the server is installed and started as before; then
   `team share` asks the hub for this person's address (`memory-<peer>.<zone>`, or
   `<name>.<zone>` for the admin's first, the company server), and the hub makes the
@@ -651,14 +682,21 @@ Everything one member opens to another starts with a request, kept by the hub, a
 everything the owner has to answer, or the asker has to press, goes to the bell.
 
 - **chat.** The 팀 page's 팀원 기억 lists the members; chat 요청 goes to the owner.
-  Their 승인 opens a window with this computer's projects: the chosen ones go into
-  `access.json` for that email, their sessions into their scopes, and only then does
-  the hub hear "approved", with the project names. The asker's bell shows 연결,
+  Their 승인 opens a window with the projects this server holds conversations of
+  (`POST /api/team/projects`, `serverProjects` in `scripts/scope-sync.mjs`), not
+  every folder in this computer's history: each with the sessions `team scopes`
+  would put in its scope (tagged, and earlier ones found by folder) and their count
+  on the server, newest first by the last turn received. A server that cannot be
+  read shows why instead of a list. The chosen ones go into `access.json` for that
+  email, their sessions into their scopes, and only then does the hub hear
+  "approved", with the project names. The asker's bell shows 연결,
   which adds `team-<peer>` to Claude Code and Codex (`teammates connect`); each agent
   logs in to the servers application itself. The gate passes such a person's `/mcp`
   to the MCP bridge with `x-honcho-scope-mode: projects` and the opened projects, and
   the bridge answers `chat` from one project's scope at a time. 내 기억을 여는 팀원
-  lists who has what, with 수정 for the projects and for closing it.
+  lists who has what, with 수정 for the projects and for closing it; 수정's window
+  keeps the projects already open to that person, even ones the server now has no
+  sessions of.
 - **Collecting into the company server.** 함께 쌓을 서버 → 회사 in the server step,
   with the folders in the project step's 회사 서버 column, sends a collect request and
   keeps that server off (`target add --team`). Once the owner approves, the asker's
@@ -692,7 +730,7 @@ A personal server listens only on `127.0.0.1`. Sharing puts it behind a Cloudfla
 - **`gate`** (`server/gate/gate.mjs`) publishes `127.0.0.1:<gate port>` (8010, or the next free port; kept in the installed `.env` as `HONCHO_GATE_PORT` once chosen). It has two ways through:
   - `GET /health` and `/v3/*`, for the owner's other computers, with `Authorization: Bearer <gate token>`, compared in constant time. The gate token is 32 random bytes, generated once into the private `.env` as `HONCHO_GATE_TOKEN`. Bodies stream both ways (dialectic SSE included), and bodies over 20 MB are refused.
   - `/mcp`, for teammates' agents, only with a verified Cloudflare Access login: `Cf-Access-Jwt-Assertion`, checked against the team's keys and the application's AUD tag, with an email in it. The gate passes the request on to `mcp` with that email.
-- **`mcp`**, honcho-selfhost's MCP bridge, answers `chat` only, as `HONCHO_TEAM_PEER` in `HONCHO_TEAM_WORKSPACE`, and records each call with the caller's email.
+- **`mcp`**, honcho-selfhost's MCP bridge, answers `chat` only, as `HONCHO_TEAM_PEER` in `HONCHO_TEAM_WORKSPACE`, and records each call with the caller's email in the `honcho_audit` schema of the server's PostgreSQL. With `HONCHO_JEV_GATE=1` and `TYPESAFE_API_KEY` in the `.env`, Jev judges each `chat` question first (see "Who asked, and Jev").
 - **`tunnel`**, `cloudflared` in a container, runs the tunnel whose token is `HONCHO_TUNNEL_TOKEN`. Its ingress, set in Cloudflare, is `http://gate:8010`.
 
 In Cloudflare the server's hostname has two Access applications. One covers `/v3` and `/health` and lets every request through to the gate, where the gate token is the lock. The other covers the rest of the hostname: it sends people to Google login and lets in only the emails on the team list, and MCP clients log in to it through Access's Managed OAuth.
@@ -727,13 +765,19 @@ node scripts/cli.mjs server share token     # the gate token, to copy to the oth
 - the application `Team Memory <host>` on the hostname: Google only and sent straight there, a 24-hour session, the people policy, and Managed OAuth with dynamic client registration for localhost and loopback redirects and a 336-hour grant;
 - the application on `<host>/v3` and `<host>/health` with the bypass policy.
 
-Then it writes `HONCHO_TUNNEL_TOKEN`, `HONCHO_ACCESS_TEAM_DOMAIN`, `HONCHO_ACCESS_AUD`, `HONCHO_TEAM_WORKSPACE` and `HONCHO_TEAM_PEER` into the installed `.env`, creates `HONCHO_GATE_TOKEN`, `HONCHO_TEAM_MCP_TOKEN` and `HONCHO_GATE_PORT` when they are missing, adds `share` to `COMPOSE_PROFILES` (other profiles are kept), and runs `docker compose up -d gate mcp tunnel`. Once a call with the API token has worked, the token is saved owner-only in `runtime/cloudflare/api-token`, so the `teammates` commands need it in the environment only the first time. What was made, by id, goes in `runtime/team-access.json`, and the address in `runtime/share.json`. Running `enable` again changes only what is missing or wrong; `cloudflare.changes` lists it.
+Then it writes `HONCHO_TUNNEL_TOKEN`, `HONCHO_ACCESS_TEAM_DOMAIN`, `HONCHO_ACCESS_AUD`, `HONCHO_TEAM_WORKSPACE` and `HONCHO_TEAM_PEER` into the installed `.env`, creates `HONCHO_GATE_TOKEN`, `HONCHO_TEAM_MCP_TOKEN` and `HONCHO_GATE_PORT` when they are missing, adds `share` to `COMPOSE_PROFILES` (other profiles are kept), and runs `docker compose up -d gate mcp tunnel dashboard` (the dashboard comes too: it reads the audit log with the team MCP token, which may be new). Once a call with the API token has worked, the token is saved owner-only in `runtime/cloudflare/api-token`, so the `teammates` commands need it in the environment only the first time. What was made, by id, goes in `runtime/team-access.json`, and the address in `runtime/share.json`. Running `enable` again changes only what is missing or wrong; `cloudflare.changes` lists it.
 
 `server start` brings the share services up by itself while sharing is on, because Compose reads `COMPOSE_PROFILES` from the installed `.env`. `server status` includes `share: {enabled, publicUrl}`.
 
 `server share status` reports by name and state only: `gate`; `tunnel`, where `hostAutostart` means the host tunnel of an older version is still registered; `mcp: {configured, missing, running}`, where `missing` names the settings `/mcp` still needs; and `cloudflare: {managed, joined, host, apiTokenSaved, teammatesShared}`. `--check` also requests `<public address>/health` with the gate token and reports `publicCheck.state`: `ok`; `access` (Cloudflare Access stopped the request: a 403, a redirect to `*.cloudflareaccess.com`, or a `cf-access-*`/`cf-mitigated` header); `token` (a 401 from the gate); `unreachable` (DNS or network failure, or a Cloudflare 502/530/1033 because the tunnel or the gate is down); or `error`.
 
 `server share disable` stops the tunnel first, then `mcp` and the gate, removes their containers, and removes `share` from `COMPOSE_PROFILES`. It keeps the tokens in the `.env` and changes nothing in Cloudflare (tunnel, hostname, Access applications), so turning sharing on again needs no new invite and keeps every other computer working. `server share rotate` makes a new gate token and recreates the gate; every other computer then needs the new one.
+
+### Who asked, and Jev / 조회 기록과 Jev
+
+팀 → 조회 기록 lists every call that reached `mcp`: when, who (the email the gate verified), the question, and whether it passed, was refused or failed. The bridge writes each call to `honcho_audit.tool_calls`; the dashboard reads them from the bridge's `GET http://mcp:8765/audit` with `Authorization: Bearer <HONCHO_TEAM_MCP_TOKEN>` (`HONCHO_MCP_AUDIT_URL`, `HONCHO_MCP_BEARER_TOKEN` on the dashboard, `HONCHO_AUDIT_READ=1` on `mcp`), and the app relays `/api/dashboard/audit` to the dashboard. `/audit` is outside `/mcp`, so the gate never passes it on, and `mcp` has no host port. While sharing is off there is no `mcp`: the dashboard answers 502 and the screen says sharing is off. The records stay in the database and show again once it is on.
+
+Jev judges each teammate's `chat` before it reaches the memory, on while `HONCHO_JEV_GATE=1` and `TYPESAFE_API_KEY` are in the installed `.env`; `TYPESAFE_BASE_URL`, `HONCHO_JEV_MODEL`, `HONCHO_JEV_THRESHOLD` (0.7), `HONCHO_JEV_FAIL_MODE` (`open`) and `HONCHO_JEV_TOOLS` (`chat`) are optional (`server/.env.example`). A refused question is recorded as `denied` with its score, and a question Jev failed to judge and let through carries the reason on its row.
 
 ### Teammates / 팀원
 
@@ -790,10 +834,13 @@ node scripts/cli.mjs teammates connected
 node scripts/cli.mjs teammates disconnect <name>
 ```
 
-- `connect` runs `claude mcp add --transport http --scope user team-<name> https://<host>/mcp` and `codex mcp add team-<name> --url https://<host>/mcp`. The same address again changes nothing, and another address replaces the entry. A client that is not installed is reported, and the other is still done.
-- Log in once in each client. In Claude Code, run `/mcp`, choose `team-<name>` and Authenticate; for Codex, run `codex mcp login team-<name>`. Either one opens Google login through Cloudflare Access, and only an email on the team list gets in. The agent then has that server's `chat`.
+- `connect` runs `claude mcp add --transport http --scope user team-<name> https://<host>/mcp`. For Codex it writes the entry into Codex's `config.toml` itself (under `CODEX_HOME` when set), because `codex mcp add` starts its own login in the system's default browser as soon as it sees the server takes OAuth, and that browser may be signed in to another Google account. The entry is what `codex mcp add team-<name> --url https://<host>/mcp` writes, `[mcp_servers.team-<name>]` with `url = "https://<host>/mcp"`, followed by `[mcp_servers.team-<name>.tools.chat]` with `approval_mode = "approve"`, both appended at the end of the file; nothing else in it changes, and a `config.toml` that is a link stays one. It is written only when a `codex` CLI is on PATH. `connect` makes no network call and opens no browser.
+- The same address again changes nothing; another address replaces the entry, for Codex by changing its `url` line in place and keeping the rest of the entry. A client that is not installed is reported, and the other is still done.
+- The `tools.chat` table is there because Codex asks before each MCP tool call, and with `approval_policy = "never"` it refuses the call instead; no Codex command sets a tool's approval (`chat` only asks the teammate's memory). An `approval_mode` already set for that tool, or tools the entry sets some other way, stay as they are. `disconnect` runs `codex mcp remove team-<name>`, which takes the table away with the entry, and removes one that stayed behind, since Codex reads no config at all with that table and no entry.
+- Log in once in each client, with the Google account on the team list. In Claude Code, run `/mcp`, choose `team-<name>` and Authenticate; for Codex, run `codex mcp login --no-browser team-<name>` and open the address it prints in the browser signed in to that account. Either one goes to Google login through Cloudflare Access, and only an email on the team list gets in. The agent then has that server's `chat`.
+- With `--no-browser`, Codex prints the login address, then listens on a port of 127.0.0.1 for the browser to come back and also reads a pasted callback address from stdin ("Callback URL"); whichever comes first ends the login, and closing stdin gives it up. Without the option Codex opens the system's default browser, which may be signed in to another Google account. Codex 0.154 does not have the option and 0.160 does; an older one takes `codex mcp login team-<name>`.
 - `connected` lists every team server this computer knows and whether each client has it. It reads the invite's team list, the owner's `team-access.json`, and the `team-*` entries already in `~/.claude.json` and `~/.codex/config.toml`. This computer's own shared server is left out: its agents use their own memory directly.
-- The app's 팀 page does the same: 팀 주소로 더하기 takes the 팀 주소 and connects each server, and a window then says how each agent logs in, with "Codex 로그인" starting the Codex login. Each teammate's row has a switch: off disconnects it, on connects it again (and the agents log in again). First setup's 팀에 들어가기 connects the teammates chosen in its 팀원 step the same way.
+- The app's 팀 page does the same: 팀 주소로 더하기 takes the 팀 주소 and connects each server, and a window then says how each agent logs in, with "Codex 로그인" starting the Codex login: the app runs `codex mcp login --no-browser team-<name>`, keeps its stdin open, and the page opens the printed address in a new tab of the browser the app runs in (the one the team login used) and names the account to use. It logs in with the `codex` on PATH when `codex mcp login --help` lists `--no-browser`; otherwise with the ChatGPT app's own Codex CLI on macOS (`/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, then `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`) when that one lists it, which reads the same `CODEX_HOME`. Only when none has the option does it run `codex mcp login team-<name>`, and Codex opens the default browser. The window shows Codex as 로그인됨 when `codex mcp list --json` says Codex holds an OAuth login for `team-<name>` (only that state leaves the app, since the same output carries every server's headers), and after "Codex 로그인" it follows that login until Codex ends it (로그인됨, or the error) or ten minutes pass; pressing it again ends the login started before. Each teammate's row has a switch: off disconnects it, on connects it again (and the agents log in again). First setup's 팀에 들어가기 connects the teammates chosen in its 팀원 step the same way.
 - `bridge disconnect` only removes the shared-bridge settings that 0.3.28 and before saved.
 
 ## Also sending some folders to another server (e.g. your company's)

@@ -1171,3 +1171,59 @@ test("Compose gives the gate its state directory and the bridge the gate's scope
   assert.equal(await run(TOKEN), 0, "healthy with the gate token");
   assert.equal(await run("not-the-token"), 1);
 });
+
+/** One `NAME: value` line of a service's environment in compose.yaml, as written. */
+function composeSetting(service, name) {
+  return new RegExp(`^ {6}${name}: (.*)$`, "m").exec(service)?.[1];
+}
+
+test("the dashboard reads 조회 기록 from mcp's /audit with the token mcp checks, and the gate never passes /audit on", async () => {
+  const compose = await fsp.readFile(COMPOSE, "utf8");
+  const dashboard = composeService(compose, "dashboard");
+  const mcp = composeService(compose, "mcp");
+  assert.equal(composeSetting(mcp, "HONCHO_AUDIT_READ"), '"1"');
+  assert.match(composeSetting(mcp, "HONCHO_AUDIT_DSN"), /@database:5432\//);
+  const auditUrl = new URL(composeSetting(dashboard, "HONCHO_MCP_AUDIT_URL"));
+  assert.equal(auditUrl.origin, `http://mcp:${JSON.parse(composeSetting(mcp, "HONCHO_MCP_PORT"))}`);
+  assert.equal(auditUrl.pathname, "/audit");
+  const mcpPath = composeSetting(mcp, "HONCHO_MCP_PATH");
+  assert.equal(mcpPath, "/mcp");
+  assert.ok(auditUrl.pathname !== mcpPath && !auditUrl.pathname.startsWith(`${mcpPath}/`), "outside what the gate passes to mcp");
+  assert.equal(composeSetting(dashboard, "HONCHO_MCP_BEARER_TOKEN"), "${HONCHO_TEAM_MCP_TOKEN:-}");
+  assert.equal(composeSetting(mcp, "HONCHO_MCP_BEARER_TOKEN"), composeSetting(dashboard, "HONCHO_MCP_BEARER_TOKEN"));
+  // A server that is not shared has no mcp service at all, and its dashboard still starts.
+  assert.doesNotMatch(dashboard, /^ {6}mcp:/m);
+  assert.doesNotMatch(dashboard, /^ {4}profiles:/m);
+
+  const before = mcpSeen.length;
+  for (const target of ["/audit", "/audit?limit=1000", "/mcp/../audit", "/mcp/%2e%2e/audit", "/mcp/..%2faudit"]) {
+    for (const headers of [loginAs(OWNER_EMAIL), auth]) {
+      assert.equal((await request(target, { headers })).status, 404, target);
+    }
+  }
+  assert.equal(mcpSeen.length, before, "no /audit reached the bridge");
+});
+
+test("mcp takes the Jev gate's settings from the private .env, off while they are empty, and the repository holds no key", async () => {
+  const compose = await fsp.readFile(COMPOSE, "utf8");
+  const mcp = composeService(compose, "mcp");
+  const settings = {
+    HONCHO_JEV_GATE: "${HONCHO_JEV_GATE:-}",
+    TYPESAFE_API_KEY: "${TYPESAFE_API_KEY:-}",
+    TYPESAFE_BASE_URL: "${TYPESAFE_BASE_URL:-}",
+    HONCHO_JEV_MODEL: "${HONCHO_JEV_MODEL:-}",
+    // The bridge reads these three as they are: an empty threshold stops it from
+    // starting, and an empty tool list would judge nothing.
+    HONCHO_JEV_THRESHOLD: "${HONCHO_JEV_THRESHOLD:-0.7}",
+    HONCHO_JEV_FAIL_MODE: "${HONCHO_JEV_FAIL_MODE:-open}",
+    HONCHO_JEV_TOOLS: "${HONCHO_JEV_TOOLS:-chat}",
+  };
+  for (const [name, value] of Object.entries(settings)) assert.equal(composeSetting(mcp, name), value, name);
+  for (const service of ["dashboard", "gate", "tunnel"]) assert.doesNotMatch(composeService(compose, service), /JEV|TYPESAFE/, service);
+
+  const example = await fsp.readFile(path.join(ROOT, "server", ".env.example"), "utf8");
+  for (const name of Object.keys(settings)) {
+    assert.match(example, new RegExp(`^# ${name}: \\S`, "m"), `${name} is described in .env.example`);
+    assert.doesNotMatch(example, new RegExp(`^${name}=`, "m"), `${name} has no value in .env.example`);
+  }
+});

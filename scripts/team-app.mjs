@@ -4,13 +4,15 @@
 // process instead of as CLI subcommands. The browser login comes back to this
 // process (the callback), and everything else is a short HTTPS request to the team
 // hub or to a gate with this computer's team login (team-auth.mjs), or a change to
-// the gate's access.json beside this computer's server (gate-access.mjs). What
-// starts or stops a server still goes through the CLI.
+// the gate's access.json beside this computer's server (gate-access.mjs), or a read
+// of that server's sessions for the projects to open (scope-sync.mjs). What starts
+// or stops a server still goes through the CLI.
 //
 // No route ever returns a token or a device key. A route that changes something is
 // a JSON POST, as every other route of the app.
 import { loadConfig } from "./config.mjs";
 import { gateDevices, gateGrants, gateStatePaths, grantChat, grantCollect, revokeDevice, revokePerson } from "./gate-access.mjs";
+import { serverProjects } from "./scope-sync.mjs";
 import { CALLBACK_PATH, finishLogin, registerDevice, serverWhoami, signOut, startLogin, teamAuthPaths, teamHost, teamLoginStatus } from "./team-auth.mjs";
 import { computerName, hubCall, madeTeam, teamWhoami } from "./team-hub.mjs";
 
@@ -44,20 +46,27 @@ async function ownerView(gate) {
 }
 
 const ROUTES = {
-  /** Who this computer is signed in as, and the team made here. Never a token. */
+  /**
+   * Who this computer is signed in as, a login that ended, the browser logins that
+   * failed (by id), and the team made here. Never a token.
+   */
   "/api/team/status": async () => {
     const { paths } = await context();
     return { ok: true, ...(await teamLoginStatus({ paths })), made: await madeTeam() };
   },
 
-  /** Starts a browser login: to the hub (`kind: "hub"`, with `hub`), or to the servers (with a server's `host`). */
+  /**
+   * Starts a browser login: to the hub (`kind: "hub"`, with `hub`), or to the servers
+   * (with a server's `host`). A new state each time, with the id the page waits on
+   * and the two addresses that sign the browser out of Access.
+   */
   "/api/team/login": async (body, req) => {
     const { paths } = await context();
     const kind = body.kind === "servers" ? "servers" : "hub";
     const host = teamHost(kind === "hub" ? body.hub : body.host);
     if (!host) return { ok: false, error: kind === "hub" ? "팀 주소를 확인하세요." : "서버 주소를 확인하세요." };
     const started = await startLogin({ host, kind, redirectUri: redirectUri(req), paths });
-    return { ok: true, url: started.url, kind, host };
+    return { ok: true, url: started.url, id: started.id, logouts: started.logouts, kind, host };
   },
 
   /** After the hub login: who the hub says this is (and a peer name the first time). */
@@ -122,6 +131,21 @@ const ROUTES = {
   "/api/team/dismiss": async (body) => {
     const { paths } = await context();
     return { ok: true, ...(await hubCall("POST", `/api/requests/${encodeURIComponent(String(body.id || ""))}/dismiss`, {}, { paths })) };
+  },
+
+  /**
+   * The projects this server holds conversations of, for the window that opens them
+   * to a teammate (scope-sync.mjs); `keep`, what is open to them now, stays listed.
+   * A server that cannot be read says so instead of listing nothing.
+   */
+  "/api/team/projects": async (body) => {
+    const { config } = await context();
+    try {
+      return await serverProjects({ config, keep: projectsFrom(body.keep) });
+    } catch (error) {
+      const reason = error?.cause?.code || /^HTTP \d+/.exec(String(error?.message))?.[0] || String(error?.message || error);
+      return { ok: false, error: `기억 서버에서 프로젝트를 읽지 못했습니다 (${reason}).` };
+    }
   },
 
   /** The owner changes the projects open to a teammate (`projects`), or closes chat (`close: true`). */
@@ -237,7 +261,10 @@ export function teamRoute(pathname) {
   return ROUTES[pathname] || null;
 }
 
-/** Runs a route; any failure comes back as { ok: false, error } with the hub's or gate's own code. */
+/**
+ * Runs a route; any failure comes back as { ok: false, error } with the hub's or
+ * gate's own code, and for a login to do again, which one (`kind`, `host`).
+ */
 export async function runTeamRoute(route, body, req) {
   try {
     return await route(body, req);
@@ -247,6 +274,8 @@ export async function runTeamRoute(route, body, req) {
       error: String(error?.message || error),
       ...(error?.code ? { code: error.code } : {}),
       ...(error?.status ? { status: error.status } : {}),
+      ...(error?.kind ? { kind: error.kind } : {}),
+      ...(error?.code === "login_needed" && error?.host ? { host: error.host } : {}),
     };
   }
 }

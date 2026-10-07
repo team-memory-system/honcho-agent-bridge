@@ -25,7 +25,7 @@ import { securePrivateFile } from "./private-file-permissions.mjs";
 import { conversationProjects } from "./projects.mjs";
 import { redactSecrets } from "./redact.mjs";
 import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
-import { API_TOKEN_ENV, codexLogin, INVITE_ENV, teamAddress, teammateAdd, teamName } from "./team-access.mjs";
+import { API_TOKEN_ENV, codexLogin, codexLoginStatus, INVITE_ENV, teamAddress, teammateAdd, teamName } from "./team-access.mjs";
 import { handleLoginCallback, runTeamRoute, TEAM_READ_ROUTES, teamRoute } from "./team-app.mjs";
 import { CALLBACK_PATH, TEAM_AUTH_ENV, teamAuthPaths } from "./team-auth.mjs";
 
@@ -305,9 +305,12 @@ const TEAM_ROUTES = {
   "/api/teammates/connected": async (body) => teammateRoute("connected", body, 30_000),
   "/api/teammates/connect": async (body) => teammateRoute("connect", body, 180_000),
   "/api/teammates/disconnect": async (body) => teammateRoute("disconnect", body, 180_000),
-  // `codex mcp login` opens the browser and waits for it, so it is started here and
-  // answered as soon as it ends or shows its login address (team-access.mjs).
+  // `codex mcp login --no-browser` prints its login address and waits for the browser
+  // to come back, so it is started here and answered as soon as it ends or shows the
+  // address, which the page opens itself (team-access.mjs).
   "/api/teammates/codex-login": async (body) => codexLogin({ name: body?.name }),
+  // How that login ended, or whether Codex already holds one, for the page to show.
+  "/api/teammates/codex-login-status": async (body) => codexLoginStatus({ name: body?.name }),
   // Removes the shared-bridge settings 0.3.28 and before saved; nothing uses them now.
   "/api/bridge/disconnect": async () => runCli(["bridge", "disconnect"], { timeout: 30_000 }),
   // The team hub (team-hub.mjs): made once with the admin's API token, which reaches

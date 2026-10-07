@@ -168,7 +168,7 @@ test("enable by hand writes the tunnel and team settings to the .env and starts 
   assert.equal(environment.POSTGRES_PASSWORD, "db-secret");
   if (process.platform !== "win32") assert.equal(await mode(f.envFile), 0o600);
 
-  assert.deepEqual(composeLines(f.calls), ["up -d gate mcp tunnel"]);
+  assert.deepEqual(composeLines(f.calls), ["up -d gate mcp tunnel dashboard"]);
   assert.equal(f.calls.some((call) => call.command === "/bin/launchctl" && call.args[0] === "bootstrap"), false, "no host autostart any more");
   await assert.rejects(fsp.access(path.join(f.home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`)));
 
@@ -259,7 +259,7 @@ test("enable --cloudflare makes the Cloudflare half once, writes the .env and ke
   assert.equal(environment.HONCHO_TEAM_WORKSPACE, "memory");
   assert.equal(environment.HONCHO_TEAM_PEER, "owner_peer");
   assert.equal(environment.COMPOSE_PROFILES, "debug,share");
-  assert.deepEqual(composeLines(f.calls), ["up -d gate mcp tunnel"]);
+  assert.deepEqual(composeLines(f.calls), ["up -d gate mcp tunnel dashboard"]);
   assert.deepEqual(cf.state.policies.find((item) => item.name === "Team Memory people").include, [{ email: { email: "owner@example.com" } }]);
 
   const share = JSON.parse(await fsp.readFile(f.shareFile, "utf8"));
@@ -381,7 +381,7 @@ test("join turns a teammate's server on from the owner's invite, with no API tok
   assert.equal(environment.HONCHO_TEAM_WORKSPACE, "memory");
   assert.match(environment.HONCHO_TEAM_MCP_TOKEN, /^[A-Za-z0-9_-]{43}$/);
   assert.equal(environment.COMPOSE_PROFILES, "share");
-  assert.deepEqual(composeLines(mate.calls), ["up -d gate mcp tunnel"]);
+  assert.deepEqual(composeLines(mate.calls), ["up -d gate mcp tunnel dashboard"]);
   const share = JSON.parse(await fsp.readFile(mate.shareFile, "utf8"));
   assert.equal(share.joined, true);
   assert.equal(share.tunnelId, tunnel.id);
@@ -514,7 +514,7 @@ test("enable removes the host tunnel of older versions and moves its token into 
       const stop = f.calls.find((call) => /powershell/i.test(call.command));
       assert.ok(stop.args.at(-1).includes("Stop-Process") && stop.args.at(-1).includes(path.join(f.oldDir, "tunnel-token")), "only the old cloudflared is stopped");
     }
-    const up = lines.indexOf("docker compose up -d gate mcp tunnel");
+    const up = lines.indexOf("docker compose up -d gate mcp tunnel dashboard");
     assert.ok(up > 0, `${platform}: Compose starts after the old tunnel is gone`);
     assertNoSecret(f.calls, [TUNNEL_TOKEN], "a command");
 

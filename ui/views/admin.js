@@ -8,9 +8,9 @@ import { post } from "../lib/api.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { number } from "../lib/format.js";
 import { block, confirmWindow, field, kv, list, listItem, modal } from "../lib/kit.js";
-import { teamCall } from "../lib/team.js";
+import { teamCall, teamErrorNotice } from "../lib/team.js";
 import { app, loadContext } from "../lib/state.js";
-import { button, busy, errorNotice, notice, pageHead, spinner, tag, toast } from "../lib/ui.js";
+import { button, busy, notice, pageHead, spinner, tag, toast } from "../lib/ui.js";
 
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -86,7 +86,7 @@ export default {
       try {
         roster = await teamCall("/api/team/admin/people", {});
       } catch (error) {
-        clear(body, errorNotice(error));
+        clear(body, teamErrorNotice(error, { onDone: draw }));
         return;
       }
       const people = [...(roster.people || [])].sort((left, right) => (left.email === team.email ? -1 : right.email === team.email ? 1 : 0));

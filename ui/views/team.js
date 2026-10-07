@@ -6,15 +6,16 @@
 // its row's switch takes it out and puts it back. 내 기억을 여는 팀원 is the other
 // way: what this computer's server opened to whom (its gate's access.json), with
 // 수정 for the projects and for closing it again, and who collects into it. Who
-// asked my memory is 조회 기록 (audit.js).
+// asked my memory is 조회 기록 (audit.js). A team login that ended says so, with
+// 다시 로그인, instead of the screen.
 import { post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { confirmWindow, list, listItem } from "../lib/kit.js";
 import { chooseProjects, connectApproved, loadRequests, openConnected } from "../lib/requests.js";
-import { clientOutcome, connectTeammate, mateName, sendRequest, teamCall, teamDirectory } from "../lib/team.js";
+import { clientOutcome, connectTeammate, endedLogins, loginNotice, mateName, sendRequest, teamCall, teamDirectory, teamErrorNotice, teamStatus } from "../lib/team.js";
 import { refreshBell } from "../lib/bell.js";
 import { app, go, loadContext, refreshStatus } from "../lib/state.js";
-import { button, busy, errorNotice, notice, pageHead, spinner, tag, toggle } from "../lib/ui.js";
+import { button, busy, notice, pageHead, spinner, tag, toggle } from "../lib/ui.js";
 
 const CLIENTS = { claude: "Claude Code", codex: "Codex" };
 
@@ -35,7 +36,10 @@ export default {
     async function draw() {
       const team = app.context?.team || {};
       if (!team.hub || !team.signedIn) {
-        clear(body, notice("warn", "팀에 로그인하지 않았습니다. ", button("팀에 들어가기", { kind: "small", onClick: () => go("start") })));
+        const ended = team.hub ? endedLogins(await teamStatus().catch(() => null)).find((item) => item.kind === "hub") : null;
+        clear(body, ended
+          ? loginNotice({ ...ended, onDone: draw })
+          : notice("warn", "팀에 로그인하지 않았습니다. ", button("팀에 들어가기", { kind: "small", onClick: () => go("start") })));
         return;
       }
       let directory;
@@ -48,7 +52,7 @@ export default {
           post("/api/teammates/connected", {}),
         ]);
       } catch (error) {
-        clear(body, errorNotice(error));
+        clear(body, teamErrorNotice(error, { onDone: draw }));
         return;
       }
       const servers = new Map((directory.servers || []).map((server) => [server.owner, server]));

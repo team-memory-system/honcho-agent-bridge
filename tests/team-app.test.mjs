@@ -1,7 +1,9 @@
 // The app's team routes, through its own HTTP server: the Google login comes back
 // to /oauth/callback and finishes only a login this app started; the team routes
 // answer a JSON POST (the status alone also a GET) and never a token; the hub's own
-// refusals come back with their code.
+// refusals come back with their code. A browser login that came back with an error
+// shows in the status at once, starting again is a new login, and a login Access
+// stopped refreshing is reported as ended, with which one to log in to again.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -115,4 +117,59 @@ test("the hub's own refusal comes back with its code", async () => {
   assert.equal(refused.json.ok, false);
   assert.equal(refused.json.code, "own_server");
   assert.equal(refused.json.status, 400);
+});
+
+test("a callback that came back with an error shows in the status at once; starting again is a new login", async () => {
+  const first = await send("/api/team/login", { method: "POST", body: { kind: "hub", hub: HUB } });
+  assert.equal(first.json.ok, true);
+  assert.deepEqual(first.json.logouts, [`https://${HUB}/cdn-cgi/access/logout`, "https://example-team.cloudflareaccess.com/cdn-cgi/access/logout"]);
+  // Reloading the consent page: Access sends the browser back with an error.
+  const state = new URL(first.json.url).searchParams.get("state");
+  const back = await send(`/oauth/callback?state=${encodeURIComponent(state)}&error=invalid_request&error_description=${encodeURIComponent("Consent request is malformed")}`);
+  assert.equal(back.status, 400);
+  const status = await send("/api/team/status");
+  const failed = status.json.failed.find((item) => item.id === first.json.id);
+  assert.equal(failed?.error, "refused");
+  assert.equal(failed?.detail, "Consent request is malformed");
+  assert.equal(status.text.includes(state), false, "the state itself never reaches the page");
+
+  // 브라우저 다시 열기: a new login, which the page then waits for, and which works.
+  const second = await send("/api/team/login", { method: "POST", body: { kind: "hub", hub: HUB } });
+  assert.notEqual(second.json.id, first.json.id);
+  assert.notEqual(new URL(second.json.url).searchParams.get("state"), state);
+  const done = new URL(fake.browserLogin(second.json.url));
+  assert.equal((await send(`${done.pathname}${done.search}`)).status, 200);
+  const after = await send("/api/team/status");
+  assert.equal(after.json.hubLogin.signedIn, true);
+  assert.equal(after.json.failed.some((item) => item.id === second.json.id), false);
+});
+
+test("a login Access stopped refreshing is reported as ended, and the routes say which login to do again", async () => {
+  // The team switched Google logins: the refresh token is refused once the access token runs out.
+  const file = process.env.HONCHO_AGENT_TEAM_AUTH;
+  const auth = JSON.parse(await fs.readFile(file, "utf8"));
+  auth.logins.hub.expiresAt = 0;
+  await fs.writeFile(file, JSON.stringify(auth));
+  fake.state.refresh.clear();
+
+  const refused = await send("/api/team/directory", { method: "POST", body: {} });
+  assert.equal(refused.json.ok, false);
+  assert.equal(refused.json.code, "login_needed");
+  assert.equal(refused.json.kind, "hub");
+  assert.equal(refused.json.host, HUB);
+  const status = await send("/api/team/status");
+  assert.equal(status.json.hubLogin.signedIn, false);
+  assert.equal(status.json.hubLogin.ended.email, "me@example.com");
+  assert.equal(status.json.hubLogin.ended.host, HUB);
+  // Every later call says the same, with the same login to do again.
+  const again = await send("/api/team/requests", { method: "POST", body: {} });
+  assert.deepEqual([again.json.code, again.json.kind, again.json.host], ["login_needed", "hub", HUB]);
+
+  // 다시 로그인: the same browser login for the hub; the ended login is gone.
+  const started = await send("/api/team/login", { method: "POST", body: { kind: "hub", hub: HUB } });
+  const back = new URL(fake.browserLogin(started.json.url));
+  await send(`${back.pathname}${back.search}`);
+  const after = await send("/api/team/status");
+  assert.equal(after.json.hubLogin.signedIn, true);
+  assert.equal(after.json.hubLogin.ended, undefined);
 });

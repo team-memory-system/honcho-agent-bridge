@@ -25,9 +25,11 @@
 //
 // Files under <dataDir>/state, owner-only, never printed:
 //   team-auth.json       the hub's host, the email it saw, both logins (client id,
-//                        endpoints, tokens, expiry) and the device keys by host
+//                        endpoints, tokens, expiry), the logins Access stopped
+//                        refreshing (when, whose, where) and the device keys by host
 //   team-login.json      logins started in the browser and not finished yet
-//                        (state, PKCE verifier), dropped after ten minutes
+//                        (state, PKCE verifier), and the ones whose callback failed,
+//                        dropped after ten minutes
 //   team-auth.json.lock  held while a token is refreshed, so two collectors never
 //                        spend one refresh token twice
 // HONCHO_AGENT_TEAM_AUTH names team-auth.json for the collector's hook runs.
@@ -52,12 +54,16 @@ const DEFAULT_TOKEN_SECONDS = 900;
 const TIMEOUT_MS = 20_000;
 const HOSTNAME = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 
-/** Why the team cannot be reached: `login_needed` (sign in again) or `login_failed`. */
+/**
+ * Why the team cannot be reached: `login_needed` (sign in again) or `login_failed`.
+ * `details` names the login it is about (`kind`, `host`) when that is known.
+ */
 export class TeamLoginError extends Error {
-  constructor(code, message) {
+  constructor(code, message, details = {}) {
     super(message);
     this.name = "TeamLoginError";
     this.code = code;
+    Object.assign(this, details);
   }
 }
 
@@ -107,6 +113,7 @@ export async function readTeamAuth(paths) {
     email: typeof value?.email === "string" ? value.email : null,
     me: value?.me && typeof value.me === "object" ? value.me : {},
     logins: value?.logins && typeof value.logins === "object" ? value.logins : {},
+    ended: value?.ended && typeof value.ended === "object" ? value.ended : {},
     devices: value?.devices && typeof value.devices === "object" ? value.devices : {},
   };
 }
@@ -206,16 +213,43 @@ async function registerClient(meta, redirectUri, fetchImpl) {
   return clientId;
 }
 
-async function readPending(paths, now) {
+/** The logins waiting for the browser, and the ones whose callback failed, younger than ten minutes. */
+async function readLogins(paths, now) {
   const value = await readJsonFile(paths.pendingFile);
   const pending = value?.pending && typeof value.pending === "object" ? value.pending : {};
-  return Object.fromEntries(Object.entries(pending).filter(([, item]) => item && now - Number(item.createdAt) < PENDING_MS));
+  const failed = Array.isArray(value?.failed) ? value.failed : [];
+  return {
+    pending: Object.fromEntries(Object.entries(pending).filter(([, item]) => item && now - Number(item.createdAt) < PENDING_MS)),
+    failed: failed.filter((item) => item && now - Number(item.at) < PENDING_MS),
+  };
+}
+
+async function writeLogins(paths, { pending, failed }) {
+  await writePrivateFileAtomic(paths.pendingFile, `${JSON.stringify({ version: 1, pending, failed }, null, 2)}\n`);
+}
+
+/**
+ * Where a browser signs out of Access for `host`: the application's own domain and
+ * the team domain, the issuer of its OAuth metadata (<team>.cloudflareaccess.com).
+ * Access keeps a session cookie on each, and the team domain's signs the same Google
+ * account straight back in, so switching accounts needs both.
+ */
+export function accessLogouts(host, issuer) {
+  let teamDomain = null;
+  try {
+    const url = new URL(issuer);
+    if (url.protocol === "https:") teamDomain = url.hostname;
+  } catch {}
+  return [...new Set([teamHost(host), teamDomain].filter(Boolean))].map((domain) => `https://${domain}/cdn-cgi/access/logout`);
 }
 
 /**
  * Starts a browser login to the Access app of `host` for `kind`: registers this app
  * as a client when it has no client for this redirect yet, and returns the address
- * to open. The state and the PKCE verifier wait in team-login.json.
+ * to open, the login's `id` (not its state, which stays secret) for the page to ask
+ * about it, and where to sign out of Access. The state and the PKCE verifier wait in
+ * team-login.json. Every start is a new state: one that something came back for is
+ * spent, so opening its address again never works.
  */
 export async function startLogin({ host, kind, redirectUri, paths, fetchImpl = globalThis.fetch, now = Date.now() }) {
   const name = teamHost(host);
@@ -234,9 +268,11 @@ export async function startLogin({ host, kind, redirectUri, paths, fetchImpl = g
   const verifier = base64url(crypto.randomBytes(48));
   const challenge = base64url(crypto.createHash("sha256").update(verifier).digest());
   const state = base64url(crypto.randomBytes(32));
+  const id = base64url(crypto.randomBytes(9));
   const resource = `https://${name}`;
-  const pending = await readPending(paths, now);
+  const { pending, failed } = await readLogins(paths, now);
   pending[state] = {
+    id,
     kind,
     host: name,
     resource,
@@ -248,7 +284,7 @@ export async function startLogin({ host, kind, redirectUri, paths, fetchImpl = g
     revocationEndpoint: meta.revocationEndpoint,
     createdAt: now,
   };
-  await writePrivateFileAtomic(paths.pendingFile, `${JSON.stringify({ version: 1, pending }, null, 2)}\n`);
+  await writeLogins(paths, { pending, failed });
   const url = new URL(meta.authorizationEndpoint);
   url.search = new URLSearchParams({
     response_type: "code",
@@ -259,7 +295,7 @@ export async function startLogin({ host, kind, redirectUri, paths, fetchImpl = g
     code_challenge_method: "S256",
     resource,
   }).toString();
-  return { url: url.toString(), state, kind, host: name };
+  return { url: url.toString(), state, id, kind, host: name, logouts: accessLogouts(name, meta.issuer) };
 }
 
 async function tokenRequest(fetchImpl, endpoint, form) {
@@ -285,18 +321,39 @@ function tokensFrom(body, now, previousRefresh = null) {
 
 /**
  * Finishes a browser login with what came back to the callback: exchanges the code
- * for tokens and keeps them as the login of the kind it was started for.
+ * for tokens and keeps them as the login of the kind it was started for. Whatever
+ * came back spends the state; a failure is kept for ten minutes under the login's
+ * id, so the page waiting for it hears at once instead of waiting it out.
  */
 export async function finishLogin({ state, code, error, errorDescription, paths, fetchImpl = globalThis.fetch, now = Date.now() }) {
-  const pending = await readPending(paths, now);
+  const { pending, failed } = await readLogins(paths, now);
   const started = typeof state === "string" ? pending[state] : null;
   if (!started) throw new TeamLoginError("login_failed", "This login was not started here, or it waited too long; start it again");
   delete pending[state];
-  await writePrivateFileAtomic(paths.pendingFile, `${JSON.stringify({ version: 1, pending }, null, 2)}\n`);
-  if (error) {
-    throw new TeamLoginError("login_failed", `The login was refused: ${String(errorDescription || error).slice(0, 200)}`);
+  await writeLogins(paths, { pending, failed });
+  try {
+    return await exchangeCode(started, { code, error, errorDescription, paths, fetchImpl, now });
+  } catch (problem) {
+    // Read again: the page may have started another login meanwhile.
+    const latest = await readLogins(paths, now);
+    latest.failed.push({
+      id: started.id || null,
+      kind: started.kind,
+      error: problem?.reason || "failed",
+      detail: String(problem?.detail ?? problem?.message ?? problem).slice(0, 200),
+      at: now,
+    });
+    await writeLogins(paths, { pending: latest.pending, failed: latest.failed.slice(-10) });
+    throw problem;
   }
-  if (typeof code !== "string" || !code) throw new TeamLoginError("login_failed", "The login came back without a code");
+}
+
+async function exchangeCode(started, { code, error, errorDescription, paths, fetchImpl, now }) {
+  if (error) {
+    const detail = String(errorDescription || error).slice(0, 200);
+    throw new TeamLoginError("login_failed", `The login was refused: ${detail}`, { reason: "refused", detail });
+  }
+  if (typeof code !== "string" || !code) throw new TeamLoginError("login_failed", "The login came back without a code", { reason: "no_code", detail: "no code" });
   const answer = await tokenRequest(fetchImpl, started.tokenEndpoint, {
     grant_type: "authorization_code",
     code,
@@ -306,9 +363,10 @@ export async function finishLogin({ state, code, error, errorDescription, paths,
     resource: started.resource,
   });
   const tokens = answer.ok ? tokensFrom(answer.body, now) : null;
-  if (!tokens) throw new TeamLoginError("login_failed", `Access did not give a token for the login (HTTP ${answer.status})`);
+  if (!tokens) throw new TeamLoginError("login_failed", `Access did not give a token for the login (HTTP ${answer.status})`, { reason: "no_token", detail: `HTTP ${answer.status}` });
   await updateTeamAuth(paths, (auth) => ({
     ...auth,
+    ended: Object.fromEntries(Object.entries(auth.ended).filter(([kind]) => kind !== started.kind)),
     logins: {
       ...auth.logins,
       [started.kind]: {
@@ -329,13 +387,15 @@ export async function finishLogin({ state, code, error, errorDescription, paths,
 
 /**
  * A usable access token for `kind`, refreshed when it is about to end. Throws
- * TeamLoginError `login_needed` when there is no login or Access no longer takes it.
+ * TeamLoginError `login_needed` when there is no login or Access no longer takes it,
+ * and `login_failed` when Access could not be asked (the login is kept).
  */
 export async function accessToken({ kind, paths, fetchImpl = globalThis.fetch, now = () => Date.now(), force = false }) {
   const current = (await readTeamAuth(paths)).logins[kind];
-  if (!current?.accessToken) throw new TeamLoginError("login_needed", `Log in to the team first (${kind})`);
+  if (!current?.accessToken) throw new TeamLoginError("login_needed", `Log in to the team first (${kind})`, { kind });
   if (!force && Number(current.expiresAt) - now() > REFRESH_MARGIN_MS) return current.accessToken;
   let token = null;
+  let outage = null;
   await updateTeamAuth(paths, async (auth) => {
     const login = auth.logins[kind];
     if (!login?.accessToken) return null;
@@ -344,7 +404,14 @@ export async function accessToken({ kind, paths, fetchImpl = globalThis.fetch, n
       token = login.accessToken;
       return null;
     }
-    if (!login.refreshToken) return { ...auth, logins: { ...auth.logins, [kind]: undefined } };
+    // A login that cannot be refreshed any more ends, and is remembered as ended (when,
+    // whose, where) so the screens say so and offer the login again.
+    const end = () => {
+      const logins = { ...auth.logins };
+      delete logins[kind];
+      return { ...auth, logins, ended: { ...auth.ended, [kind]: { at: new Date(now()).toISOString(), email: auth.email || null, host: login.host || null } } };
+    };
+    if (!login.refreshToken) return end();
     const answer = await tokenRequest(fetchImpl, login.tokenEndpoint, {
       grant_type: "refresh_token",
       refresh_token: login.refreshToken,
@@ -355,17 +422,15 @@ export async function accessToken({ kind, paths, fetchImpl = globalThis.fetch, n
     if (!tokens) {
       // A refresh token Access refuses will not work later either; anything else
       // (an outage) keeps the login for the next try.
-      if (answer.status === 400 || answer.status === 401) {
-        const logins = { ...auth.logins };
-        delete logins[kind];
-        return { ...auth, logins };
-      }
+      if (answer.status === 400 || answer.status === 401) return end();
+      outage = answer.status;
       return null;
     }
     token = tokens.accessToken;
     return { ...auth, logins: { ...auth.logins, [kind]: { ...login, ...tokens, refreshedAt: new Date(now()).toISOString() } } };
   });
-  if (!token) throw new TeamLoginError("login_needed", `The team login has ended (${kind}); log in again`);
+  if (!token && outage !== null) throw new TeamLoginError("login_failed", `Access did not refresh the team login (HTTP ${outage}); try again in a moment`, { kind });
+  if (!token) throw new TeamLoginError("login_needed", `The team login has ended (${kind}); log in again`, { kind });
   return token;
 }
 
@@ -392,7 +457,10 @@ export async function teamFetch(url, init = {}, { paths, fetchImpl = globalThis.
   const auth = await readTeamAuth(paths);
   const kind = loginKindFor(auth, target.hostname);
   const send = async (force) => {
-    const token = await accessToken({ kind, paths, fetchImpl, force, ...(now ? { now } : {}) });
+    const token = await accessToken({ kind, paths, fetchImpl, force, ...(now ? { now } : {}) }).catch((error) => {
+      if (error instanceof TeamLoginError && !error.host) error.host = target.hostname;
+      throw error;
+    });
     const headers = new Headers(init.headers || {});
     headers.set("authorization", `Bearer ${token}`);
     const key = device ? deviceHeaderValue(auth, target.hostname) : null;
@@ -403,10 +471,10 @@ export async function teamFetch(url, init = {}, { paths, fetchImpl = globalThis.
   if (isAccessChallenge(response)) {
     await response.arrayBuffer().catch(() => {});
     response = await send(true);
-    if (isAccessChallenge(response)) throw new TeamLoginError("login_needed", `${target.hostname} no longer takes this computer's login; log in again`);
+    if (isAccessChallenge(response)) throw new TeamLoginError("login_needed", `${target.hostname} no longer takes this computer's login; log in again`, { kind, host: target.hostname });
   }
   if (response.status >= 300 && response.status < 400) {
-    throw new TeamLoginError("login_needed", `${target.hostname} sent this computer to a login page; log in again`);
+    throw new TeamLoginError("login_needed", `${target.hostname} sent this computer to a login page; log in again`, { kind, host: target.hostname });
   }
   return response;
 }
@@ -468,6 +536,7 @@ export async function setTeam({ hub, email, peer, admin, name }, { paths }) {
         team: name !== undefined ? name : known.team || null,
       },
       logins: same ? auth.logins : {},
+      ended: same ? auth.ended : {},
       devices: same ? auth.devices : {},
     };
   });
@@ -525,12 +594,17 @@ export async function serverWhoami(host, { paths, fetchImpl }) {
   return teamJson(`https://${teamHost(host)}/team-memory/whoami`, { paths, fetchImpl });
 }
 
-/** Who this computer is signed in as, without a token, for the app's screens. */
+/**
+ * Who this computer is signed in as, without a token, for the app's screens: each
+ * login, or when it `ended` without a sign-out, and the browser logins whose callback
+ * `failed` in the last ten minutes, by id.
+ */
 export async function teamLoginStatus({ paths, now = Date.now() }) {
   const auth = await readTeamAuth(paths);
+  const { failed } = await readLogins(paths, now);
   const login = (kind) => {
     const item = auth.logins[kind];
-    if (!item?.accessToken) return { signedIn: false };
+    if (!item?.accessToken) return { signedIn: false, ...(auth.ended[kind] ? { ended: auth.ended[kind] } : {}) };
     return { signedIn: Boolean(item.refreshToken) || Number(item.expiresAt) > now, host: item.host || null, loggedInAt: item.loggedInAt || null };
   };
   return {
@@ -542,6 +616,7 @@ export async function teamLoginStatus({ paths, now = Date.now() }) {
     hubLogin: login("hub"),
     serversLogin: login("servers"),
     devices: Object.entries(auth.devices).map(([host, device]) => ({ host, id: device.id, name: device.name || "" })),
+    failed: failed.map((item) => ({ id: item.id, kind: item.kind, error: item.error, detail: item.detail, at: new Date(Number(item.at)).toISOString() })),
   };
 }
 
