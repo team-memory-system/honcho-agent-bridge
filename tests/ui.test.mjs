@@ -233,23 +233,35 @@ test("the setup form's fields reach the CLI under the names it actually reads", 
   assert.deepEqual(response.body.issues, [], JSON.stringify(response.body.issues));
 });
 
-test("the form's field names and the accepted option names are the same set", async () => {
-  const markup = await fsp.readFile(path.join(ROOT, "ui", "index.html"), "utf8");
-  const setupForm = markup.slice(markup.indexOf('<form id="setup-form"'));
-  const fields = [...setupForm.slice(0, setupForm.indexOf("</form>")).matchAll(/<input[^>]*name="([^"]+)"/g)]
-    .map((match) => match[1]);
-  assert.ok(fields.length >= 4, "the setup form's fields were not found");
+test("every option the setup steps send is one the server accepts", async () => {
+  // The steps build one draft and send it whole (ui/lib/collect.js); nothing in that
+  // module touches the page until it is called, so it runs here as it does there.
+  const { setupBody } = await import("../ui/lib/collect.js");
   const server = await fsp.readFile(path.join(ROOT, "scripts", "ui.mjs"), "utf8");
   const accepted = server.match(/const SETUP_OPTIONS = new Set\(\[([\s\S]*?)\]\)/)[1]
     .match(/"([^"]+)"/g)
     .map((quoted) => quoted.slice(1, -1));
   // Secret fields are read too, but into the environment, never onto the command line.
-  accepted.push(...server.match(/const SETUP_SECRET_FIELDS = Object\.freeze\(\{([\s\S]*?)\}\)/)[1]
+  const secrets = server.match(/const SETUP_SECRET_FIELDS = Object\.freeze\(\{([\s\S]*?)\}\)/)[1]
     .match(/(\w+):/g)
-    .map((key) => key.slice(0, -1)));
-  for (const field of fields) {
-    assert.ok(accepted.includes(field), `the form sends "${field}", which the server drops`);
-  }
+    .map((key) => key.slice(0, -1));
+  const projects = [{ path: "/w/a", name: "a", count: 1 }, { path: "/w/b", name: "b", count: 2 }];
+  const draft = (changes) => ({
+    server: "remote", remoteUrl: "https://memory.example.com", apiToken: "t", accessClientId: "i", accessClientSecret: "s",
+    userPeer: "me", workspace: "work", agents: new Set(["claude", "codex"]), projects, checked: new Set(["/w/a"]), rest: "take", ...changes,
+  });
+  const sent = new Set();
+  for (const body of [
+    setupBody(draft({}), {}),
+    setupBody(draft({ rest: "skip" }), {}),
+    setupBody(draft({ checked: new Set(["/w/a", "/w/b"]) }), {}),
+  ]) for (const key of Object.keys(body)) sent.add(key);
+  for (const key of sent) assert.ok(accepted.includes(key) || secrets.includes(key), `the steps send "${key}", which the server drops`);
+  for (const key of ["takeFolders", "skipFolders", "restFolders", "allFolders", ...secrets]) assert.ok(sent.has(key), `the steps never send "${key}"`);
+  // This computer's own server takes no token: one typed for another server stays behind.
+  const local = setupBody(draft({ server: "here" }), { localServer: { apiUrl: "http://127.0.0.1:8001" } });
+  assert.equal(local.honchoUrl, "http://127.0.0.1:8001");
+  for (const key of secrets) assert.equal(key in local, false, `${key} goes to this computer's server`);
 });
 
 test("files the UI writes are restricted before any bytes reach them", async (t) => {
@@ -472,77 +484,94 @@ test("the app installs no prerequisite itself: the install route is gone", async
   assert.equal(server.includes("/api/app/prereqs/install"), false);
 });
 
-test("every screen a link opens exists, and so does every page of 기억 설정 and 팀 it names", async () => {
+test("every screen a link opens exists, and so does every window of 기억 설정 it names", async () => {
   const screens = await uiSources();
   const shell = await fsp.readFile(path.join(ROOT, "ui", "app.js"), "utf8");
-  const views = shell.match(/const VIEWS = \{([^}]*)\}/)[1].split(",").map((name) => name.trim()).filter(Boolean);
-  const connect = await fsp.readFile(path.join(ROOT, "ui", "views", "connect.js"), "utf8");
-  const tasks = [...connect.matchAll(/\{ key: "([a-z]+)", title:/g)].map((match) => match[1]).sort();
-  assert.deepEqual(tasks, ["collect", "import", "share"]);
-  // A menu's pages are its own entries and the 연결 tasks it spreads in, unless it renames one.
-  const pages = {};
-  for (const menu of ["computer", "team"]) {
-    const source = await fsp.readFile(path.join(ROOT, "ui", "views", `${menu}.js`), "utf8");
-    pages[menu] = [
-      ...[...source.matchAll(/\bkey: "([a-z]+)"/g)].map((match) => match[1]),
-      ...[...source.matchAll(/\{ \.\.\.task\("([a-z]+)"\), (?!key:)/g)].map((match) => match[1]),
-    ].sort();
-  }
-  assert.deepEqual(pages, { computer: ["collect", "import", "targets", "tools"], team: ["audit", "memories", "share"] });
-  const hub = await fsp.readFile(path.join(ROOT, "ui", "lib", "hub.js"), "utf8");
-  const tabbed = [...hub.match(/const TABS = \{([\s\S]*?)\n\};/)[1].matchAll(/\["([a-z]+)", "/g)].map((match) => match[1]);
+  const views = shell.match(/const VIEWS = \{([^}]*)\}/)[1].split(",").map((name) => name.trim().split(":")[0].trim()).filter(Boolean);
+  // `start` opens first setup's window over whatever screen is on.
+  views.push("start");
+  const settings = await fsp.readFile(path.join(ROOT, "ui", "views", "settings.js"), "utf8");
+  const windows = [...settings.match(/const windows = \{([\s\S]*?)\n    \};/)[1].matchAll(/^\s+([a-z]+): \(\)/gm)].map((match) => match[1]).sort();
+  assert.deepEqual(windows, ["collect", "import", "tools"]);
+  const tabs = await fsp.readFile(path.join(ROOT, "ui", "lib", "tabs.js"), "utf8");
+  const tabbed = [...tabs.match(/const TABS = \{([\s\S]*?)\n\};/)[1].matchAll(/\["([a-z]+)", "/g)].map((match) => match[1]);
   assert.deepEqual(tabbed, ["memory", "ask", "server", "models", "share"]);
   const moved = Object.fromEntries([...shell.match(/const MOVED = \{([\s\S]*?)\n\};/)[1].matchAll(/"?([a-z/]+)"?: "([a-z/]+)"/g)].map((match) => [match[1], match[2]]));
 
   const links = [
     ...screens.matchAll(/go\("([a-z/]+)"\)/g),
     ...screens.matchAll(/href: "#\/([a-z/]+)"/g),
-    ...screens.matchAll(/screen: "([a-z/]+)"/g),
     ...screens.matchAll(/fix: \[[^\]]*"([a-z/]+)"\]/g),
+    // The screen first setup's last button opens: ["대시보드 열기", "dashboard"].
+    ...screens.matchAll(/\["[^"\n]*열기", "([a-z]+)"\]/g),
   ].map((match) => match[1]);
-  assert.ok(links.length >= 20, `only ${links.length} links were found`);
+  assert.ok(links.length >= 12, `only ${links.length} links were found`);
   for (const link of [...links, ...tabbed, ...Object.values(moved)]) {
     const [view, page] = link.split("/");
     assert.ok(views.includes(view), `a link opens #/${link}, which no screen serves`);
-    if (pages[view] && page) assert.ok(pages[view].includes(page), `#/${link} is not one of the pages under ${view}`);
+    if (view === "computer" && page) assert.ok(windows.includes(page), `#/${link} is not one of 기억 설정's windows`);
   }
-  // Addresses from before the menus were regrouped, or of a page that moved menus, as an
-  // older skill or a saved link opens them.
-  for (const old of ["connect", "connect/collect", "connect/share", "connect/targets", "team/targets", "computer/share", "tools", "tools/shared", "tools/audit", "audit"]) {
+  // Addresses from before the menus were regrouped, of a page that moved menus, or
+  // of a page that became a window, as an older skill or a saved link opens them.
+  for (const old of ["connect", "connect/collect", "connect/share", "connect/targets", "team/targets", "computer/share", "tools", "tools/shared", "tools/audit",
+    "computer/targets", "team/audit", "team/memories", "team/share"]) {
     assert.ok(moved[old], `#/${old} no longer leads anywhere`);
+  }
+  // What the setup skill opens with `ui open --screen`.
+  for (const screen of ["dashboard", "start", "server", "models", "share", "backup", "team", "admin", "computer"]) {
+    assert.ok(views.includes(screen), `--screen ${screen} opens nothing`);
   }
 });
 
-test("a teammate's share screens never name Cloudflare; only the admin's team setup does", async () => {
-  const source = await fsp.readFile(path.join(ROOT, "ui", "views", "share.js"), "utf8");
+test("a teammate's screens never name Cloudflare; only the admin's do", async () => {
+  const strings = (code) => [...code.replace(/^\s*\/\/.*$/gm, "").matchAll(/"([^"\n]*)"|`([^`]*)`/g)].map((match) => match[1] ?? match[2]);
+  const read = (file) => fsp.readFile(path.join(ROOT, "ui", file), "utf8");
   // From a declaration to the next top-level function or export.
-  const part = (start) => {
+  const part = (source, start) => {
     const from = source.indexOf(start);
-    assert.ok(from >= 0, `share.js has no ${start}`);
+    assert.ok(from >= 0, `no ${start}`);
     const ends = [source.indexOf("\nfunction ", from + 1), source.indexOf("\nexport ", from + 1)].filter((at) => at > 0);
     return source.slice(from, ends.length ? Math.min(...ends) : undefined);
   };
-  const strings = (code) => [...code.replace(/^\s*\/\/.*$/gm, "").matchAll(/"([^"\n]*)"|`([^`]*)`/g)].map((match) => match[1] ?? match[2]);
-  for (const start of ["export async function openTeamShare", "const PUBLIC_STATES", "function mcpRow", "function shareOn", "function inviteForm"]) {
-    assert.equal(strings(part(start)).some((text) => /cloudflare/i.test(text)), false, `${start} names Cloudflare`);
+  for (const file of ["views/team.js", "lib/team.js"]) {
+    assert.equal(strings(await read(file)).some((text) => /cloudflare/i.test(text)), false, `${file} names Cloudflare`);
+  }
+  const share = await read("views/share.js");
+  for (const start of ["const PUBLIC_STATES", "function mcpLine", "function shareOn", "function inviteForm"]) {
+    assert.equal(strings(part(share, start)).some((text) => /cloudflare/i.test(text)), false, `share.js ${start} names Cloudflare`);
   }
   // The cards everyone sees while sharing is off.
-  const off = part("function shareOff");
+  const off = part(share, "function shareOff");
   const from = off.indexOf('class: "choices three"');
   const cards = off.slice(from, off.indexOf("\n    body,", from));
   assert.ok(from >= 0 && strings(cards).length >= 6, "the share cards were not found");
   assert.equal(strings(cards).some((text) => /cloudflare/i.test(text)), false, "the share cards name Cloudflare");
+  // First setup: joining a team never names it; making one does. Its steps are
+  // functions inside openSetup, each up to the next one.
+  const setup = await read("views/setup.js");
+  const step = (name) => {
+    const from = setup.indexOf(`  function ${name}(`);
+    assert.ok(from >= 0, `setup.js has no ${name}`);
+    return setup.slice(from, setup.indexOf("\n  function ", from + 1));
+  };
+  assert.equal(strings(step("teamStep")).some((text) => /cloudflare/i.test(text)), false, "팀에 들어가기 names Cloudflare");
+  assert.equal(strings(step("matesStep")).some((text) => /cloudflare/i.test(text)), false, "the 팀원 step names Cloudflare");
+  assert.ok(strings(step("makeStep")).some((text) => /cloudflare/i.test(text)), "새 팀 만들기 says it needs a Cloudflare token");
 });
 
-test("the setup steps send the one form, so a secret never leaves it except to the setup routes", async () => {
-  const connect = await fsp.readFile(path.join(ROOT, "ui", "views", "connect.js"), "utf8");
-  const markup = await fsp.readFile(path.join(ROOT, "ui", "index.html"), "utf8");
-  const form = markup.slice(markup.indexOf('<form id="setup-form"'), markup.indexOf("</form>", markup.indexOf('<form id="setup-form"')));
-  // Every step is a group inside the same form; nothing is sent until the last one.
-  assert.deepEqual([...form.matchAll(/data-step="([a-z]+)"/g)].map((match) => match[1]), ["server", "agents", "name"]);
-  const sends = [...connect.matchAll(/post\("(\/api\/setup\/[a-z]+)", formBody\(form\)\)/g)].map((match) => match[1]);
-  assert.deepEqual([...new Set(sends)].sort(), ["/api/setup/apply", "/api/setup/plan"]);
-  for (const secret of ["apiToken", "accessClientId", "accessClientSecret"]) {
-    assert.equal(new RegExp(`(go|location|history|console)[^\\n]*${secret}`).test(connect), false, `${secret} must not reach a URL or a log`);
+test("a token typed into the setup steps goes to the setup routes alone, never to an address or a log", async () => {
+  const read = (file) => fsp.readFile(path.join(ROOT, "ui", file), "utf8");
+  const collect = await read("lib/collect.js");
+  // The whole draft goes to plan, then to apply, and nowhere else.
+  const apply = collect.slice(collect.indexOf("export async function applySetup"), collect.indexOf("\n}\n", collect.indexOf("export async function applySetup")));
+  assert.deepEqual([...apply.matchAll(/post\("(\/api\/[a-z/]+)", body\)/g)].map((match) => match[1]), ["/api/setup/plan", "/api/setup/apply"]);
+  // Another server's token goes only to target add, which keeps it on this computer.
+  const targets = collect.slice(collect.indexOf("export async function applyTargets"));
+  assert.match(targets, /post\("\/api\/targets\/add", body\)/);
+  for (const file of ["lib/collect.js", "views/setup.js", "views/settings.js", "views/admin.js"]) {
+    const source = await read(file);
+    for (const secret of ["apiToken", "accessClientId", "accessClientSecret"]) {
+      assert.equal(new RegExp(`(go|location|history|console|savePrefs|localStorage)[^\\n]*${secret}`).test(source), false, `${file}: ${secret} must not reach a URL, a log or saved preferences`);
+    }
   }
 });

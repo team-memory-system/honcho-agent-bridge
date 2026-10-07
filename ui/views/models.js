@@ -1,59 +1,116 @@
-// 서버 → 모델: the models the memory server on this computer uses. The
-// subscription gateway turns Codex and Claude accounts into the chat models: log
-// accounts in, order them inside each backend, choose how they share the load, and
-// see the models they offer (써 보기 opens 묻기 with that model); everything there is
-// the gateway's own API. The memory server's chat model is chosen here too, and
-// the Ollama embedding model kept resident by the host supervisor is shown with a
-// way to start it again.
+// 서버 → 모델: the models the memory server on this computer uses. The subscription
+// gateway turns ChatGPT (its codex backend) and Claude accounts into chat models:
+// the accounts are a list to log in, order and take out, 계정 더하기 opens a window
+// that logs one in (lib/login.js), and the model the memory server sorts and answers
+// with is chosen in its own window. The Ollama embedding model kept resident by the
+// host supervisor sits below; the gateway's own programs and models are folded away.
+// Everything about accounts is the gateway's own API.
 import { cli, gateway, post } from "../lib/api.js";
-import { accountGroups, backendName, loginEnded, loginPanelText, loginPrompt, loginSubmission, modelGroups, pendingLogin, sharedGroups, signInLink } from "../lib/accounts.js";
+import { accountGroups, modelGroups, sharedGroups } from "../lib/accounts.js";
 import { h, clear, copyText } from "../lib/dom.js";
-import { screenTabs } from "../lib/hub.js";
 import { ago, number } from "../lib/format.js";
+import { block, confirmWindow, kv, list, listItem, modal, opt, opts } from "../lib/kit.js";
+import { gatewayLogin } from "../lib/login.js";
+import { screenTabs } from "../lib/tabs.js";
 import { app, go, loadContext, refreshStatus } from "../lib/state.js";
-import { button, busy, confirmSheet, empty, errorNotice, notice, pageHead, section, segmented, spinner, statusTag, tag, toast } from "../lib/ui.js";
+import { button, busy, errorNotice, notice, pageHead, segmented, spinner, statusTag, tag, toast } from "../lib/ui.js";
 
-const LOGIN_WAIT_MS = 5 * 60_000;
+// What a person subscribes to, by the gateway's backend.
+const SUBSCRIPTION = { codex: "ChatGPT", claude: "Claude" };
+const subscription = (backend) => SUBSCRIPTION[backend] || backend || "기타";
 
 function planLabel(plan) {
   return plan ? String(plan).replace(/^\w/, (letter) => letter.toUpperCase()) : "";
 }
 
+/** 계정 더하기: which subscription, then that account's login, in one window. */
+function openAddAccount(onDone, backend = null) {
+  const win = modal({ title: "구독 계정 더하기", big: true, small: true });
+  let chosen = backend || "codex";
+  const start = () => {
+    const panel = gatewayLogin({ backend: chosen, label: `${subscription(chosen)} 로그인을 기다리는 중` });
+    win.body(h("p", { class: "lead", style: { marginTop: "4px" } }, `${subscription(chosen)} 구독 계정으로 로그인합니다. 브라우저에 로그인 창이 열립니다.`), panel.root);
+    win.foot(null, button("닫기", { onClick: () => { panel.cancel(); win.close(); } }));
+    panel.done.then((ok) => {
+      if (!ok) return;
+      win.close("ok");
+      onDone();
+      refreshStatus();
+      toast(`${subscription(chosen)} 계정을 연결했습니다.`, "ok");
+    });
+  };
+  if (backend) {
+    win.open();
+    start();
+    return;
+  }
+  win.body(
+    h("p", { class: "lead", style: { marginTop: "4px" } }, "기억 서버가 모델을 부를 때 쓸 구독 계정을 더합니다."),
+    opts(...["codex", "claude"].map((key) => opt({
+      name: "subscription", value: key, checked: key === chosen,
+      title: `${subscription(key)} 구독`,
+      sub: key === "codex" ? "ChatGPT 계정으로 로그인합니다." : "Claude 계정으로 로그인합니다.",
+      onChange: () => { chosen = key; },
+    }))));
+  win.foot(null, [button("취소", { kind: "quiet", onClick: () => win.close() }), button("로그인", { kind: "primary", onClick: start })]);
+  win.open();
+}
+
+/** 기억 서버가 쓰는 모델: one of the gateway's models, tried before it is chosen. */
+function openServerModel(report, onDone) {
+  const current = app.context?.localServer?.chatModel || "";
+  const groups = modelGroups(report?.models?.models, report?.accounts);
+  let chosen = current || groups[0]?.models[0] || "";
+  const tried = h("span", { class: "muted", style: { fontSize: "12.5px" } });
+  const win = modal({ title: "기억 서버가 쓰는 모델", big: true, small: true });
+  win.body(
+    h("p", { class: "lead", style: { marginTop: "4px" } }, "구독 게이트웨이에 로그인한 계정의 모델입니다."),
+    groups.length
+      ? h("div", { class: "opts pt-scroll" }, groups.flatMap((group) => group.models.map((id) => opt({
+        name: "server-model", value: id, checked: id === chosen,
+        title: h("span", { class: "mono" }, id),
+        sub: subscription(group.backend),
+        end: id === current ? tag("지금 씀") : null,
+        onChange: () => { chosen = id; clear(tried); },
+      }))))
+      : notice("warn", "고를 수 있는 모델이 없습니다. 구독 계정을 로그인하고 연결하세요."),
+    groups.length ? h("div", { class: "row2" }, button("써 보기", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+      clear(tried, "묻는 중…");
+      const result = await post("/api/gw/api/chat", { model: chosen, prompt: "한 문장으로 인사해 주세요." });
+      clear(tried, result.ok ? `${chosen} · 답함 · ${(Number(result.elapsedMs || 0) / 1000).toFixed(1)}초` : `${chosen} · 답하지 않음 ${result.error || ""}`);
+    }) }), tried) : null,
+    h("p", { class: "hint" }, "적용하면 기억 서버 설정을 고치고 다시 시작합니다. 1~2분 동안 기억을 쓰거나 찾을 수 없습니다."));
+  win.foot(null, [
+    button("취소", { kind: "quiet", onClick: () => win.close() }),
+    button("적용", { kind: "primary", disabled: !groups.length, onClick: (event) => busy(event.currentTarget, async () => {
+      if (chosen === current) { win.close(); return; }
+      await cli("/api/server/start", { profile: "personal", model: chosen });
+      win.close("ok");
+      await loadContext();
+      onDone();
+      refreshStatus();
+      toast(`${chosen}로 바꿨습니다.`, "ok");
+    }) }),
+  ]);
+  win.open();
+}
+
 export default {
   title: "모델",
   async mount(page, params) {
-    const body = h("div", { class: "pad" });
-    const refresh = button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침" });
+    const body = h("div", { class: "pad stack" });
     page.append(
-      pageHead({
-        title: "서버",
-        subtitle: "기억 서버가 쓰는 모델, 구독 게이트웨이, 임베딩 모델을 관리합니다.",
-        subnav: screenTabs("models"),
-        actions: [
-          app.context?.gatewayUiUrl ? h("a", { class: "btn quiet", href: app.context.gatewayUiUrl, target: "_blank", rel: "noreferrer" }, "게이트웨이 화면") : null,
-          refresh,
-        ].filter(Boolean),
-      }),
+      pageHead({ title: "서버", subtitle: "기억 서버가 쓰는 모델, 구독 게이트웨이, 임베딩 모델을 관리합니다.", subnav: screenTabs("models") }),
       h("div", { class: "page-body" }, body),
     );
-
     let report = null;
-    // The host side: the Ollama embedding model and the supervisor keeping it up.
     let host = null;
-    // The login this screen waits on: { accountId, backend, since, prompt, view }.
-    // `prompt` is null from a gateway that sends none, which keeps the old notice.
-    let waiting = null;
-    let timer = null;
-    // The advanced part stays open across redraws once someone opened it.
     let advancedOpen = false;
 
     async function load() {
       const [gatewayResult, hostResult] = await Promise.allSettled([gateway.status(), post("/api/host/status", {})]);
       host = hostResult.status === "fulfilled" ? hostResult.value : null;
-      if (gatewayResult.status === "rejected") {
-        report = null;
-        return gatewayResult.reason;
-      }
+      if (gatewayResult.status === "rejected") { report = null; return gatewayResult.reason; }
       report = gatewayResult.value;
       app.status.gateway.report = report;
       return null;
@@ -61,93 +118,26 @@ export default {
 
     async function draw() {
       const error = await load();
-      if (!report) return drawDown(error);
+      if (!report) { drawDown(error); return; }
       const accounts = report.accounts || [];
-      // A login the gateway still waits on, started before this screen opened.
-      if (!waiting) {
-        const found = pendingLogin(accounts);
-        if (found) beginWaiting(found.accountId, found.backend, found.prompt);
-      }
       const serving = new Set(report.servingAccounts || []);
-      const models = report.models?.models || [];
-      const typing = typingIn(waiting?.view?.root);
-      clear(body,
-        waiting ? (waiting.view ? waiting.view.root : loginPanel()) : null,
-        overview(accounts, serving),
-        embeddingSection(),
-        serverModelSection(),
-        accountsSection(accounts, serving),
-        modelsSection(models, accounts),
-        servicesSection(report.services || []),
-      );
-      typing();
-    }
-
-    // Redrawing moves the login panel, the same element, back into place; the
-    // box it holds keeps its text, and gets its caret back here.
-    function typingIn(root) {
-      const active = document.activeElement;
-      if (!root || !active || !root.contains(active)) return () => {};
-      const { selectionStart, selectionEnd } = active;
-      return () => {
-        if (!active.isConnected) return;
-        active.focus({ preventScroll: true });
-        try { active.setSelectionRange(selectionStart, selectionEnd); } catch {}
-      };
+      clear(body, accountsList(accounts, serving), modeBlock(), serverModelBlock(), embeddingBlock(), advanced());
     }
 
     function drawDown(error) {
       const local = Boolean(app.context?.localServer);
       clear(body,
-        notice("warn",
-          h("b", {}, "구독 게이트웨이가 꺼져 있거나 설치되지 않았습니다."),
-          h("div", {}, local
-            ? "이 컴퓨터의 기억 서버와 함께 설치돼 있으면 켤 수 있습니다."
-            : "게이트웨이는 기억 서버를 두는 컴퓨터에 설치됩니다. 이 컴퓨터를 서버로 쓰려면 서버 화면에서 준비하세요."),
-        ),
+        notice("warn", h("b", {}, "구독 게이트웨이가 꺼져 있거나 설치되지 않았습니다."),
+          h("div", {}, local ? "이 컴퓨터의 기억 서버와 함께 설치돼 있으면 켤 수 있습니다." : "게이트웨이는 기억 서버를 두는 컴퓨터에 설치됩니다.")),
         h("div", { class: "form-actions" },
           button("게이트웨이 켜기", { kind: "primary", onClick: (event) => busy(event.currentTarget, async () => {
             await cli(local ? "/api/host/start" : "/api/gateway/open", {});
             await draw();
             refreshStatus();
           }, { done: "게이트웨이를 켰습니다" }) }),
-          button("기억 서버로", { onClick: () => go("server") }),
-        ),
-        error && !error.unreachable ? h("div", { style: { marginTop: "12px" } }, errorNotice(error)) : null,
-        h("div", { style: { marginTop: "28px" } }, embeddingSection()),
-      );
-    }
-
-    function overview(accounts, serving) {
-      const loggedIn = accounts.filter((account) => account.login?.loggedIn).length;
-      const unconnected = accounts.filter((account) => account.login?.loggedIn && !serving.has(account.id));
-      return section({ title: "구독 게이트웨이" },
-        h("div", { class: "rows" },
-          h("div", { class: "row" },
-            h("div", {},
-              h("div", { class: "title" }, report.ready && serving.size ? tag("쓸 수 있음", "ok") : tag(loggedIn ? "연결 필요" : "로그인 필요", "warn"),
-                serving.size ? `계정 ${number(serving.size)}개가 일하는 중` : "일하는 계정 없음"),
-              h("div", { class: "sub" }, loggedIn ? `로그인한 계정 ${number(loggedIn)}개 · 모델 ${number(report.models?.models?.length || 0)}개` : "아래에서 Codex나 Claude 계정을 추가하세요."),
-            ),
-            h("div", { class: "end" },
-              unconnected.length || (!report.ready && loggedIn) ? button("지금 연결", { kind: "primary small", onClick: (event) => connectNow(event.currentTarget) }) : null,
-            ),
-          ),
-          report.endpoint ? h("div", { class: "row" },
-            h("div", {}, h("div", { class: "title" }, "API 주소"), h("div", { class: "sub" }, "다른 앱에서 OpenAI 호환 API로 부를 때 이 주소를 씁니다. 키는 게이트웨이 화면에서 확인합니다.")),
-            h("div", { class: "end" }, h("code", { class: "mono" }, report.endpoint), button("", { kind: "small icon-only", iconName: "copy", title: "주소 복사", onClick: async () => { await copyText(report.endpoint); toast("주소를 복사했습니다"); } })),
-          ) : null,
-        ),
-      );
-    }
-
-    async function connectNow(control) {
-      await busy(control, async () => {
-        const result = await gateway.post("/connect", {});
-        if (!result.ok) throw new Error(result.error || "연결하지 못했습니다.");
-        await draw();
-        refreshStatus();
-      }, { done: "계정을 연결했습니다" });
+          button("기억 서버로", { onClick: () => go("server") })),
+        error && !error.unreachable ? errorNotice(error) : null,
+        embeddingBlock());
     }
 
     function accountRow(entry, group, serving) {
@@ -155,50 +145,35 @@ export default {
       const login = account.login || {};
       const routing = account.routing || {};
       const coolingUntil = routing.cooldown_until && new Date(routing.cooldown_until) > new Date() ? routing.cooldown_until : null;
-      const state = !login.cliAvailable ? tag(`${backendName(account.backend)} 명령 없음`, "bad")
-        : !login.loggedIn ? tag("로그인 안 됨", "warn")
-          : coolingUntil ? tag("한도 회복 중", "warn")
-            : serving.has(account.id) ? tag("일하는 중", "ok")
-              : tag("연결 안 됨", "warn");
-      const facts = [
-        planLabel(login.plan) || null,
-        routing.requests_in_window ? `최근 요청 ${number(routing.requests_in_window)}회` : null,
-        routing.last_used_at ? `마지막 사용 ${ago(routing.last_used_at)}` : null,
-        coolingUntil ? `${new Date(coolingUntil).toLocaleTimeString("ko-KR", { hour: "numeric", minute: "2-digit" })}까지 쉬는 중` : null,
-        routing.last_limit_reason && coolingUntil ? routing.last_limit_reason : null,
-      ].filter(Boolean);
+      const state = !login.cliAvailable ? `${subscription(account.backend)} 명령 없음`
+        : !login.loggedIn ? "로그인 안 됨"
+          : coolingUntil ? `사용 한도 · ${new Date(coolingUntil).toLocaleTimeString("ko-KR", { hour: "numeric", minute: "2-digit" })}에 풀림`
+            : serving.has(account.id) ? "쓰는 중" : "연결 안 됨";
+      const facts = [state, planLabel(login.plan) || null, routing.last_used_at ? `마지막 사용 ${ago(routing.last_used_at)}` : null].filter(Boolean);
       const name = login.account || account.id;
-      // In drain mode the number is the order the gateway uses them in.
-      const rank = group.ordered && report.mode !== "balance" ? h("span", { class: "gw-rank", title: `${entry.position}번째로 씀` }, String(entry.position)) : null;
-      return h("div", { class: "row" },
-        h("div", {},
-          h("div", { class: "title" }, rank, h("span", { class: `src ${account.backend}`, "aria-hidden": "true" }, account.backend === "codex" ? "X" : "C"), h("span", { class: "gw-name" }, name),
-            login.account ? h("span", { class: "muted mono" }, account.id) : null, state),
-          h("div", { class: "sub" }, facts.join(" · ") || (login.error || "")),
-        ),
-        h("div", { class: "end" },
-          group.ordered ? h("span", { class: "gw-move" },
-            button("", { kind: "small icon-only quiet", iconName: "up", title: `${name} 위로`, disabled: !entry.canMoveUp, onClick: (event) => move(event.currentTarget, account.id, "up") }),
-            button("", { kind: "small icon-only quiet", iconName: "down", title: `${name} 아래로`, disabled: !entry.canMoveDown, onClick: (event) => move(event.currentTarget, account.id, "down") }),
-          ) : null,
+      return listItem({
+        title: [h("span", { class: `src ${account.backend}` }, account.backend === "codex" ? "X" : "C"), `${subscription(account.backend)} `, h("span", { class: "mono muted" }, name)],
+        tags: group.ordered && report.mode !== "balance" ? [" ", tag(`${entry.position}번째`)] : [],
+        sub: facts.join(" · "),
+        end: [
+          group.ordered ? button("", { kind: "small icon-only quiet", iconName: "up", title: `${name} 위로`, disabled: !entry.canMoveUp, onClick: (event) => move(event.currentTarget, account.id, "up") }) : null,
+          group.ordered ? button("", { kind: "small icon-only quiet", iconName: "down", title: `${name} 아래로`, disabled: !entry.canMoveDown, onClick: (event) => move(event.currentTarget, account.id, "down") }) : null,
           login.loggedIn
-            ? button("로그아웃", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+            ? button("로그아웃", { kind: "small quiet", onClick: (event) => busy(event.currentTarget, async () => {
               const result = await gateway.post("/logout", { account: account.id });
               if (result.ok === false) throw new Error(result.error);
               await draw();
             }, { done: "로그아웃했습니다" }) })
-            : login.cliAvailable ? button("로그인", { kind: "small primary", onClick: (event) => busy(event.currentTarget, async () => {
-              const result = await gateway.post("/login", { account: account.id });
-              if (result.ok === false) throw new Error(result.error);
-              startWaiting(account.id, account.backend, result.prompt);
-            }) }) : null,
+            : login.cliAvailable ? button("로그인", { kind: "small primary", onClick: () => {
+              const win = modal({ title: `${subscription(account.backend)} 로그인`, big: true, small: true });
+              const panel = gatewayLogin({ backend: account.backend, accountId: account.id });
+              win.body(panel.root);
+              win.foot(null, button("닫기", { onClick: () => { panel.cancel(); win.close(); } }));
+              win.open();
+              panel.done.then((ok) => { if (ok) { win.close("ok"); draw(); refreshStatus(); } });
+            } }) : null,
           button("", { kind: "small icon-only quiet danger", iconName: "trash", title: "계정 빼기", onClick: async (event) => {
-            const ok = await confirmSheet({
-              title: `${backendName(account.backend)} 계정을 뺄까요?`,
-              text: `${login.account || account.id} 계정의 로그인과 이 계정을 돌리던 프로그램을 정리합니다. 구독 자체는 그대로입니다.`,
-              confirm: "빼기",
-              danger: true,
-            });
+            const ok = await confirmWindow({ title: `${subscription(account.backend)} 계정을 뺄까요?`, text: `${name} 계정의 로그인과 이 계정을 돌리던 프로그램을 정리합니다. 구독 자체는 그대로입니다.`, confirm: "빼기", danger: true });
             if (!ok) return;
             await busy(event.currentTarget, async () => {
               const result = await gateway.post("/accounts/remove", { account: account.id });
@@ -207,12 +182,11 @@ export default {
               refreshStatus();
             }, { done: "계정을 뺐습니다" });
           } }),
-        ),
-      );
+        ],
+      });
     }
 
-    // The gateway swaps an account only with its neighbour of the same backend,
-    // which is why the arrows live inside each backend's group.
+    // The gateway swaps an account only with its neighbour of the same backend.
     async function move(control, id, direction) {
       await busy(control, async () => {
         const result = await gateway.post("/accounts/move", { account: id, direction });
@@ -223,334 +197,96 @@ export default {
       });
     }
 
-    function addButtons(kind) {
-      const add = (backend) => (event) => busy(event.currentTarget, () => addAccount(backend));
-      return [
-        button("Codex 계정 추가", { kind, iconName: "plus", title: "ChatGPT 구독 계정으로 로그인합니다", onClick: add("codex") }),
-        button("Claude 계정 추가", { kind, iconName: "plus", title: "Claude 구독 계정으로 로그인합니다", onClick: add("claude") }),
-      ];
+    function accountsList(accounts, serving) {
+      const loggedIn = accounts.filter((account) => account.login?.loggedIn);
+      const unconnected = loggedIn.some((account) => !serving.has(account.id)) || (!report.ready && loggedIn.length);
+      const rows = accountGroups(accounts).flatMap((group) => group.accounts.map((entry) => accountRow(entry, group, serving)));
+      return list({
+        title: `구독 계정 ${number(accounts.length)}개`,
+        actions: [
+          unconnected ? button("지금 연결", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+            const result = await gateway.post("/connect", {});
+            if (!result.ok) throw new Error(result.error || "연결하지 못했습니다.");
+            await draw();
+            refreshStatus();
+          }, { done: "계정을 연결했습니다" }) }) : null,
+          button("계정 더하기", { kind: "small", onClick: () => openAddAccount(draw) }),
+        ],
+        empty: "아직 구독 계정이 없습니다. 계정 더하기로 ChatGPT나 Claude 구독 계정에 로그인하세요.",
+      }, rows);
     }
 
-    function modeBlock(shared) {
-      const scope = shared.length > 1
-        ? `${shared.map((group) => group.label).join("·")} 계정 각각 안에서 적용됩니다.`
-        : `${shared[0].label} 계정 ${number(shared[0].accounts.length)}개에 적용됩니다.`;
-      return h("div", { class: "gw-mode" },
-        h("div", {},
-          h("div", { class: "title" }, "계정을 나눠 쓰는 방식"),
-          h("div", { class: "sub" }, h("b", {}, "순서대로"), ": 위 계정을 한도까지 쓰고 다음 계정으로. ", h("b", {}, "고르게"), ": 요청을 계정마다 나눔."),
-          h("div", { class: "sub" }, scope),
-        ),
-        segmented([["drain", "순서대로"], ["balance", "고르게"]], report.mode, async (mode) => {
-          try {
-            await gateway.post("/mode", { mode });
-            // The router reads the mode when it starts; connecting restarts it.
-            if (report.ready) await gateway.post("/connect", {});
-            toast(mode === "balance" ? "요청을 계정마다 고르게 나눕니다" : "위 계정부터 순서대로 씁니다");
-            draw();
-          } catch (error) { toast(error.message, "bad"); }
-        }),
-      );
+    /** With two accounts of one subscription: use the first to its limit, or spread the load. */
+    function modeBlock() {
+      const shared = sharedGroups(accountGroups(report.accounts || []));
+      if (!shared.length) return null;
+      return block({ title: "계정을 나눠 쓰는 방식" },
+        kv("방식", h("div", {},
+          segmented([["drain", "순서대로"], ["balance", "고르게"]], report.mode, async (mode) => {
+            try {
+              await gateway.post("/mode", { mode });
+              if (report.ready) await gateway.post("/connect", {});
+              toast(mode === "balance" ? "요청을 계정마다 고르게 나눕니다" : "위 계정부터 순서대로 씁니다");
+              draw();
+            } catch (error) { toast(error.message, "bad"); }
+          }),
+          h("div", { class: "s" }, "순서대로: 위 계정을 한도까지 쓰고 다음 계정으로. 고르게: 요청을 계정마다 나눕니다."))));
     }
 
-    function accountsSection(accounts, serving) {
-      const intro = "게이트웨이가 모델을 부를 때 쓰는 Codex·Claude 구독 계정입니다. 브라우저에서 로그인해 추가합니다.";
-      if (!accounts.length) {
-        return section({ title: "구독 계정", note: intro },
-          h("div", { class: "gw-empty" },
-            empty("아직 구독 계정이 없습니다", "Codex는 ChatGPT 구독, Claude는 Claude 구독 계정으로 로그인합니다. 하나면 되고, 로그인을 마치면 이 화면이 알아서 연결합니다.", ...addButtons("primary")),
-          ),
-        );
-      }
-      const groups = accountGroups(accounts);
-      const shared = sharedGroups(groups);
-      // With one group to explain, the choice sits under that group; with more, under all of them.
-      const modeIn = (group) => (shared.length === 1 && shared[0] === group ? modeBlock(shared) : null);
-      return section({ title: "구독 계정", note: intro },
-        h("div", { class: "gw-add" }, addButtons("")),
-        groups.map((group) => h("div", { class: "gw-group" },
-          h("div", { class: "gw-group-head" },
-            h("b", {}, group.label),
-            h("span", {}, [`계정 ${number(group.accounts.length)}개`, group.ordered ? (report.mode === "balance" ? "고르게 나눠 씀" : "위 계정부터 씀") : null].filter(Boolean).join(" · ")),
-          ),
-          h("div", { class: "rows" }, group.accounts.map((entry) => accountRow(entry, group, serving))),
-          modeIn(group),
-        )),
-        shared.length > 1 ? modeBlock(shared) : null,
-      );
+    function serverModelBlock() {
+      if (!app.context?.localServer) return null;
+      const current = app.context.localServer.chatModel || "";
+      const owner = modelGroups(report?.models?.models, report?.accounts).find((group) => group.models.includes(current));
+      return block({ title: "기억 서버가 쓰는 모델", actions: [button("수정", { onClick: () => openServerModel(report, draw) })] },
+        kv("정리·묻기 모델", current ? [h("span", { class: "mono" }, current), owner ? ` · ${subscription(owner.backend)}` : h("span", { class: "muted" }, " · 게이트웨이에 없음")] : "정해지지 않음"));
     }
 
-    async function addAccount(backend) {
-      const result = await gateway.post("/accounts/add", { backend });
-      if (!result.ok) throw new Error(result.error || "계정을 추가하지 못했습니다.");
-      startWaiting(result.account.id, backend, result.login?.prompt);
-    }
-
-    function startWaiting(accountId, backend, prompt) {
-      beginWaiting(accountId, backend, prompt);
-      draw();
-    }
-
-    function beginWaiting(accountId, backend, prompt) {
-      const current = { accountId, backend, since: Date.now(), prompt: loginPrompt(prompt), view: null };
-      waiting = current;
-      if (current.prompt) {
-        current.view = loginView(current);
-        updateLoginView(current, current.prompt);
-      }
-      clearInterval(timer);
-      timer = setInterval(() => poll(current), 3000);
-    }
-
-    function stopWaiting() {
-      waiting = null;
-      clearInterval(timer);
-    }
-
-    async function poll(current) {
-      if (!current || waiting !== current) return;
-      if (Date.now() - current.since > LOGIN_WAIT_MS) {
-        stopWaiting();
-        // A gateway that holds the login ends it too, so it does not come back as still waiting.
-        if (current.prompt) await gateway.post("/login/cancel", { account: current.accountId }).catch(() => {});
-        toast("로그인을 5분 동안 기다렸지만 끝나지 않았습니다. 다시 시도하세요.", "bad");
-        draw();
-        return;
-      }
-      try {
-        const next = await gateway.status();
-        if (waiting !== current) return;
-        const account = (next.accounts || []).find((item) => item.id === current.accountId);
-        if (account?.login?.loggedIn) {
-          stopWaiting();
-          const result = await gateway.post("/connect", {}).catch((error) => ({ ok: false, error: error.message }));
-          toast(result.ok ? `${backendName(current.backend)} 계정을 연결했습니다` : `로그인은 됐지만 연결하지 못했습니다: ${result.error}`, result.ok ? "" : "bad");
-          draw();
-          refreshStatus();
-          return;
-        }
-        if (current.prompt && account?.pendingLogin) updateLoginView(current, account.pendingLogin);
-      } catch {}
-    }
-
-    // The login panel of a gateway that sends a prompt. Built once per login and
-    // updated in place, so the status poll never wipes what is being typed. On the
-    // gateway's own computer the browser finishes the login by itself; from
-    // another one this is where the link is, and where Claude's code or the
-    // address Codex's browser stopped at goes back.
-    function loginView(current) {
-      const intro = h("div", { class: "muted", style: { fontSize: "13px" } });
-      const linkNote = h("div", { class: "muted", style: { fontSize: "13px", marginTop: "10px" } });
-      const link = h("a", { class: "mono", target: "_blank", rel: "noopener noreferrer", style: { wordBreak: "break-all" } });
-      const copy = button("", { kind: "small icon-only quiet", iconName: "copy", title: "링크 복사", onClick: async () => {
-        if (!view.url) return;
-        await copyText(view.url);
-        toast("링크를 복사했습니다");
-      } });
-      const boxNote = h("div", { class: "muted", style: { fontSize: "13px", marginTop: "10px" } });
-      const label = h("span", {});
-      const input = h("input", { class: "input", autocomplete: "off", spellcheck: "false" });
-      const send = button("보내기", { kind: "primary", type: "submit" });
-      const form = h("form", { style: { display: "flex", gap: "8px", alignItems: "flex-end", marginTop: "6px" } },
-        h("label", { class: "field", style: { flex: "1", minWidth: "0" } }, label, input), send);
-      const status = h("div", { role: "status", style: { fontSize: "13px", marginTop: "8px" } });
-      const cancel = button("취소", { kind: "small quiet" });
-      const turning = spinner();
-      const root = h("div", { class: "panel", style: { marginBottom: "24px", display: "flex", gap: "12px", alignItems: "flex-start" } },
-        turning,
-        h("div", { style: { flex: "1", minWidth: "0" } },
-          h("b", {}, `${backendName(current.backend)} 로그인을 기다리는 중`),
-          intro,
-          linkNote,
-          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", marginTop: "4px" } }, link, copy),
-          boxNote,
-          form,
-          status,
-        ),
-        cancel,
-      );
-      const view = { root, turning, intro, linkNote, link, copy, boxNote, label, input, send, form, status, kind: undefined, text: null, url: null };
-
-      const say = (text, kind = "") => {
-        status.textContent = text;
-        status.style.color = kind === "bad" ? "var(--bad)" : "var(--ink-3)";
-      };
-      view.say = say;
-
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const submission = loginSubmission(view.kind, current.accountId, input.value);
-        if (!submission || send.disabled) return;
-        send.disabled = true;
-        try {
-          const result = await gateway.post(submission.path, submission.body);
-          if (result?.ok === false) throw new Error(result.error || "보내지 못했습니다.");
-          input.value = "";
-          say(view.text.sent);
-          // Exchanging the code takes a moment; the five minutes start again from here.
-          current.since = Date.now();
-        } catch (error) {
-          say(error?.message || "보내지 못했습니다.", "bad");
-        } finally {
-          send.disabled = false;
-        }
-      });
-      cancel.addEventListener("click", async () => {
-        if (cancel.disabled) return;
-        cancel.disabled = true;
-        try {
-          const result = await gateway.post("/login/cancel", { account: current.accountId });
-          if (result?.ok === false) throw new Error(result.error || "취소하지 못했습니다.");
-          if (waiting === current) stopWaiting();
-          draw();
-        } catch (error) {
-          say(error?.message || "취소하지 못했습니다.", "bad");
-        } finally {
-          cancel.disabled = false;
-        }
-      });
-      return view;
-    }
-
-    function updateLoginView(current, prompt) {
-      const view = current.view;
-      if (!view || !prompt) return;
-      const url = signInLink(prompt.url);
-      if (url && url !== view.url) {
-        view.url = url;
-        view.link.href = url;
-        view.link.textContent = url;
-      }
-      if (!view.url) view.link.textContent = "로그인 링크를 기다리는 중입니다…";
-      // A .btn sets its own display, which the hidden attribute does not override.
-      view.copy.style.display = view.url ? "" : "none";
-      // The box is chosen once: a poll that finds the CLI gone must not take it away mid-typing.
-      if (view.kind === undefined) view.kind = loginPanelText(prompt.input).kind;
-      view.text = loginPanelText(view.kind, view.url || prompt.url);
-      view.intro.textContent = view.text.intro;
-      view.linkNote.textContent = view.text.linkNote;
-      view.boxNote.textContent = view.text.boxNote || "";
-      view.boxNote.hidden = !view.kind;
-      view.form.hidden = !view.kind;
-      view.form.style.display = view.kind ? "flex" : "none";
-      if (view.kind) {
-        view.label.textContent = view.text.label;
-        view.input.placeholder = view.text.placeholder;
-      }
-      const ended = loginEnded(prompt);
-      view.turning.style.visibility = ended ? "hidden" : "";
-      if (ended) view.say(ended, "bad");
-    }
-
-    function loginPanel() {
-      return h("div", { class: "panel", style: { marginBottom: "24px", display: "flex", gap: "12px", alignItems: "center" } },
-        spinner(),
-        h("div", { style: { flex: "1" } },
-          h("b", {}, `${backendName(waiting.backend)} 로그인을 기다리는 중`),
-          h("div", { class: "muted", style: { fontSize: "13px" } }, "브라우저에 열린 로그인 창에서 계정을 고르고 허용하세요. 끝나면 이 화면이 알아서 연결합니다."),
-        ),
-        button("그만 기다리기", { kind: "small quiet", onClick: () => { waiting = null; clearInterval(timer); draw(); } }),
-      );
-    }
-
-    function modelsSection(models, accounts) {
-      const serverModel = app.context?.localServer?.chatModel || "";
-      const groups = modelGroups(models, accounts);
-      return section({ title: "게이트웨이 모델", note: "써 보기를 누르면 묻기 화면에서 그 모델에 바로 물어봅니다." },
-        groups.length
-          ? groups.map((group) => h("div", { class: "gw-group" },
-            h("div", { class: "gw-group-head" }, h("b", {}, group.label), h("span", {}, `모델 ${number(group.models.length)}개`)),
-            h("div", { class: "gw-models" }, group.models.map((id) => h("div", { class: `gw-model ${id === serverModel ? "current" : ""}` },
-              h("div", { class: "gw-model-name" }, h("code", { class: "mono", title: id }, id), id === serverModel ? tag("기억 서버가 씀", "accent") : null),
-              button("써 보기", { kind: "small quiet gw-go", iconName: "arrow", title: `${id} 써 보기`, onClick: () => go(`ask/model/${encodeURIComponent(id)}`) }),
-            ))),
-          ))
-          : empty("쓸 수 있는 모델이 없습니다", "계정을 로그인하고 연결하면 모델이 보입니다."),
-      );
-    }
-
-    // The gateway model the memory server sorts conversations and answers with.
-    // Only a server this app installed on this computer can be changed here;
-    // changing it rewrites the server's settings and restarts it.
-    function serverModelSection() {
-      const local = app.context?.localServer;
-      if (!local) return null;
-      const current = local.chatModel || "";
-      const groups = modelGroups(report?.models?.models, report?.accounts);
-      const known = groups.some((group) => group.models.includes(current));
-      const now = h("div", {}, h("div", { class: "title" }, current ? h("code", { class: "mono" }, current) : "정해지지 않음"), h("div", { class: "sub" }, "대화를 정리하고 묻기에 답하는 모델"));
-      if (!groups.length) {
-        return section({ id: "server-model", title: "기억 서버가 쓰는 모델" },
-          h("div", { class: "rows" }, h("div", { class: "row" }, now, h("div", { class: "end" }))),
-          h("div", { style: { marginTop: "12px" } }, notice("warn", h("b", {}, "고를 수 있는 모델이 없습니다."), h("div", {}, "아래 구독 계정에서 계정을 로그인하고 연결하세요."))),
-        );
-      }
-      const choice = h("select", { class: "select", style: { width: "auto", minWidth: "220px" }, "aria-label": "기억 서버 모델" },
-        current && !known ? h("option", { value: current, selected: true }, `${current} (게이트웨이에 없음)`) : null,
-        groups.map((group) => h("optgroup", { label: group.label },
-          group.models.map((id) => h("option", { value: id, selected: id === current ? true : null }, id)))),
-      );
-      return section({ id: "server-model", title: "기억 서버가 쓰는 모델" },
-        h("div", { class: "rows" }, h("div", { class: "row" },
-          now,
-          h("div", { class: "end" }, choice, button("바꾸기", { kind: "small", onClick: async (event) => {
-            if (choice.value === current) return toast("이미 이 모델을 씁니다");
-            const ok = await confirmSheet({ title: `${choice.value}로 바꿀까요?`, text: "기억 서버 설정을 고치고 다시 시작합니다. 1~2분 동안 기억을 쓰거나 찾을 수 없습니다.", confirm: "바꾸고 다시 시작" });
-            if (!ok) return;
-            await busy(event.currentTarget, async () => {
-              await cli("/api/server/start", { profile: "personal", model: choice.value });
-              await loadContext();
-              await draw();
-              refreshStatus();
-            }, { done: "모델을 바꿨습니다" });
-          } })),
-        )),
-      );
-    }
-
-    // The Ollama embedding model. The supervisor keeping it resident starts at
-    // login by itself; 켜기 is for when it was stopped or failed.
-    function embeddingSection() {
+    // The Ollama embedding model. The supervisor keeping it resident starts at login
+    // by itself; 켜기 is for when it was stopped or failed.
+    function embeddingBlock() {
       if (!host?.installed) return null;
       const ollama = host.ollama || {};
       const up = Boolean(ollama.healthy && ollama.resident);
       const watching = Boolean(host.supervisor?.processAlive);
-      return section({ title: "임베딩 모델" },
-        h("div", { class: "rows" }, h("div", { class: "row" },
-          h("div", {},
-            h("div", { class: "title" }, statusTag(up, ["올라가 있음", ollama.healthy ? "모델이 내려가 있음" : "Ollama 꺼짐"]), ollama.model ? h("code", { class: "mono" }, ollama.model) : "Ollama"),
-            watching ? null : h("div", { class: "sub" }, "감시 꺼짐: 켜기를 누르세요."),
-          ),
-          h("div", { class: "end" }, up && watching ? null : button("켜기", { kind: "small primary", iconName: "play", onClick: (event) => busy(event.currentTarget, async () => {
-            await cli("/api/host/start", {});
-            await draw();
-            refreshStatus();
-          }, { done: "켰습니다" }) })),
-        )),
-      );
+      return block({
+        title: "임베딩 모델",
+        actions: up && watching ? [] : [button("켜기", { kind: "small primary", iconName: "play", onClick: (event) => busy(event.currentTarget, async () => {
+          await cli("/api/host/start", {});
+          await draw();
+          refreshStatus();
+        }, { done: "켰습니다" }) })],
+      }, kv("모델", [ollama.model ? h("span", { class: "mono" }, ollama.model) : "Ollama", " · ", up ? "Ollama에 올라가 있음" : ollama.healthy ? "모델이 내려가 있음" : "Ollama 꺼짐",
+        watching ? null : h("div", { class: "s" }, "감시가 꺼져 있습니다. 켜기를 누르세요.")]));
     }
 
-    function servicesSection(services) {
-      return h("details", { class: "gw-advanced", open: advancedOpen ? true : null, ontoggle: (event) => { advancedOpen = event.currentTarget.open; } },
-        h("summary", {}, "고급", h("span", { class: "muted" }, " · 게이트웨이 안의 프로그램")),
-        h("p", { class: "section-note" }, "계정마다 하나씩 도는 어댑터와, 요청을 나눠 주는 라우터입니다. 보통은 건드릴 일이 없습니다."),
-        h("div", { class: "rows" }, services.map((service) => h("div", { class: "row" },
-          h("div", {}, h("div", { class: "title" }, service.label || service.name, service.running ? tag("실행 중", "ok") : tag("멈춤")), h("div", { class: "sub mono" }, service.url || "")),
-          h("div", { class: "end" }, service.running
+    function advanced() {
+      const groups = modelGroups(report.models?.models, report.accounts);
+      const fold = h("details", { class: "fold", open: advancedOpen || null },
+        h("summary", {}, "고급 · 게이트웨이의 모델과 프로그램"),
+        report.endpoint ? h("div", { class: "row2" }, "API 주소 ", h("span", { class: "mono" }, report.endpoint),
+          button("", { kind: "small icon-only quiet", iconName: "copy", title: "주소 복사", onClick: async () => { await copyText(report.endpoint); toast("주소를 복사했습니다"); } }),
+          app.context?.gatewayUiUrl ? h("a", { class: "btn quiet small", href: app.context.gatewayUiUrl, target: "_blank", rel: "noreferrer" }, "게이트웨이 화면") : null) : null,
+        groups.map((group) => [h("div", { class: "label" }, `${subscription(group.backend)} 모델 ${number(group.models.length)}개`),
+          h("div", { class: "opts" }, group.models.map((id) => h("div", { class: "swrow" },
+            h("div", { class: "ab" }, h("div", { class: "t mono" }, id)),
+            button("써 보기", { kind: "small quiet", onClick: () => go(`ask/model/${encodeURIComponent(id)}`) }))))]),
+        h("div", { class: "label" }, "게이트웨이 안의 프로그램"),
+        h("div", { class: "opts" }, (report.services || []).map((service) => h("div", { class: "swrow" },
+          h("div", { class: "ab" }, h("div", { class: "t" }, service.label || service.name, " ", statusTag(service.running, ["실행 중", "멈춤"])), h("div", { class: "s mono" }, service.url || "")),
+          service.running
             ? button("멈추기", { kind: "small", iconName: "stop", onClick: (event) => busy(event.currentTarget, async () => { const result = await gateway.post("/stop", { service: service.name }); if (result.ok === false) throw new Error(result.error); await draw(); refreshStatus(); }) })
-            : button("시작", { kind: "small", iconName: "play", onClick: (event) => busy(event.currentTarget, async () => { const result = await gateway.post("/start", { service: service.name }); if (result.ok === false) throw new Error(result.error); await draw(); refreshStatus(); }) })),
-        ))),
-      );
+            : button("시작", { kind: "small", iconName: "play", onClick: (event) => busy(event.currentTarget, async () => { const result = await gateway.post("/start", { service: service.name }); if (result.ok === false) throw new Error(result.error); await draw(); refreshStatus(); }) })))));
+      fold.addEventListener("toggle", () => { advancedOpen = fold.open; });
+      return fold;
     }
 
-    refresh.addEventListener("click", () => busy(refresh, draw));
-    clear(body, h("div", { class: "empty" }, spinner()));
+    clear(body, spinner());
     await draw();
     // Another screen's "log in" button lands here as #/models/add/<backend>.
     if (params[0] === "add" && ["codex", "claude"].includes(params[1])) {
       history.replaceState(null, "", "#/models");
-      if (report) await addAccount(params[1]).catch((error) => toast(error.message, "bad"));
+      if (report) openAddAccount(draw, params[1]);
     }
-    return { cleanup: () => clearInterval(timer) };
+    return null;
   },
 };

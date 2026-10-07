@@ -1,26 +1,33 @@
-// The app shell: navigation, the theme, the quick-jump palette, and handing the
-// page to one screen at a time. What this computer runs, and how each part stands,
-// is the 대시보드 screen.
+// The app shell: the menu, the bell, the theme, the quick-jump palette, and handing
+// the page to one screen at a time. Until this computer is set up, the page stays
+// empty under the first setup window (views/setup.js); what this computer runs, and
+// how each part stands, is the 대시보드 screen.
 import { get } from "./lib/api.js";
 import { h, clear, svg, $ } from "./lib/dom.js";
-import { TABS } from "./lib/hub.js";
+import { mountBell, refreshBell } from "./lib/bell.js";
+import { TABS } from "./lib/tabs.js";
 import { icon } from "./lib/icons.js";
 import { app, go, loadContext, me, onChange, refreshStatus, workspace } from "./lib/state.js";
 import { button, errorNotice, pageHead, toast } from "./lib/ui.js";
+import { openSetup } from "./views/setup.js";
 
 import dashboard from "./views/dashboard.js";
 import memory from "./views/memory.js";
 import ask from "./views/ask.js";
-import computer from "./views/computer.js";
+import settings from "./views/settings.js";
 import team from "./views/team.js";
+import audit from "./views/audit.js";
 import server from "./views/server.js";
 import models from "./views/models.js";
-import start from "./views/start.js";
-import backup from "./views/backup.js";
 import share from "./views/share.js";
+import backup from "./views/backup.js";
+import admin from "./views/admin.js";
 
-const VIEWS = { dashboard, memory, ask, computer, team, server, models, share, start, backup };
-// 기억 also holds 묻기, and 서버 holds 모델 and 공유, each one tab away.
+// `computer` is 기억 설정's address from before it was renamed; links and the setup
+// skill still open it by that name.
+const VIEWS = { dashboard, memory, ask, computer: settings, team, audit, server, models, share, backup, admin };
+// 기억 also holds 묻기, and 서버 holds 모델 and 공유, each one tab away. 관리자 sits
+// apart, under a line.
 const NAV = [
   ["dashboard", "대시보드", "gauge"],
   ["memory", "기억", "memory"],
@@ -28,29 +35,35 @@ const NAV = [
   ["team", "팀", "person"],
   ["server", "서버", "server"],
   ["backup", "백업", "backup"],
+  ["admin", "관리자", "shield"],
 ];
-const START = ["start", "시작하기", "start"];
+const APART = new Set(["admin"]);
 
-// Where an address from before the menus were regrouped (0.4.5), or a page that
-// moved to another menu since (0.4.7, 0.4.8), goes now.
+// Where an address from before the menus were regrouped (0.4.5), a page that moved
+// to another menu since (0.4.7, 0.4.8), or a page that became a window on its menu's
+// one page (0.5) goes now. `computer/collect`, `/tools` and `/import` stay: they open
+// 기억 설정 with that window open.
 const MOVED = {
   "computer/share": "share",
   connect: "computer",
   "connect/collect": "computer/collect",
   "connect/import": "computer/import",
-  "connect/share": "team/memories",
-  "connect/targets": "computer/targets",
-  "team/targets": "computer/targets",
+  "connect/share": "team",
+  "connect/targets": "computer/collect",
+  "computer/targets": "computer/collect",
+  "team/targets": "computer/collect",
   tools: "computer/tools",
   "tools/shared": "team",
-  "tools/audit": "team/audit",
-  audit: "team/audit",
+  "tools/audit": "audit",
+  "team/audit": "audit",
+  "team/memories": "team",
+  "team/share": "admin",
 };
 
 // Two glyphs only the shell draws, in the same hand as lib/icons.js.
 const SHELL_ICONS = {
   lock: '<rect x="3.5" y="7" width="9" height="6.5" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/>',
-  backup: '<rect x="2.5" y="9.5" width="11" height="4" rx="1"/><path d="M8 2.5v5.5M5.5 5.5L8 8l2.5-2.5"/><path d="M5 11.5h.01"/>',
+  backup: '<path d="M8 2.5v7M5 7l3 3 3-3"/><path d="M2.5 10.5v3h11v-3"/>',
 };
 function glyph(name) {
   const body = SHELL_ICONS[name];
@@ -60,27 +73,29 @@ function glyph(name) {
 }
 
 let current = { name: "", gate: null, frame: null, cleanup: null, update: null };
+let setupWindow = null;
 
 function route() {
   const [name = "", ...rest] = decodeURIComponent(location.hash.replace(/^#\/?/, "")).split("/");
-  return { name: VIEWS[name] ? name : "", params: rest };
+  return { name: VIEWS[name] || name === "start" ? name : "", params: rest };
 }
 
 function movedTo() {
   const [name = "", page = ""] = decodeURIComponent(location.hash.replace(/^#\/?/, "")).split("/");
   if (MOVED[`${name}/${page}`]) return MOVED[`${name}/${page}`];
-  if (VIEWS[name]) return null;
+  if (VIEWS[name] || name === "start") return null;
   return MOVED[name] || null;
 }
 
 /** The menu item a screen sits under: its tab group's first screen, or itself. */
 function menuOf(name) {
+  if (name === "audit") return "team";
   return Object.values(TABS).find((screens) => screens.some(([screen]) => screen === name))?.[0][0] || name;
 }
 
 // ── What this computer has, and what it can use yet ─────
 
-/** A memory server answers here: one set up for 대화 쌓기, one installed here, or one that was already running. */
+/** A memory server answers here: one set up for collection, one installed here, or one already running. */
 function memoryAnswers() {
   return app.status.honcho.state === "on";
 }
@@ -95,21 +110,29 @@ function setupDone() {
   return Boolean(context?.configured || teamConnected() || context?.localServer || memoryAnswers());
 }
 
-/** 시작하기 stays until setup is done, or, once a choice is made there, until its steps all are. */
-function startOpen() {
-  return !setupDone() || (Boolean(app.prefs.startChoice) && !app.prefs.startDone);
+/** Stores nothing and only asks teammates' memories: 기억 and 서버 mean nothing here. */
+function chatOnly() {
+  const context = app.context;
+  return Boolean(context && !context.configured && !context.localServer && teamConnected() && !memoryAnswers());
 }
 
 /** A server here, one about to be installed here, or a gateway answering here. */
 function serverHere() {
-  const picked = app.prefs.startChoice === "here";
-  return Boolean(app.context?.localServer || picked || app.status.gateway.report);
+  return Boolean(app.context?.localServer || app.status.gateway.report);
+}
+
+/** Someone who chose 혼자 쓰기 has no team, unless they made or joined one since. */
+function teamHere() {
+  return Boolean(app.context?.team?.admin || teamConnected() || app.prefs.mode !== "solo");
 }
 
 /** Screens that mean nothing on this computer are left out of the menu. */
 function visible(name) {
-  if (name === "start") return startOpen();
+  if (name === "memory" || name === "ask") return !chatOnly();
+  if (name === "team") return teamHere();
+  if (name === "audit") return teamHere() && (Boolean(app.context?.localServer) || app.auditAnswers);
   if (name === "server" || name === "models" || name === "share") return serverHere();
+  if (name === "admin") return Boolean(app.context?.team?.admin);
   return true;
 }
 
@@ -119,16 +142,7 @@ function visible(name) {
  */
 function gate(name) {
   const context = app.context;
-  if (!context) return null;
-  // Until the first check answers, whether a memory server is here is unknown.
-  if (!setupDone() && !app.status.honcho.pending && ["memory", "ask"].includes(name)) {
-    return {
-      reason: "시작하기에서 설정을 마치면 열립니다",
-      detail: "이 컴퓨터가 어느 기억 서버를 쓸지 아직 정하지 않았습니다.",
-      fix: ["시작하기로", "start"],
-    };
-  }
-  if (name !== "memory" && name !== "ask") return null;
+  if (!context || (name !== "memory" && name !== "ask")) return null;
   const gateway = app.status.gateway;
   if (context.localServer && !gateway.pending && gateway.state !== "on") {
     const loggedIn = (gateway.report?.accounts || []).some((account) => account.login?.loggedIn);
@@ -137,37 +151,37 @@ function gate(name) {
         : loggedIn ? "구독 게이트웨이에서 로그인한 계정을 연결하세요"
           : "구독 게이트웨이에 계정을 먼저 로그인하세요",
       detail: "이 컴퓨터의 기억 서버는 구독 계정의 모델로 대화를 정리하고 질문에 답합니다.",
-      fix: ["구독 게이트웨이로", "models"],
-    };
-  }
-  if (!context.localServer && teamConnected() && !context.configured && !memoryAnswers()) {
-    return {
-      reason: "대화 쌓기를 켜면 열립니다",
-      detail: "이 컴퓨터는 팀원 기억에만 연결돼 있습니다. 기억과 묻기는 내 기억 서버를 봅니다.",
-      fix: ["대화 쌓기 설정", "computer/collect"],
+      fix: ["서버 → 모델로", "models"],
     };
   }
   return null;
 }
 
 function navItems() {
-  return [START, ...NAV].filter(([name]) => visible(name));
+  return NAV.filter(([name]) => visible(name));
 }
 
 function renderNav() {
   const nav = $("#nav");
   if (!app.context) { clear(nav); return; }
-  const active = menuOf(route().name || defaultView());
-  clear(nav, navItems().map(([name, label, symbol]) => {
-    const blocked = gate(name);
+  const blank = !setupDone();
+  nav.classList.toggle("off", blank);
+  const active = blank ? "" : menuOf(route().name || "dashboard");
+  const links = [];
+  for (const [name, label, symbol] of navItems()) {
+    if (APART.has(name)) links.push(h("div", { class: "sep", role: "presentation" }));
+    const blocked = blank ? null : gate(name);
     const onPage = name === active ? "page" : null;
-    if (!blocked) return h("a", { href: `#/${name}`, "aria-current": onPage }, glyph(symbol), h("span", {}, label));
+    if (!blocked) {
+      links.push(h("a", { href: `#/${name}`, "aria-current": onPage, tabindex: blank ? "-1" : null }, glyph(symbol), h("span", {}, label)));
+      continue;
+    }
     const explain = (event) => {
       if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       toast(blocked.reason);
     };
-    return h("a", {
+    links.push(h("a", {
       class: "gated",
       role: "link",
       tabindex: "0",
@@ -176,8 +190,9 @@ function renderNav() {
       title: blocked.reason,
       onclick: explain,
       onkeydown: explain,
-    }, glyph(symbol), h("span", {}, label), glyph("lock"));
-  }));
+    }, glyph(symbol), h("span", {}, label), glyph("lock")));
+  }
+  clear(nav, links);
 }
 
 function renderWho() {
@@ -186,12 +201,12 @@ function renderWho() {
 }
 
 function renderTheme() {
-  const button = $("#theme");
+  const control = $("#theme");
   const dark = document.documentElement.dataset.theme === "dark"
     || (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
-  clear(button, icon(dark ? "sun" : "moon"));
-  button.title = dark ? "밝은 화면" : "어두운 화면";
-  button.onclick = () => {
+  clear(control, icon(dark ? "sun" : "moon"));
+  control.title = dark ? "밝은 화면" : "어두운 화면";
+  control.onclick = () => {
     const next = dark ? "light" : "dark";
     document.documentElement.dataset.theme = next;
     try { localStorage.setItem("tm.theme", next); } catch {}
@@ -199,15 +214,9 @@ function renderTheme() {
   };
 }
 
-function defaultView() {
-  if (!app.context) return "dashboard";
-  if (startOpen()) return "start";
-  return "dashboard";
-}
-
 /** What a locked screen shows when it is opened by URL. */
 function gatedPage(frame, name, blocked) {
-  const label = [START, ...NAV].find(([key]) => key === menuOf(name))?.[1] || VIEWS[name].title;
+  const label = NAV.find(([key]) => key === menuOf(name))?.[1] || VIEWS[name].title;
   frame.append(
     pageHead({ title: label }),
     h("div", { class: "page-body" }, h("div", { class: "pad" },
@@ -223,15 +232,47 @@ function gatedPage(frame, name, blocked) {
   );
 }
 
+/** First setup, or setup again from the palette: one window, over whatever is on the page. */
+function showSetup({ firstRun }) {
+  if (setupWindow) return;
+  setupWindow = openSetup({
+    firstRun,
+    onDone: async (next = "dashboard") => {
+      setupWindow = null;
+      await loadContext().catch(() => {});
+      await refreshStatus().catch(() => {});
+      history.replaceState(null, "", `#/${next}`);
+      show({ force: true });
+    },
+    onCancel: () => { setupWindow = null; },
+  });
+}
+
 async function show({ force = false } = {}) {
   const moved = movedTo();
   if (moved) {
     history.replaceState(null, "", `#/${moved}`);
     return show();
   }
-  const { name, params } = route();
-  if (!name) {
-    history.replaceState(null, "", `#/${defaultView()}`);
+  const page = $("#page");
+  if (!setupDone()) {
+    // Nothing opens before setup: the page stays empty under the setup window.
+    renderNav();
+    try { current.cleanup?.(); } catch {}
+    current = { name: "", gate: null, frame: null, cleanup: null, update: null };
+    clear(page);
+    showSetup({ firstRun: true });
+    return;
+  }
+  let { name, params } = route();
+  if (name === "start") {
+    history.replaceState(null, "", `#/${current.name || "dashboard"}`);
+    showSetup({ firstRun: false });
+    if (current.name) return;
+    ({ name, params } = route());
+  }
+  if (!name || !visible(name)) {
+    history.replaceState(null, "", "#/dashboard");
     return show();
   }
   renderNav();
@@ -241,7 +282,6 @@ async function show({ force = false } = {}) {
     current.update(params);
     return;
   }
-  const page = $("#page");
   try { current.cleanup?.(); } catch {}
   // Each screen gets its own frame, so one still loading cannot draw into the next.
   const frame = h("div", { class: "view-frame" });
@@ -263,12 +303,15 @@ async function show({ force = false } = {}) {
   }
 }
 
-/** A change in setup or status can lock or unlock the screen on view. */
+/** A change in setup or status can lock, unlock or hide the screen on view. */
 function regate() {
-  if (!current.name) return;
+  if (!current.name) {
+    if (setupDone() && !setupWindow) show({ force: true });
+    return;
+  }
   const { name } = route();
   if (name !== current.name) return;
-  if ((gate(name)?.reason || "") !== (current.gate?.reason || "")) show({ force: true });
+  if (!visible(name) || (gate(name)?.reason || "") !== (current.gate?.reason || "")) show({ force: true });
 }
 
 async function probeAudit() {
@@ -280,9 +323,6 @@ async function probeAudit() {
     // The dashboard answering with its own error still means it is here.
     app.auditAnswers = !error.unreachable && Boolean(error.status) && error.status !== 404;
   }
-  // 팀 lists 조회 기록 once the log is known to answer here.
-  const { name, params } = route();
-  if (app.auditAnswers && name === "team" && !params[0]) show({ force: true });
 }
 
 function palette() {
@@ -290,14 +330,14 @@ function palette() {
     ...navItems().map(([name, label]) => ({ label, hint: "화면", screen: name, run: () => go(name) })),
     { label: "기억에서 찾기", hint: "기억", screen: "memory", run: () => { go("memory"); setTimeout(() => $("#memory-search")?.focus(), 50); } },
     { label: "내 기억에 묻기", hint: "기억", screen: "ask", run: () => go("ask") },
-    { label: "구독 계정 추가", hint: "서버", screen: "models", run: () => go("models") },
-    // Every page 기억 설정 and 팀 list here, found by its title or what it does.
-    ...[["computer", computer], ["team", team]].flatMap(([name, view]) => view.available().map((page) => (
-      { label: page.title, hint: view.title, words: page.why, screen: name, run: () => go(`${name}/${page.key}`) }))),
-    { label: "서버 점검", hint: "서버", screen: "server", run: () => go("server") },
+    { label: "대화 수집 수정", hint: "기억 설정", words: "서버 에이전트 프로젝트 폴더 회사 서버", screen: "computer", run: () => go("computer/collect") },
+    { label: "MCP 도구", hint: "기억 설정", screen: "computer", run: () => go("computer/tools") },
+    { label: "ChatGPT 기록 가져오기", hint: "기억 설정", screen: "computer", run: () => go("computer/import") },
+    { label: "구독 계정 더하기", hint: "서버", screen: "models", run: () => go("models") },
     { label: "공유", hint: "서버", words: "다른 컴퓨터 붙이기 서버 token 팀 만들기 초대 코드", screen: "share", run: () => go("share") },
+    { label: "조회 기록", hint: "팀", words: "누가 내 기억에 물었나", screen: "audit", run: () => go("audit") },
     { label: "대화 원본 백업", hint: "백업", screen: "backup", run: () => go("backup") },
-    { label: "처음 설정 다시 보기", hint: "시작하기", screen: "", run: () => go("start") },
+    { label: "처음 설정 다시 하기", hint: "시작하기", screen: "", run: () => go("start") },
   ].filter((entry) => !entry.screen || visible(entry.screen))
     .map((entry) => (entry.screen && gate(entry.screen) ? { ...entry, hint: `${entry.hint} · 잠김` } : entry));
   let selected = 0;
@@ -332,7 +372,7 @@ async function boot() {
   renderTheme();
   $("#menu").addEventListener("click", () => $("#rail").classList.toggle("open"));
   document.addEventListener("keydown", (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" && setupDone()) {
       event.preventDefault();
       if (!document.querySelector("dialog.palette")) palette();
     }
@@ -345,15 +385,16 @@ async function boot() {
     clear($("#page"), pageHead({ title: "팀 메모리" }), h("div", { class: "pad" }, errorNotice(error)));
     return;
   }
+  mountBell($(".main"));
   window.addEventListener("hashchange", () => show());
   const firstStatus = refreshStatus();
-  // Whether 기억 and 묻기 open depends on the first check (a memory server answering,
-  // the gateway on a server computer), so give it a moment rather than open a screen
-  // and then lock it.
+  // Whether this computer is set up, and whether 기억 opens, depend on the first
+  // check (a memory server answering, the gateway on a server computer), so give it
+  // a moment rather than open a screen and then lock or hide it.
   await Promise.race([firstStatus, new Promise((resolve) => setTimeout(resolve, 3000))]);
+  await probeAudit();
   await show();
-  probeAudit();
-  setInterval(refreshStatus, 60_000);
+  setInterval(() => { refreshStatus(); refreshBell(); }, 60_000);
 }
 
 boot();

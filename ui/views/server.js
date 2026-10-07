@@ -2,10 +2,10 @@
 // it, and check it end to end. The models it uses, the subscription gateway and the
 // Ollama embedding model, are the 모델 tab (models.js). Building or restarting it
 // is a deployment, so every button that does that says so first. Sharing it is the
-// 공유 tab, and the team it opens to is 팀 → 내 기억 공유 (share.js).
+// 공유 tab (share.js), and the team it opens to is 관리자 (admin.js).
 import { cli, gateway, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
-import { screenTabs } from "../lib/hub.js";
+import { screenTabs } from "../lib/tabs.js";
 import { api, app, go, loadContext, refreshStatus } from "../lib/state.js";
 import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, statusTag, tag } from "../lib/ui.js";
 
@@ -85,7 +85,7 @@ function prepareOutcome(result) {
   if (result.issues?.length) return notice("bad", h("b", {}, "준비하지 못했습니다."), h("ul", {}, result.issues.map((issue) => h("li", {}, issue))), result.next ? h("div", {}, result.next) : null);
   if (result.ok && result.ready !== false) {
     return notice(result.share?.profileDropped ? "warn" : "ok", h("b", {}, "준비했습니다."), result.chatModel ? ` 모델은 ${result.chatModel}입니다.` : "", " 이제 시작할 수 있습니다.",
-      result.share?.profileDropped ? h("div", {}, "예전 판에서 켠 공유는 꺼 두었습니다. 팀 → 내 기억 공유에서 다시 켜세요.") : null);
+      result.share?.profileDropped ? h("div", {}, "예전 판에서 켠 공유는 꺼 두었습니다. 서버 → 공유에서 다시 켜세요.") : null);
   }
   return notice("warn", h("b", {}, "끝나지 않았습니다."), result.next || result.error || "");
 }
@@ -128,7 +128,7 @@ export default {
         nodes.push(section({ title: "기억 서버" },
           external
             ? notice("", h("b", {}, `이 컴퓨터의 대화는 ${context?.honcho?.url}의 기억 서버에 쌓입니다.`), h("div", {}, "그 서버는 다른 컴퓨터에 있어 여기서 켜고 끌 수 없습니다. 서버를 둔 컴퓨터에서 이 앱을 여세요."))
-            : notice("warn", h("b", {}, "이 컴퓨터에는 기억 서버가 없습니다."), h("div", {}, "다른 컴퓨터에 서버가 있으면 기억 설정 → 대화 쌓기에서 그 주소를 넣으세요.")),
+            : notice("warn", h("b", {}, "이 컴퓨터에는 기억 서버가 없습니다."), h("div", {}, "다른 컴퓨터에 서버가 있으면 기억 설정 → 대화 수집 → 수정에서 그 주소를 넣으세요.")),
         ));
         // Installing a second server beside one that already answers would split a person's memories.
         nodes.push(external

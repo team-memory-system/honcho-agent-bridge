@@ -31,67 +31,6 @@
   </div>
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
-  <!-- The form that writes this computer's setup. It is plain markup so the fields
-       the server accepts can be checked against what the page sends. -->
-  <template id="tpl-setup-form">
-    <!-- 대화 쌓기 walks through this one form a step at a time (views/connect.js):
-         each data-step group is one step, and the whole form is sent at the end. -->
-    <form id="setup-form" autocomplete="off">
-      <div class="setup-step" data-step="server">
-        <div data-slot="server-choice"></div>
-        <div class="form-grid" data-remote>
-          <label class="field wide">
-            <span>서버 주소</span>
-            <input class="input" name="honchoUrl" type="url" placeholder="https://…">
-            <small>서버를 둔 컴퓨터의 서버 → 공유에서 복사하세요.</small>
-          </label>
-          <label class="field wide">
-            <span>서버 토큰</span>
-            <input class="input" name="apiToken" type="password" placeholder="서버를 둔 컴퓨터에서 복사한 토큰">
-            <small>같은 곳의 서버 token 복사로 받습니다. 채팅에 붙여넣지 말고 여기에만 넣으세요.</small>
-          </label>
-          <details class="field wide access-fields">
-            <summary>Access 서비스 토큰</summary>
-            <p class="muted">직접 만든 Access 뒤의 서버일 때만 넣습니다.</p>
-            <div class="form-grid">
-              <label class="field">
-                <span>Access 서비스 토큰 ID</span>
-                <input class="input" name="accessClientId" type="password" autocomplete="off">
-              </label>
-              <label class="field">
-                <span>Access 서비스 토큰 비밀</span>
-                <input class="input" name="accessClientSecret" type="password" autocomplete="off">
-              </label>
-            </div>
-          </details>
-        </div>
-      </div>
-      <div class="setup-step" data-step="agents">
-        <div class="agent-picks">
-          <label class="agent-pick"><input type="checkbox" name="agents" value="claude" checked><span class="src claude" aria-hidden="true">C</span><span>Claude Code</span><small data-detect="claude"></small></label>
-          <label class="agent-pick"><input type="checkbox" name="agents" value="codex" checked><span class="src codex" aria-hidden="true">X</span><span>Codex</span><small data-detect="codex"></small></label>
-        </div>
-      </div>
-      <div class="setup-step" data-step="name">
-        <div class="form-grid">
-          <label class="field wide">
-            <span>peer 이름</span>
-            <input class="input" name="userPeer" required pattern="[A-Za-z0-9_\-]+" placeholder="예: user_minji">
-            <small>영문·숫자·밑줄(_)·하이픈(-)만 씁니다.</small>
-          </label>
-          <details class="field wide access-fields">
-            <summary>고급: workspace</summary>
-            <label class="field">
-              <span>workspace</span>
-              <input class="input" name="workspace" pattern="[A-Za-z0-9_\-]+" placeholder="memory">
-              <small>보통 그대로 둡니다. 내 모든 컴퓨터에서 같게 둡니다.</small>
-            </label>
-          </details>
-        </div>
-      </div>
-    </form>
-  </template>
-
   <script type="module" src="/app.js"></script>
 </body>
 </html>

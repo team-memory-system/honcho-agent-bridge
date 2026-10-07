@@ -36,6 +36,8 @@ const PATHS = {
   layers: '<path d="M8 2.5l5.5 3L8 8.5l-5.5-3z"/><path d="M2.5 8.5L8 11.5l5.5-3"/>',
   gauge: '<path d="M2.75 11.5a5.25 5.25 0 0110.5 0"/><path d="M8 11.5l2.25-3.25"/>',
   folder: '<path d="M2.5 4a1 1 0 011-1h3l1.5 1.5h4.5a1 1 0 011 1v6.5a1 1 0 01-1 1h-9a1 1 0 01-1-1z"/>',
+  shield: '<path d="M8 1.75l5 2v4.1c0 3-2.1 5.1-5 6.4-2.9-1.3-5-3.4-5-6.4v-4.1z"/><path d="M5.75 8l1.5 1.5 3-3"/>',
+  bell: '<path d="M4.25 7a3.75 3.75 0 017.5 0v3l1.25 2H3l1.25-2z"/><path d="M6.5 13.5a1.5 1.5 0 003 0"/>',
 };
 
 export function icon(name, className = "icon") {

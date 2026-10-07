@@ -1,4 +1,4 @@
-// 팀 → 조회 기록: every call that reached the memory server's MCP bridge, newest
+// 조회 기록, under 팀: every call that reached the memory server's MCP bridge, newest
 // first, with what was asked. The dashboard reads at most 1000 rows at a time and
 // has no cursor, so "더 보기" asks again with a larger limit up to that cap.
 import { get } from "../lib/api.js";
@@ -38,8 +38,8 @@ function rowKey(row) {
 
 export default {
   title: "조회 기록",
-  /** Drawn under the header its menu gives it. */
-  async mount(page, head) {
+  async mount(page) {
+    const head = { title: "조회 기록", subtitle: "누가 내 기억에 무엇을 물었는지, 거부된 것까지 그대로 남깁니다.", back: { href: "#/team", label: "팀" } };
     const filters = { hours: "24", status: "", tool: "", caller: "" };
     let limit = STEP;
     let rows = [];

@@ -444,10 +444,9 @@ test("setup warns with the commands when a host's CLI is missing, and about a pl
   assert.match(await fsp.readFile(path.join(f.home, ".codex", "config.toml"), "utf8"), /enabled = false/, "a turned-off plugin stays off");
 });
 
-test("the 연결 page names the install operation, translates the missing-CLI warning, and shows the commands after apply", async () => {
-  const connect = await fsp.readFile(path.join(ROOT, "ui", "views", "connect.js"), "utf8");
-  assert.match(connect, /"install-plugin": \(op\) => `\$\{op\.agent === "codex" \? "Codex" : "Claude Code"\}에 팀 메모리 플러그인을 설치합니다\.`/);
-  const warnings = connect.slice(connect.indexOf("const WARNINGS = ["), connect.indexOf("];", connect.indexOf("const WARNINGS = [")));
+test("the setup steps translate the missing-CLI warning and show the commands after apply", async () => {
+  const collect = await fsp.readFile(path.join(ROOT, "ui", "lib", "collect.js"), "utf8");
+  const warnings = collect.slice(collect.indexOf("const WARNINGS = ["), collect.indexOf("];", collect.indexOf("const WARNINGS = [")));
   const pattern = new RegExp(warnings.match(/\[\/(.*?command was not found.*?)\/,/)[1]);
   const match = pattern.exec("claude collection is enabled, but the Honcho Agent Bridge plugin is not installed in claude and the claude command was not found; install it by running claude plugin marketplace add team-memory-system/honcho-agent-bridge, then claude plugin install honcho-agent-bridge@honcho-agent-bridge --scope user");
   assert.deepEqual([match[1], match[2], match[3]], [
@@ -455,5 +454,7 @@ test("the 연결 page names the install operation, translates the missing-CLI wa
     "claude plugin marketplace add team-memory-system/honcho-agent-bridge",
     "claude plugin install honcho-agent-bridge@honcho-agent-bridge --scope user",
   ]);
-  assert.match(connect, /step\.action === "install-plugin"/);
+  // After apply, an agent the plugin could not go into gets the commands as its 할 일.
+  assert.match(collect, /step\.action === "install-plugin"/);
+  assert.match(collect, /터미널에서 차례로 실행하세요/);
 });

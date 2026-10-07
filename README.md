@@ -39,18 +39,25 @@ question and gets an answer, without reading the underlying messages.
 2. **Install.** `scripts/cli.mjs` detects agents, previews changes, backs up what it
    edits, and writes the hook.
 3. **The Team Memory app.** `scripts/ui.mjs` serves `ui/`, one screen over all three
-   programs, in six menus. 대시보드, the first screen after setup, shows at a glance
-   how this computer's memory stands: what waits on this computer to be sent, how
-   many conversations the server holds, how far Honcho has got putting them in
-   order, and the gateway, models, backup and sharing; nothing on it is a link. 기억
-   reads and searches the memories and asks Honcho or a gateway model. 기억 설정
-   sets up collection, sends chosen projects' conversations to other servers too,
-   switches this computer's MCP tools and imports ChatGPT. 팀 adds and removes the
-   teammates who may ask this memory, reads the audit log and connects teammates'
-   memories. 서버 runs the server (기억 서버); on 모델, the subscription gateway, the
-   embedding model and the model the server uses; and on 공유, it opens the server
-   to the owner's other computers and the team. 백업 copies the raw conversations
-   every day at the hour chosen.
+   programs, drawn from the design boards in `design/screens/`. Until a computer is
+   set up, its page stays empty under one first setup window: 팀에 들어가기 (from
+   the 팀 주소 the admin copied), 새 팀 만들기 (from a Cloudflare API token) or 혼자
+   쓰기, then the steps 서버 → 모델 (only when a server is made here) → 에이전트 →
+   프로젝트 → 팀원 (only for a team), 적용, a row for each thing it does (적용 중),
+   and what is left to do in each agent (할 일). After that, the menus: 대시보드
+   shows the servers the conversations go to in one table (up to date or not, what
+   waits here, when the last one went, what the server holds), how far Honcho has
+   got putting them in order, and tiles for the gateway, backup and sharing; nothing
+   on it is a link. 기억 reads and searches the memories and asks Honcho or a
+   gateway model. 기억 설정 is three blocks whose buttons open windows: 대화 수집's
+   수정 is first setup's own steps, other servers and per-folder choices included;
+   MCP 도구; ChatGPT 기록. 팀 holds teammates' memories behind a switch each, and
+   조회 기록. 서버 runs the server (기억 서버); on 모델, the subscription accounts,
+   the model the server uses and the embedding model; and on 공유, it opens the
+   server to the owner's other computers and the team. 백업 copies the raw
+   conversations every day at the hour chosen. 관리자, shown only on the computer
+   that made the team, holds the team list, the 팀 주소 and the Cloudflare token. A
+   bell at the top right of every page lists what waits for a press.
    Setup steps run the same CLI a terminal would; memories, the gateway and the
    audit log are relayed to those programs' own APIs by `scripts/app-api.mjs`,
    which adds the Honcho token so the page never holds it.
@@ -232,7 +239,9 @@ question and gets an answer, without reading the underlying messages.
   send. When those conversations reach the server another way, mark their current
   turns as sent before the hook goes on. No command does this; that PC's state was
   written by a one-off script over the collector's own parsers and
-  `turnHashCandidates`.
+  `turnHashCandidates`. A session never opened again is never sent by the hook;
+  `backfill` sends those (see [Which folders, and past
+  conversations](#which-folders-and-past-conversations--프로젝트-폴더와-지난-대화)).
 - **Grok CLI also runs Claude Code's hooks.** It loads `~/.claude/settings.json`
   too, and hands those hooks its own `updates.jsonl` as `transcript_path`; `main.mjs`
   drops such a payload for claude and codex. Hooks there that need environment
@@ -267,15 +276,16 @@ question and gets an answer, without reading the underlying messages.
 ### Verify a change
 
 ```sh
-npm test          # 454 tests, no network, no Docker
+npm test          # 460 tests, no network, no Docker
 node scripts/cli.mjs detect
 node scripts/cli.mjs doctor
 npm run ui        # the Team Memory app on localhost
 ```
 
 Tests are the contract. Several of them exist specifically to fail when something
-drifts: the tool count in `tests/mcp-server.test.mjs`, the setup and connect forms'
-field names in `tests/ui.test.mjs`, a teammate's share screens never naming Cloudflare in
+drifts: the tool count in `tests/mcp-server.test.mjs`, every option the setup steps
+send being one the server accepts, and a typed token going nowhere but the setup
+routes, in `tests/ui.test.mjs`, a teammate's screens never naming Cloudflare in
 `tests/ui.test.mjs`, the CLI never printing the Cloudflare API token,
 a tunnel token or an invite in `tests/team-access.test.mjs`, the absence of any
 OS-registration call in `tests/host-manager.test.mjs`, and the gateway's router key
@@ -317,7 +327,7 @@ Cross-device database synchronization is intentionally deferred until the person
 - This repository installed as a plugin in each agent host that should receive Honcho MCP tools.
 - For sharing, the team's owner only: a Cloudflare account with a domain on it, Zero Trust with a Google login method, and an API token (see [What the owner needs in Cloudflare](#what-the-owner-needs-in-cloudflare)). Teammates need only a Google account.
 
-`prereqs [--features server,sync]` reports Node.js and git for both, and Docker and Ollama for `server`. The app's 시작하기 first asks where the memory server is: on this computer (`server,sync`) or on another of the user's computers (`sync`). Asking a teammate's memory is set up later, from 팀 → 팀원 기억 연결.
+`prereqs [--features server,sync]` reports Node.js and git for both, and Docker and Ollama for `server`. The app's first setup asks where the memory server is in its 서버 step: made on this computer (`server,sync`), on another of the user's computers (`sync`), or, for someone who joins a team only to ask, none. A teammate's memory is asked for in its 팀원 step, or later from 팀 → 팀 주소로 더하기.
 
 The `personal` profile also requires macOS or Windows, git, and a Codex and/or Claude subscription. Docker Desktop and Ollama are fetched by the app when this computer has neither (see [Docker Desktop and Ollama](#docker-desktop-and-ollama)). `server prepare` installs the subscription gateway and stops once to ask for a login with that subscription in the gateway's own screen; nothing reads `~/.codex/auth.json`, and no key is typed anywhere. Native Linux currently supports the `portable` profile; its Docker bridge cannot safely reach the personal profile's loopback-only host services without an additional binding design.
 
@@ -396,6 +406,34 @@ Use the bundled `setup-memory` skill. It follows this sequence:
    - Claude Code sessions opened before setup need `/reload-plugins`.
    - An `install-plugin` step lists the commands to run when setup could not install the plugin itself.
 
+### Which folders, and past conversations / 프로젝트 폴더와 지난 대화
+
+Setup can choose which project folders' conversations this computer's own server
+takes, and the app's 프로젝트 step does: the folders that held this computer's
+Claude Code and Codex conversations (`GET /api/app/projects`), ticked or not, and
+새로 생기는 프로젝트 폴더도 수집 for every folder they do not name.
+
+```bash
+node scripts/cli.mjs setup apply --skip-folders ~/private            # every folder but that one
+node scripts/cli.mjs setup apply --take-folders ~/work --rest-folders skip   # that one and nothing else
+node scripts/cli.mjs setup apply --all-folders                         # every folder again
+```
+
+- `config.json` keeps it as `collect: { take, skip, rest }`. The deepest named folder
+  a session ran in decides, so a repository taken inside a skipped home folder is
+  still taken, and the other way round; a folder in both is skipped. A session in
+  none of them, folders made later included, goes by `rest` (`take` unless
+  `--rest-folders skip`). Without any of these options setup keeps what is saved.
+- The collector reads the choice from `HONCHO_AGENT_COLLECT_FOLDERS`, which
+  `configEnvironment` sets for the own server's runs only; a target keeps its own
+  folders. A ChatGPT import has no folder and is never held back by it.
+- `backfill run` sends the past sessions of the chosen folders, oldest first, through
+  the same importer, deduped against what the hook already sent; `backfill start`
+  runs it in the background (first setup does, and so does 대화 수집's 적용) and
+  `backfill status` says how far it got. Its progress is in
+  `<dataDir>/state/backfill.json`, so a run carries on where the last one stopped, and
+  `/api/app/flow` reads `backfill-status.json` for the 대시보드's 남은 대화.
+
 ### Collecting from another computer
 
 The memory server runs on one machine; another computer (a laptop, a work machine)
@@ -425,8 +463,8 @@ Setup refuses any of these secrets as command-line options, prints them only as
 `"[redacted]"`, and saves them in the private `config.json` (`honcho.apiToken`,
 `honcho.access`). A later setup without them keeps them while the address stays on
 the same server, and drops them with a warning when it moves to another one. The
-Team Memory app's setup form takes the same values and hands them to the CLI
-through its environment.
+Team Memory app's 서버 step (다른 컴퓨터의 내 서버) takes the same values and hands
+them to the CLI through its environment.
 
 The collector, the MCP server, the app and `doctor` all send the bearer token and,
 when saved, the service token with every request to that server, and to no other
@@ -595,9 +633,9 @@ Install the plugin, then run setup against the public address with the gate toke
 HONCHO_API_TOKEN='<gate token>' node scripts/cli.mjs setup apply --agents codex,claude --user-peer <id> --honcho-url https://<name>.<your domain>
 ```
 
-In the app on that computer, 기억 설정 → 대화 쌓기 does the same: the address and the gate token go into its form. `/memory-setup` opens that screen for a server on another computer.
+In the app on that computer, 기억 설정 → 대화 수집 → 수정 does the same: the address and the gate token go into its 서버 step under 다른 컴퓨터의 내 서버. `/memory-setup` opens that window for a server on another computer.
 
-The Team Memory app offers all of this on 서버 → 공유: "팀 만들기" (the API token, the owner's email, and the zone and name under "token 권한과 주소"), "초대 코드로 열기", the folded "직접 만든 Tunnel로 켜기", the gate token ("서버 token 복사", "서버 token 바꾸기") and "공유 끄기". 팀 → 내 기억 공유 has, for the owner, the 팀원 list with "팀원 더하기", "공유 빼기" and "팀 주소 복사"; while sharing is off it points to 서버 → 공유. A teammate who came in with an invite sees the public address, the gate and the 팀원 MCP address, and no Cloudflare: that word belongs to the owner's 팀 만들기 and 팀원 list. A token typed there goes to the app's own server only, and no token or invite is logged.
+The Team Memory app offers all of this on 서버 → 공유: "팀 만들기" (the API token, the owner's email, and the zone and name under "token 권한과 주소"), "초대 코드로 열기", the folded "직접 만든 Tunnel로 켜기", and with sharing on one 공유 block: the address, the gate token ("복사", "바꾸기"), the 팀원 MCP address, "밖에서 확인" and "공유 끄기". First setup's 새 팀 만들기 runs the same `server share enable --cloudflare` once its server is up. 관리자, on the owner's computer only, has the 팀 주소 with "복사", the 팀원 list with "팀원 더하기", "공유 빼기" and "팀에서 빼기", and the Cloudflare block with "token 바꾸기". A teammate who came in with an invite sees the public address, the gate and the 팀원 MCP address, and no Cloudflare: that word belongs to the owner's 팀 만들기 and 관리자. A token typed there goes to the app's own server only, and no token or invite is logged.
 
 ## Asking a teammate's memory / 팀원 기억 연결
 
@@ -612,12 +650,13 @@ node scripts/cli.mjs teammates disconnect <name>
 - `connect` runs `claude mcp add --transport http --scope user team-<name> https://<host>/mcp` and `codex mcp add team-<name> --url https://<host>/mcp`. The same address again changes nothing, and another address replaces the entry. A client that is not installed is reported, and the other is still done.
 - Log in once in each client. In Claude Code, run `/mcp`, choose `team-<name>` and Authenticate; for Codex, run `codex mcp login team-<name>`. Either one opens Google login through Cloudflare Access, and only an email on the team list gets in. The agent then has that server's `chat`.
 - `connected` lists every team server this computer knows and whether each client has it. It reads the invite's team list, the owner's `team-access.json`, and the `team-*` entries already in `~/.claude.json` and `~/.codex/config.toml`. This computer's own shared server is left out: its agents use their own memory directly.
-- The app's 팀 → 팀원 기억 연결 page does the same: paste the 팀 주소 and press "Claude Code·Codex에 연결"; "Codex 로그인" starts the Codex login.
+- The app's 팀 page does the same: 팀 주소로 더하기 takes the 팀 주소 and connects each server, and a window then says how each agent logs in, with "Codex 로그인" starting the Codex login. Each teammate's row has a switch: off disconnects it, on connects it again (and the agents log in again). First setup's 팀에 들어가기 connects the teammates chosen in its 팀원 step the same way.
 - `bridge disconnect` only removes the shared-bridge settings that 0.3.28 and before saved.
 
 ## Also sending some folders to another server (e.g. your company's)
 
-Every conversation still goes to your own server, exactly as before. A *target* is
+Your own server still gets every folder it takes (all of them, unless setup chose; see
+[Which folders, and past conversations](#which-folders-and-past-conversations--프로젝트-폴더와-지난-대화)). A *target* is
 a second Honcho server that also receives a copy of the conversations you had in
 chosen folders, for example your work repositories going to the company's shared
 memory:
@@ -669,15 +708,17 @@ saved (`hasToken`, `hasAccess`), never the token. The app's routes are
 `GET /api/targets` and `POST /api/targets/add|remove|set|test|backfill`; the tokens
 typed into its form reach the CLI through its environment only.
 
-In the app, 기억 설정 → 다른 서버에도 쌓기 adds a server in four steps: the server,
-the projects, past conversations, and a last look before 더하기. The projects offered
+In the app, 기억 설정 → 대화 수집 → 수정 holds the other servers: its 서버 step lists
+them under 함께 쌓을 서버, each with a box to keep it on, and 다른 서버 더하기 (a
+name, the address and its token). While one is on, the 프로젝트 step is a table with
+a column for each server, and the folders newly ticked for one are sent their past
+conversations (`target backfill`) once 적용 is pressed. The projects offered
 are the folders this computer's Claude Code and Codex conversations were held in
 (`GET /api/app/projects`, `scripts/projects.mjs`, reading the same transcripts as
 `target backfill`). A folder counts under the repository it sits in. Outside a
 repository, one-off folders count under the folder that holds them: anything in the
 system's temporary folder, and a folder whose name starts with a date, as the Codex
-app's `~/Documents/Codex/<date>-<task>`. A folder that is gone shows when searched
-for, and 다른 폴더 더하기 picks any folder through `GET /api/app/folders`.
+app's `~/Documents/Codex/<date>-<task>`.
 
 On disk, each target keeps its own directory, `<data>/targets/<id>/`:
 `spool/<agent>/pending/` (turns waiting for it), `state/<agent>.json` (what it has
@@ -720,7 +761,7 @@ HONCHO_USER_NAME=<your peer> node scripts/collector.mjs --provider chatgpt \
   - Running the same export again sends nothing, and a newer export sends only new messages.
   - The dedupe state is kept per server and workspace, so a different workspace gets everything.
 - **`--dry-run`** sends nothing. It prints a `summary`: the files read, turns by role, the first and last time, and what was skipped and why.
-- **In the app**, 기억 설정 → ChatGPT 기록 가져오기 runs the same import. It takes uploads up to 256 MB and always uses the configured workspace and peer. Use the command for anything bigger or for another workspace.
+- **In the app**, 기억 설정 → ChatGPT 기록 → 가져오기 runs the same import, and first setup's 에이전트 step takes an export file to bring in before the past conversations (파일로 가져오는 대화). It takes uploads up to 256 MB and always uses the configured workspace and peer. Use the command for anything bigger or for another workspace.
 
 ## Backing up the conversation originals / 대화 원본 백업
 
@@ -763,7 +804,7 @@ node scripts/cli.mjs backup remotes                                    # rclone 
 - **State and schedule.**
   - State lives in `<data>/backup/`: `settings.json`, `status.json`, `ledger-<destination hash>.json` and `run.lock`. The log is `<data>/logs/backup.log`.
   - The scheduled job is launchd `team-memory-system.backup`, systemd `team-memory-backup.timer` or the Windows task `TeamMemoryBackup`. It runs `backup run --scheduled`, which re-checks the whole destination (`--full`) when the last full check is more than 7 days old.
-  - The hour is the person's: 3 unless `--hour` or the hour box on the app's 백업 screen says otherwise. The minute comes from the device id. On that screen 폴더 고르기 browses this computer's folders for a folder destination.
+  - The hour is the person's: 3 unless `--hour` or the hour box in the app's 백업 → 수정 window says otherwise. The minute comes from the device id. In that window 폴더 고르기 browses this computer's folders for a folder destination.
 - **Alerts.** A notification appears on the computer whose backup has a problem: a scheduled run ended with errors, threw or stopped midway, or there has been no successful run for more than 48 hours with at least two unsuccessful runs since. A single waiting run after a recent success does not alert.
   - Notifiers: `osascript` on macOS (credited to Script Editor, so its notifications must be allowed), a PowerShell toast on Windows, `notify-send` on Linux. A failed notification is logged as an `alert (...)` line in `backup.log` and never fails the backup.
   - The nightly run checks when it ends. A daytime check at 10:MM repeats it while the problem lasts, at most once per problem in 4 hours: launchd `team-memory-system.backup-check`, systemd `team-memory-backup-check.timer` or the Windows task `TeamMemoryBackupCheck`. The 백업 screen shows the same problem as a banner.
@@ -828,7 +869,7 @@ Codex loads `.mcp.json`; Claude Code loads `.mcp.claude.json`. Both start `scrip
 }
 ```
 
-Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability. The app's 기억 설정 → MCP 도구 switches them in two groups, 찾기 도구 and 바꾸기·지우기 도구, and one at a time under 하나씩 켜고 끄기; `POST /api/app/mcp-tools` takes one tool as `name` or a group as `names`, with `enabled`.
+Agent hosts may cache their initial tool list, so reload Claude plugins or start a new Codex session after changing tool availability. The app's 기억 설정 → MCP 도구 → 수정 window switches them in two groups, 찾기 도구 and 바꾸기·지우기 도구, and one at a time under 하나씩 켜고 끄기, all applied together with 적용; `POST /api/app/mcp-tools` takes one tool as `name` or a group as `names`, with `enabled`.
 
 A teammate's `team-<name>` server is not one of these tools: it is a separate remote MCP server in Claude Code and Codex (see [Asking a teammate's memory](#asking-a-teammates-memory--팀원-기억-연결)), and `mcp-tools.json` does not list or switch it.
 

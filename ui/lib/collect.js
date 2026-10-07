@@ -1,0 +1,518 @@
+// The steps that decide what this computer collects, shared by both windows that
+// ask: first setup (views/setup.js) walks them in a row, and 기억 설정 → 대화 수집 →
+// 수정 (views/settings.js) opens the same steps again. Where the conversations go
+// (the server), from which agents, and from which project folders are gathered in
+// one draft and sent whole to `setup plan|apply` at the end, so a token typed here
+// reaches those two routes and nothing else.
+import { get, post } from "./api.js";
+import { h, clear } from "./dom.js";
+import { number } from "./format.js";
+import { field, folderTable, opt, opts } from "./kit.js";
+import { details, notice, spinner, tag } from "./ui.js";
+
+export const AGENTS = { claude: "Claude Code", codex: "Codex" };
+const AGENT_FOLDERS = { claude: "~/.claude", codex: "~/.codex" };
+const AGENT_LETTERS = { claude: "C", codex: "X" };
+export const NEW_SERVER_SUB = "ChatGPT나 Claude 구독이 필요합니다.";
+const PEER = /^[A-Za-z0-9_-]+$/;
+
+/** Two addresses for the same server, whichever way the loopback is written. */
+export function sameServer(a, b) {
+  if (!a || !b) return false;
+  try {
+    const origin = (value) => new URL(value).origin.replace("//localhost", "//127.0.0.1");
+    return origin(a) === origin(b);
+  } catch {
+    return false;
+  }
+}
+
+/** A folder as a person reads it: the home folder as ~. */
+export function shortPath(folder) {
+  return String(folder || "").replace(/^\/Users\/[^/]+(?=\/|$)/, "~").replace(/^\/home\/[^/]+(?=\/|$)/, "~").replace(/^[A-Za-z]:\\Users\\[^\\]+(?=\\|$)/, "~");
+}
+
+// What detect found and which folders hold conversations: asked once per window.
+let detecting = null;
+let projecting = null;
+export function detectAgents({ fresh = false } = {}) {
+  if (!detecting || fresh) detecting = get("/api/status").then((status) => status?.detect || null).catch(() => null);
+  return detecting;
+}
+export function loadProjects({ fresh = false } = {}) {
+  if (!projecting || fresh) projecting = get("/api/app/projects").then((result) => result?.projects || []).catch(() => []);
+  return projecting;
+}
+
+/**
+ * Where a setup starts from: this computer's saved choices, or for a new one, its
+ * own server and every folder.
+ */
+export function collectDraft(context) {
+  const configured = Boolean(context?.configured);
+  const localUrl = context?.localServer?.apiUrl || "";
+  const usingLocal = configured && sameServer(context.honcho?.url, localUrl);
+  const collect = context?.collect || null;
+  return {
+    server: configured && !usingLocal ? "remote" : "here",
+    remoteUrl: configured && !usingLocal ? context.honcho?.url || "" : "",
+    apiToken: "",
+    accessClientId: "",
+    accessClientSecret: "",
+    userPeer: context?.user?.peerId || "",
+    workspace: context?.workspace || "memory",
+    agents: configured ? new Set(Object.keys(AGENTS).filter((name) => context.agents?.[name])) : null,
+    chatgpt: null,
+    // Folders: those ticked, those not, and whether folders made later are taken.
+    take: new Set(collect?.take || []),
+    skip: new Set(collect?.skip || []),
+    rest: collect?.rest || "take",
+    checked: null,
+    projects: null,
+    // Other servers that also take chosen folders (targets): each kept with its folders,
+    // and one more to add when `extra.on`.
+    targets: (context?.targets || []).map((target) => ({
+      id: target.id,
+      label: target.label || target.id,
+      url: target.url || "",
+      enabled: target.enabled !== false,
+      wasEnabled: target.enabled !== false,
+      folders: new Set(target.folders || []),
+      was: new Set(target.folders || []),
+    })),
+    extra: { on: false, label: "", url: "", apiToken: "", accessClientId: "", accessClientSecret: "", folders: new Set() },
+  };
+}
+
+/** The other servers this setup sends to: those kept on, and the one being added. */
+export function activeTargets(draft) {
+  return [
+    ...draft.targets.filter((target) => target.enabled),
+    ...(draft.extra.on ? [{ id: null, label: draft.extra.label.trim() || "새 서버", url: draft.extra.url, folders: draft.extra.folders, extra: true }] : []),
+  ];
+}
+
+// ── 서버 ─────────────────────────────────────────────────
+
+/**
+ * Where to collect. `choices` lists what this window offers: "here" (this computer's
+ * server, made now when there is none), "remote" (my server on another computer)
+ * and "none" (store nothing, for someone who only asks teammates).
+ */
+export function serverStep(draft, context, { choices = ["here", "remote"], peer = true, lead, others = false } = {}) {
+  const localUrl = context?.localServer?.apiUrl || "";
+  const current = context?.configured ? (sameServer(context.honcho?.url, localUrl) ? "here" : "remote") : "";
+  if (!choices.includes(draft.server)) draft.server = choices[0];
+  const urlInput = h("input", { class: "input mono", type: "url", placeholder: "https://memory-me.example.com", value: draft.remoteUrl, oninput: (event) => { draft.remoteUrl = event.target.value; } });
+  const tokenInput = h("input", { class: "input mono", type: "password", autocomplete: "off", value: draft.apiToken, oninput: (event) => { draft.apiToken = event.target.value; } });
+  const accessId = h("input", { class: "input mono", type: "password", autocomplete: "off", value: draft.accessClientId, oninput: (event) => { draft.accessClientId = event.target.value; } });
+  const accessSecret = h("input", { class: "input mono", type: "password", autocomplete: "off", value: draft.accessClientSecret, oninput: (event) => { draft.accessClientSecret = event.target.value; } });
+  if (context?.honcho?.hasToken && current === "remote") tokenInput.placeholder = "저장된 token을 그대로 씁니다";
+  if (context?.honcho?.hasAccess && current === "remote") { accessId.placeholder = "저장된 값을 그대로 씁니다"; accessSecret.placeholder = accessId.placeholder; }
+  const remoteFields = h("div", { class: "subfields", hidden: draft.server !== "remote" },
+    field("서버 주소", urlInput, "그 컴퓨터의 서버 → 공유에서 복사합니다."),
+    field("서버 token", tokenInput, "그 서버가 token을 요구할 때만 넣습니다. 채팅에 붙여 넣지 말고 여기에만 넣으세요."),
+    h("details", { class: "fold" }, h("summary", {}, "Access 서비스 토큰"),
+      h("p", { class: "hint" }, "직접 만든 Cloudflare Access 뒤의 서버일 때만 넣습니다."),
+      field("서비스 토큰 ID", accessId),
+      field("서비스 토큰 비밀", accessSecret)));
+  const pick = (choice) => () => {
+    draft.server = choice;
+    remoteFields.hidden = choice !== "remote";
+    if (choice === "remote") urlInput.focus();
+  };
+  const rows = choices.map((choice) => {
+    if (choice === "here") {
+      return localUrl
+        ? opt({ name: "server", value: "here", checked: draft.server === "here", onChange: pick("here"),
+          title: ["이 컴퓨터 서버 ", h("span", { class: "mono muted" }, localUrl.replace(/^https?:\/\//, ""))],
+          end: current === "here" ? tag("지금 쌓는 중", "ok") : tag("이 컴퓨터에 있음") })
+        : opt({ name: "server", value: "here", checked: draft.server === "here", onChange: pick("here"), title: "이 컴퓨터에 새로 만들기", sub: NEW_SERVER_SUB });
+    }
+    if (choice === "remote") {
+      return opt({ name: "server", value: "remote", checked: draft.server === "remote", onChange: pick("remote"),
+        title: "다른 컴퓨터의 내 서버", sub: "그 컴퓨터에서 만든 서버의 주소를 넣습니다.",
+        end: current === "remote" ? tag("지금 쌓는 중", "ok") : null, extra: remoteFields });
+    }
+    return opt({ name: "server", value: "none", checked: draft.server === "none", onChange: pick("none"),
+      title: "쌓지 않기", sub: "내 대화는 어디에도 쌓지 않고, 팀원 기억에 묻기만 합니다." });
+  });
+  const peerInput = h("input", { class: "input mono", value: draft.userPeer, placeholder: "예: minji", pattern: "[A-Za-z0-9_\\-]+", oninput: (event) => { draft.userPeer = event.target.value; } });
+  const extra = others ? otherServers(draft) : null;
+  const body = h("div", {},
+    h("h3", {}, "어디에 쌓을까요?"),
+    lead ? h("p", { class: "lead" }, lead) : null,
+    h("div", { class: "label" }, "내 기억 서버"),
+    opts(...rows),
+    peer ? field("내 peer 이름", peerInput, "영문·숫자·밑줄(_)·하이픈(-)만 씁니다. 내 모든 컴퓨터에서 같은 이름을 쓰세요.") : null,
+    extra?.body || null);
+  return {
+    body,
+    check() {
+      if (draft.server === "remote") {
+        try {
+          const url = new URL(draft.remoteUrl.trim());
+          if (!/^https?:$/.test(url.protocol)) throw new Error();
+        } catch {
+          urlInput.focus();
+          return "다른 컴퓨터 서버의 주소를 http:// 나 https:// 로 시작하게 넣으세요.";
+        }
+        if (Boolean(draft.accessClientId.trim()) !== Boolean(draft.accessClientSecret.trim())) return "Access 서비스 토큰은 ID와 비밀을 함께 넣어야 합니다.";
+      }
+      if (peer && draft.server !== "none" && !PEER.test(draft.userPeer.trim())) {
+        peerInput.focus();
+        return "peer 이름을 영문·숫자·밑줄(_)·하이픈(-)으로 넣으세요.";
+      }
+      return extra ? extra.check() : null;
+    },
+  };
+}
+
+/** 함께 쌓을 서버: other servers (a company's) that also take the folders chosen for them. */
+function otherServers(draft) {
+  const input = (key, attributes = {}) => h("input", { class: "input mono", autocomplete: "off", spellcheck: "false", value: draft.extra[key], oninput: (event) => { draft.extra[key] = event.target.value; }, ...attributes });
+  const url = input("url", { type: "url", placeholder: "https://memory.company.example" });
+  const fields = h("div", { class: "subfields", hidden: !draft.extra.on },
+    field("이름", input("label", { class: "input", placeholder: "예: 회사" })),
+    field("서버 주소", url),
+    field("서버 token", input("apiToken", { type: "password" }), "그 서버를 둔 컴퓨터의 서버 → 공유에서 복사합니다. 회사 서버면 관리자에게 받습니다."),
+    h("details", { class: "fold" }, h("summary", {}, "Access 서비스 토큰"),
+      field("서비스 토큰 ID", input("accessClientId", { type: "password" })),
+      field("서비스 토큰 비밀", input("accessClientSecret", { type: "password" }))));
+  const rows = draft.targets.map((target) => opt({
+    type: "checkbox",
+    name: "targets",
+    value: target.id,
+    checked: target.enabled,
+    title: [target.label, " ", h("span", { class: "mono muted" }, String(target.url).replace(/^https?:\/\//, ""))],
+    sub: `폴더 ${number(target.folders.size)}개를 이 서버에도 쌓습니다`,
+    onChange: (on) => { target.enabled = on; },
+  }));
+  rows.push(opt({
+    type: "checkbox",
+    name: "targets",
+    value: "",
+    checked: draft.extra.on,
+    title: "다른 서버 더하기",
+    sub: "고른 폴더의 대화만 그 서버에도 쌓습니다.",
+    extra: fields,
+    onChange: (on) => { draft.extra.on = on; fields.hidden = !on; if (on) url.focus(); },
+  }));
+  return {
+    body: [h("div", { class: "label" }, "함께 쌓을 서버"), opts(...rows)],
+    check() {
+      if (!draft.extra.on) return null;
+      try {
+        if (new URL(draft.extra.url.trim()).protocol !== "https:" && !/^http:\/\/(127\.0\.0\.1|localhost)/.test(draft.extra.url.trim())) throw new Error();
+      } catch {
+        url.focus();
+        return "더할 서버의 주소를 https:// 로 시작하게 넣으세요.";
+      }
+      if (Boolean(draft.extra.accessClientId.trim()) !== Boolean(draft.extra.accessClientSecret.trim())) return "Access 서비스 토큰은 ID와 비밀을 함께 넣어야 합니다.";
+      return null;
+    },
+  };
+}
+
+// ── 에이전트 ─────────────────────────────────────────────
+
+/**
+ * The agents found on this computer, ticked to collect; and, at first setup, a
+ * ChatGPT export to bring in before the past conversations.
+ */
+export function agentsStep(draft, context, { chatgpt = false } = {}) {
+  const list = h("div", {}, h("div", { class: "opts" }, h("div", { class: "opt" }, spinner(), h("span", { class: "muted" }, "이 컴퓨터의 에이전트를 찾는 중…"))));
+  let found = null;
+  detectAgents().then((detect) => {
+    found = Object.keys(AGENTS).filter((name) => detect?.agents?.[name]?.detected);
+    if (!draft.agents) draft.agents = new Set(found);
+    if (!found.length) {
+      clear(list, notice("warn", "이 컴퓨터에서 Claude Code나 Codex를 찾지 못했습니다. 설치한 뒤 이 창을 다시 여세요."));
+      return;
+    }
+    clear(list, opts(...found.map((name) => opt({
+      type: "checkbox",
+      name: "agents",
+      value: name,
+      checked: draft.agents.has(name),
+      title: [h("span", { class: `src ${name}` }, AGENT_LETTERS[name]), AGENTS[name]],
+      sub: h("span", { class: "mono" }, AGENT_FOLDERS[name]),
+      end: detect.agents[name].plugin && !detect.agents[name].plugin.enabled && detect.agents[name].plugin.installed ? tag("플러그인 꺼짐", "warn") : null,
+      onChange: (on) => { if (on) draft.agents.add(name); else draft.agents.delete(name); },
+    }))));
+  });
+  const file = h("input", { type: "file", hidden: true, accept: ".zip,.json,application/zip,application/json" });
+  const chatgptRow = () => {
+    const chosen = draft.chatgpt;
+    const row = opt({
+      type: "checkbox",
+      name: "chatgpt",
+      value: "chatgpt",
+      checked: Boolean(chosen),
+      title: "ChatGPT",
+      sub: chosen ? [h("span", { class: "mono" }, chosen.name), ` · ${(chosen.size / 1024 / 1024).toFixed(1)}MB`] : "ChatGPT의 설정 → 데이터 제어 → 데이터 내보내기로 받은 zip 파일",
+      end: h("button", { class: chosen ? "btn quiet small" : "btn small", type: "button", onclick: () => file.click() }, chosen ? "다른 파일" : "파일 고르기"),
+      onChange: (on) => {
+        if (on && !draft.chatgpt) { row.input.checked = false; file.click(); return; }
+        if (!on) { draft.chatgpt = null; redrawChatgpt(); }
+      },
+    });
+    return row;
+  };
+  const chatgptBox = h("div", { class: "opts" });
+  const redrawChatgpt = () => clear(chatgptBox, chatgptRow());
+  file.addEventListener("change", () => {
+    if (file.files?.[0]) draft.chatgpt = file.files[0];
+    file.value = "";
+    redrawChatgpt();
+  });
+  if (chatgpt) redrawChatgpt();
+  return {
+    body: h("div", {},
+      h("h3", {}, "어느 에이전트의 대화를 수집할까요?"),
+      h("p", { class: "lead" }, "이 컴퓨터에서 찾은 에이전트입니다."),
+      list,
+      chatgpt ? [h("div", { class: "label" }, "파일로 가져오는 대화"), chatgptBox, file] : null),
+    check() {
+      if (found && !found.length) return "Claude Code나 Codex를 설치한 뒤 다시 여세요.";
+      if (!draft.agents?.size) return "대화를 수집할 에이전트를 하나 이상 고르세요.";
+      return null;
+    },
+  };
+}
+
+// ── 프로젝트 ─────────────────────────────────────────────
+
+/** The folders that hold the chosen agents' conversations, with how many each holds. */
+function chosenProjects(projects, agents) {
+  return projects
+    .map((project) => ({ ...project, count: [...agents].reduce((sum, name) => sum + Number(project.agents?.[name] || 0), 0) }))
+    .filter((project) => project.count > 0)
+    .map((project) => ({ path: project.path, name: project.name, count: project.count, display: shortPath(project.path) }));
+}
+
+/**
+ * Which project folders' conversations to collect. A folder ticked or not is kept
+ * as taken or skipped; 새로 생기는 프로젝트 폴더도 수집 is what happens to the rest.
+ */
+export function projectsStep(draft, context, { edit = false } = {}) {
+  const box = h("div", {}, h("div", { class: "pt" }, h("div", { class: "pr" }, spinner(), h("span", { class: "muted" }, "대화가 있는 폴더를 찾는 중…"))));
+  const past = h("div", { class: "row2 note" });
+  const restBox = h("input", { type: "checkbox", checked: draft.rest === "take" });
+  restBox.addEventListener("change", () => { draft.rest = restBox.checked ? "take" : "skip"; });
+  const drawPast = () => {
+    const chosen = (draft.projects || []).filter((project) => draft.checked.has(project.path));
+    const count = chosen.reduce((sum, project) => sum + project.count, 0);
+    past.textContent = !draft.projects?.length ? "새로 생기는 대화부터 수집합니다."
+      : edit ? `고른 폴더의 지난 대화 ${number(count)}개 중 아직 없는 것을 함께 수집합니다.`
+        : `고른 폴더의 지난 대화 ${number(count)}개도 함께 수집합니다.`;
+  };
+  const servers = activeTargets(draft);
+  loadProjects().then((all) => {
+    draft.projects = chosenProjects(all, draft.agents || new Set(Object.keys(AGENTS)));
+    if (!draft.checked) {
+      // Ticked: what the saved choice takes. A folder the choice never named goes by its rest.
+      const saved = context?.collect || null;
+      draft.checked = new Set(draft.projects.filter((project) => {
+        if (!saved) return true;
+        if (draft.skip.has(project.path)) return false;
+        if (draft.take.has(project.path)) return true;
+        return saved.rest !== "skip";
+      }).map((project) => project.path));
+    }
+    if (!draft.projects.length) {
+      draft.rest = "take";
+      restBox.checked = true;
+      clear(box, h("div", { class: "pt" }, h("div", { class: "list-empty" }, "아직 대화가 있는 폴더가 없습니다. 앞으로 생기는 폴더의 대화를 수집합니다.")));
+    } else if (servers.length) {
+      clear(box, matrix(draft, servers, restBox, drawPast));
+    } else {
+      clear(box, folderTable(draft.projects, draft.checked, { scroll: true, onChange: drawPast }));
+    }
+    drawPast();
+  });
+  return {
+    body: h("div", {},
+      h("h3", {}, "어느 프로젝트 폴더의 대화를 수집할까요?"),
+      h("p", { class: "lead" }, servers.length ? "서버마다 쌓을 폴더를 고르세요. 고른 서버마다 칸이 하나씩 생깁니다." : "고른 에이전트의 대화가 있는 폴더입니다."),
+      box,
+      servers.length ? null : h("label", { class: "row2" }, restBox, "새로 생기는 프로젝트 폴더도 수집"),
+      past),
+    check() {
+      if (!draft.projects) return "폴더를 찾는 중입니다. 잠시 뒤 다시 누르세요.";
+      if (draft.rest === "skip" && !draft.checked.size) return "수집할 폴더를 하나 이상 고르거나, 새로 생기는 프로젝트 폴더도 수집을 켜세요.";
+      const empty = servers.find((server) => !server.folders.size);
+      if (empty) return `${empty.label}에 쌓을 폴더를 하나 이상 고르거나, 서버 단계에서 그 서버를 끄세요.`;
+      return null;
+    },
+  };
+}
+
+/**
+ * The folders as a table with a column for each server that takes them: the own
+ * server's column is what this computer collects, each other server's the folders it
+ * also gets. 새로 생기는 폴더 is the own server's alone: another server takes only the
+ * folders named for it.
+ */
+function matrix(draft, servers, restBox, onChange) {
+  const columns = [{ label: "내 서버", folders: draft.checked, own: true }, ...servers];
+  const template = { gridTemplateColumns: `minmax(0, 1fr) 70px ${columns.map(() => "96px").join(" ")}` };
+  const cell = (checked, change, { disabled = false, label } = {}) => {
+    const box = h("input", { type: "checkbox", checked, disabled, "aria-label": label });
+    box.addEventListener("change", () => change(box.checked));
+    return h("span", { class: "pr-c" }, box);
+  };
+  const rows = draft.projects.map((project) => h("div", { class: "pr m", style: template },
+    h("span", { class: "pn" }, h("b", {}, project.name), h("small", {}, project.display)),
+    h("span", { class: "c" }, `${number(project.count)}개`),
+    columns.map((column) => cell(column.folders.has(project.path), (on) => {
+      if (on) column.folders.add(project.path); else column.folders.delete(project.path);
+      onChange();
+    }, { label: `${project.name} → ${column.label}` }))));
+  restBox.addEventListener("change", onChange);
+  return h("div", { class: "pt" },
+    h("div", { class: "pr m g", style: template }, h("span", {}), h("span", {}), h("span", { class: "gl" }, "쌓을 곳")),
+    h("div", { class: "pr m h", style: template }, h("span", {}, "폴더"), h("span", { class: "c" }, "대화"),
+      columns.map((column) => h("span", { class: "ch" }, column.label))),
+    h("div", { class: "pt-scroll" }, rows),
+    h("div", { class: "pr m", style: template }, h("span", { class: "pn" }, h("b", {}, "새로 생기는 폴더")), h("span", {}),
+      columns.map((column) => (column.own ? h("span", { class: "pr-c" }, restBox) : cell(false, () => {}, { disabled: true, label: `새로 생기는 폴더 → ${column.label}` })))));
+}
+
+/** A short id for a server being added: it names a folder on this computer. */
+function targetId(label, taken) {
+  const ascii = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+  const base = /회사/.test(label) ? "company" : ascii || "server";
+  let id = base;
+  for (let n = 2; taken.has(id); n += 1) id = `${base}-${n}`;
+  return id;
+}
+
+/**
+ * The other servers as chosen: turned on or off, their folders changed, one added.
+ * Each server that got folders it did not have is sent their past conversations.
+ * Resolves the problems, none when all went.
+ */
+export async function applyTargets(draft) {
+  const problems = [];
+  const backfill = [];
+  const same = (left, right) => left.size === right.size && [...left].every((item) => right.has(item));
+  for (const target of draft.targets) {
+    const changes = {};
+    if (target.enabled !== target.wasEnabled) changes.enabled = target.enabled;
+    if (target.enabled && !same(target.folders, target.was)) changes.folders = [...target.folders];
+    if (!Object.keys(changes).length) continue;
+    const result = await post("/api/targets/set", { id: target.id, ...changes }).catch((error) => ({ ok: false, error: error.message }));
+    if (result.ok === false) { problems.push(`${target.label}: ${[...(result.issues || []), result.error].filter(Boolean).map(explainWarning).join(" ")}`); continue; }
+    if ([...target.folders].some((folder) => !target.was.has(folder))) backfill.push(target.id);
+  }
+  if (draft.extra.on) {
+    const label = draft.extra.label.trim() || "회사";
+    const id = targetId(label, new Set(draft.targets.map((target) => target.id)));
+    const body = { id, label, url: draft.extra.url.trim(), folders: [...draft.extra.folders] };
+    for (const key of ["apiToken", "accessClientId", "accessClientSecret"]) if (draft.extra[key].trim()) body[key] = draft.extra[key].trim();
+    const result = await post("/api/targets/add", body).catch((error) => ({ ok: false, error: error.message }));
+    if (result.ok) backfill.push(id);
+    else problems.push(`${label}: ${[...(result.issues || []), result.error].filter(Boolean).map(explainWarning).join(" ")}`);
+  }
+  // Each runs in the CLI on its own; the window need not wait for them.
+  for (const id of backfill) post("/api/targets/backfill", { id }).catch(() => {});
+  return problems;
+}
+
+/** The folder choice as `setup` options: what is ticked, what is not, and the rest. */
+export function folderOptions(draft) {
+  if (!draft.projects) return {};
+  const take = draft.projects.filter((project) => draft.checked.has(project.path)).map((project) => project.path);
+  const skip = draft.projects.filter((project) => !draft.checked.has(project.path)).map((project) => project.path);
+  if (!skip.length && draft.rest === "take") return { allFolders: true };
+  return {
+    ...(take.length ? { takeFolders: take.join(",") } : {}),
+    ...(skip.length ? { skipFolders: skip.join(",") } : {}),
+    restFolders: draft.rest,
+  };
+}
+
+/**
+ * The draft as the setup routes read it. `localUrl` is this computer's server,
+ * which first setup knows only once it has made it.
+ */
+export function setupBody(draft, context, localUrl = context?.localServer?.apiUrl || "http://127.0.0.1:8001") {
+  const body = { honchoUrl: draft.server === "remote" ? draft.remoteUrl.trim() : localUrl };
+  if (draft.server === "remote") {
+    for (const name of ["apiToken", "accessClientId", "accessClientSecret"]) {
+      if (draft[name].trim()) body[name] = draft[name].trim();
+    }
+  }
+  if (draft.userPeer.trim()) body.userPeer = draft.userPeer.trim();
+  if (draft.workspace && draft.workspace !== "memory") body.workspace = draft.workspace;
+  body.agents = [...(draft.agents || [])].join(",") || "none";
+  return { ...body, ...folderOptions(draft) };
+}
+
+// ── What setup said, in the words the screens use ────────
+
+const WARNINGS = [
+  [/(\w+) collection is enabled, but the Honcho Agent Bridge plugin is not installed in \w+ and the \w+ command was not found; install it by running (.+), then (.+)$/, (m) => `${m[1] === "codex" ? "Codex" : "Claude Code"}: 터미널에서 차례로 실행하세요. ${m[2]} → ${m[3]}`],
+  [/(\w+) collection is enabled, but the Honcho Agent Bridge plugin was not detected as enabled in (\w+)/, (m) => `${m[2] === "codex" ? "Codex" : "Claude Code"}에 팀 메모리 플러그인이 켜져 있지 않습니다. 플러그인을 켜야 대화가 모입니다.`],
+  [/A Honcho server answers at (\S+), but it is not the server this plugin installed/, (m) => `${m[1]}에 기억 서버가 있지만 이 앱이 설치한 서버는 아닙니다. 내 서버가 맞는지 확인하세요.`],
+  [/requires an API token/, () => "이 서버는 token이 필요합니다. 서버 token 칸을 채우세요."],
+  [/is behind Cloudflare Access and refused this computer/, () => "Cloudflare Access가 이 컴퓨터를 막았습니다. Access 서비스 토큰을 열고 그 서버의 서비스 토큰 ID와 비밀을 넣으세요."],
+  [/Cloudflare Access (?:client id|service token).*(?:both|together)/i, () => "Access 서비스 토큰은 ID와 비밀을 함께 넣어야 합니다."],
+  [/rejected the API token/, () => "서버가 이 token을 받지 않습니다. 서버를 둔 컴퓨터의 token이 맞는지 확인하세요."],
+  [/at least one detected agent must be selected/, () => "대화를 수집할 에이전트를 하나 이상 고르세요. 이 컴퓨터에 설치된 Claude Code나 Codex만 고를 수 있습니다."],
+  [/The API token saved for (\S+) is not carried to (\S+)/, (m) => `${m[1]}에 쓰던 token은 ${m[2]}로 옮기지 않습니다. 새 서버의 token을 넣으세요.`],
+  [/This computer has a Honcho server installed at (\S+), but collection goes to (\S+)\./, (m) => `이 컴퓨터에 ${m[1]} 기억 서버가 설치돼 있는데, 대화는 ${m[2]}에 쌓이게 돼 있습니다.`],
+  [/Honcho URL is invalid/, () => "기억 서버 주소가 올바르지 않습니다."],
+  [/Honcho URL must not contain credentials/, () => "기억 서버 주소에 아이디·비밀번호·물음표 뒤 값을 넣지 마세요. token은 서버 token 칸에 넣습니다."],
+  [/(\S+) does not exist on this computer; conversations there are sent once it does/, (m) => `${shortPath(m[1])} 폴더가 지금은 없습니다. 생기면 그때부터 수집합니다.`],
+  [/user peer id is required/, () => "peer 이름을 넣으세요."],
+];
+
+export function explainWarning(text) {
+  for (const [pattern, render] of WARNINGS) {
+    const match = pattern.exec(text);
+    if (match) return render(match);
+  }
+  return text;
+}
+
+/** What a plan or an apply refused or warned about, as notices; null when nothing. */
+export function planProblems(result) {
+  const issues = result?.issues || (result?.error ? [result.error] : []);
+  const warnings = result?.warnings || [];
+  if (!issues.length && !warnings.length) return null;
+  return h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "12px" } },
+    issues.length ? notice("bad", h("b", {}, "이대로는 설정할 수 없습니다."), h("ul", {}, issues.map((issue) => h("li", {}, explainWarning(issue))))) : null,
+    warnings.length ? notice("warn", h("b", {}, "확인할 것"), h("ul", {}, warnings.map((warning) => h("li", {}, explainWarning(warning))))) : null,
+    details("자세한 결과", result));
+}
+
+/** Plans first, so what setup refuses is shown before anything changes; then applies. */
+export async function applySetup(body) {
+  const plan = await post("/api/setup/plan", body);
+  if (!plan.ready) return { ok: false, stage: "plan", result: plan };
+  const done = await post("/api/setup/apply", body);
+  return { ok: Boolean(done.ok), stage: "apply", result: done };
+}
+
+/**
+ * What to do in each agent once setup has applied: approve the Codex hook, reload
+ * Claude Code's plugins, or run the plugin install by hand when it could not.
+ */
+export function agentTodo(done, agents) {
+  const manual = (name) => (done?.nextSteps || []).find((step) => step.agent === name && step.action === "install-plugin");
+  const items = [];
+  for (const name of Object.keys(AGENTS)) {
+    if (!agents.has(name)) continue;
+    const commands = manual(name)?.commands || [];
+    if (commands.length) {
+      items.push({ title: AGENTS[name], text: ["터미널에서 차례로 실행하세요. ", commands.map((command, index) => [index ? " → " : "", h("span", { class: "mono" }, command)])] });
+    } else if (name === "claude") {
+      items.push({ title: "Claude Code", text: ["열린 세션에 ", h("span", { class: "mono" }, "/reload-plugins"), " 를 입력하세요."] });
+    } else {
+      items.push({ title: "Codex", text: "새 세션을 열고 훅을 승인하세요." });
+    }
+  }
+  return items;
+}

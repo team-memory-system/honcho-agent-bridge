@@ -6,7 +6,7 @@
 // the draft, and a footer whose chips describe the next turn, ending in send.
 import { gateway, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
-import { screenTabs } from "../lib/hub.js";
+import { screenTabs } from "../lib/tabs.js";
 import { icon } from "../lib/icons.js";
 import { markdown } from "../lib/markdown.js";
 import { LEVEL_NOTES, REASONING_HINT, REASONING_LEVELS, askCopy, askRoute, mergeEvidence, oneLine, pickMessages, sessionCount, sessionTitle } from "../lib/ask.js";

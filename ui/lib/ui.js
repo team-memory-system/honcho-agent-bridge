@@ -112,7 +112,10 @@ export function confirmSheet({ title, text, confirm = "확인", danger = false, 
   });
 }
 
-/** A labelled switch that reports its state to a screen reader. */
+/**
+ * A labelled switch that reports its state to a screen reader. It turns only once
+ * `onChange` has done what it does; `onChange` returning false leaves it as it was.
+ */
 export function toggle(checked, onChange, { label, disabled } = {}) {
   const control = h("button", {
     class: "switch",
@@ -126,7 +129,7 @@ export function toggle(checked, onChange, { label, disabled } = {}) {
     const next = control.getAttribute("aria-checked") !== "true";
     control.disabled = true;
     try {
-      await onChange(next);
+      if ((await onChange(next)) === false) return;
       control.setAttribute("aria-checked", String(next));
     } catch (error) {
       toast(error?.message || String(error), "bad");
