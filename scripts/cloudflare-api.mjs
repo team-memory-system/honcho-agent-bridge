@@ -13,10 +13,19 @@
 //     policy, and Managed OAuth so Claude Code and Codex can log in to /mcp;
 //   - a "gate" Access app on <host>/v3 and <host>/health with a Bypass policy, so the
 //     owner's other computers keep using the gate token there.
+// A team with a hub (server/hub/hub.mjs, a Worker that holds the admin's token) has
+// two Access apps instead, both with Google login and Managed OAuth:
+//   - the servers app, "Team Memory servers": every server host of the team as one
+//     destination each, behind the people policy. It replaces a host's two per-host
+//     apps above, which go when the host joins it;
+//   - the hub app, "Team Memory hub <host>", behind the reusable "Team Memory
+//     everyone" policy: anyone with a login reaches the hub, which keeps the roster.
 //
 // Every ensure* helper looks first (by name, else by domain), creates only what is
 // missing and updates only what differs, so running it twice changes nothing.
 // Nothing here logs, and no error carries the API token or a tunnel token.
+// The hub Worker imports this file too, so it uses Web APIs only (fetch, URL,
+// AbortSignal) and must stay free of Node imports.
 
 export const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
 export const GATE_ORIGIN = "http://gate:8010";
@@ -501,4 +510,111 @@ export async function removeServerHost(client, { accountId, zoneId, host, tunnel
   const tunnel = known.tunnelId ? { id: known.tunnelId } : await findTunnel(client, accountId, tunnelName);
   const tunnelRemoved = tunnel ? await deleteTunnel(client, accountId, tunnel.id) : false;
   return { peopleApp, bypassApp, dnsRecords, tunnel: tunnelRemoved };
+}
+
+// ------------------------------------------------------------- the team hub
+//
+// The hub makes each server's tunnel and hostname with the helpers above, but every
+// server host shares one Access app, and the hub has an app of its own. Managed
+// OAuth grants on both last a year, so the app's refresh token outlives the 24 h
+// browser session.
+
+export const SERVERS_APP_NAME = "Team Memory servers";
+// One Access app takes at most 50 destinations.
+export const SERVERS_APP_MAX_HOSTS = 50;
+export const EVERYONE_POLICY_NAME = "Team Memory everyone";
+// The hub app is called "Team Memory hub <host>".
+export const HUB_APP_NAME = "Team Memory hub";
+
+function managedOAuth() {
+  return {
+    enabled: true,
+    dynamic_client_registration: { enabled: true, allow_any_on_localhost: true, allow_any_on_loopback: true },
+    grant: { session_duration: "8760h" },
+  };
+}
+
+/** The servers app: every server host of the team, the people policy, Google login, Managed OAuth. */
+export function serversAppBody({ hosts, idpId, policyId }) {
+  return {
+    name: SERVERS_APP_NAME,
+    type: "self_hosted",
+    domain: hosts[0],
+    destinations: hosts.map((uri) => ({ type: "public", uri })),
+    allowed_idps: [idpId],
+    auto_redirect_to_identity: true,
+    session_duration: "24h",
+    policies: [{ id: policyId, precedence: 1 }],
+    oauth_configuration: managedOAuth(),
+  };
+}
+
+/**
+ * The servers app holding exactly `hosts` (1 to 50, the first is its domain), made
+ * when missing and updated when it differs. `known.id` is its id from before, if any.
+ * Returns { id, aud, created, updated }.
+ */
+export async function ensureServersApp(client, accountId, { hosts, idpId, policyId, known = {} }) {
+  const list = [...new Set((hosts || []).map((host) => String(host).trim().toLowerCase()).filter(Boolean))];
+  if (!list.length || list.length > SERVERS_APP_MAX_HOSTS) {
+    throw new CloudflareApiError(`The servers app holds 1 to ${SERVERS_APP_MAX_HOSTS} hosts, not ${list.length}`);
+  }
+  const app = await ensureAccessApp(client, accountId, serversAppBody({ hosts: list, idpId, policyId }), { id: known?.id || "" });
+  if (!app.aud) throw new CloudflareApiError("Cloudflare returned no AUD tag for the servers app");
+  return app;
+}
+
+/**
+ * Deletes the two per-host apps the first sharing made for `host` (peopleAppName and
+ * bypassAppName). They are matched by exact name only, never by domain, since the
+ * servers app may have that same domain.
+ */
+export async function removeLegacyHostApps(client, accountId, host) {
+  const base = `/accounts/${enc(accountId)}/access/apps`;
+  const apps = await client.list(base);
+  const removed = { peopleApp: false, bypassApp: false };
+  for (const [kind, name] of [["peopleApp", peopleAppName(host)], ["bypassApp", bypassAppName(host)]]) {
+    for (const app of apps.filter((item) => item?.name === name)) {
+      try { await client.delete(`${base}/${enc(app.id)}`); removed[kind] = true; }
+      catch (error) { if (!isNotFound(error)) throw error; }
+    }
+  }
+  return removed;
+}
+
+/**
+ * The reusable allow policy for anyone with a login, for the hub app: the hub itself
+ * decides who is in the team. A policy `id` names is used only if it has this name,
+ * so another policy is never opened to everyone; rules the owner added by hand
+ * (exclude, require) stay.
+ */
+export async function ensureEveryonePolicy(client, accountId, { id = "" } = {}) {
+  const base = `/accounts/${enc(accountId)}/access/policies`;
+  const include = [{ everyone: {} }];
+  let existing = await findPolicy(client, accountId, { id, name: EVERYONE_POLICY_NAME });
+  if (existing && existing.name !== EVERYONE_POLICY_NAME) existing = await findPolicy(client, accountId, { name: EVERYONE_POLICY_NAME });
+  if (!existing) {
+    const created = await client.post(base, { name: EVERYONE_POLICY_NAME, decision: "allow", include });
+    return { id: created.id, created: true, updated: false };
+  }
+  const everyoneOnly = existing.decision === "allow"
+    && Array.isArray(existing.include) && existing.include.length === 1 && existing.include[0]?.everyone;
+  if (everyoneOnly) return { id: existing.id, created: false, updated: false };
+  await client.put(`${base}/${enc(existing.id)}`, policyBody(existing, include, "allow"));
+  return { id: existing.id, created: false, updated: true };
+}
+
+/** The hub app on `host`: the everyone policy, Google login, Managed OAuth. */
+export function hubAppBody({ host, idpId, policyId }) {
+  return {
+    name: `${HUB_APP_NAME} ${host}`,
+    type: "self_hosted",
+    domain: host,
+    destinations: [{ type: "public", uri: host }],
+    allowed_idps: [idpId],
+    auto_redirect_to_identity: true,
+    session_duration: "24h",
+    policies: [{ id: policyId, precedence: 1 }],
+    oauth_configuration: managedOAuth(),
+  };
 }

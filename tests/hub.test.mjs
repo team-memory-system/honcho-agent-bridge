@@ -1,0 +1,929 @@
+// The team hub, run under Node: the Worker's fetch with a fake HUB namespace whose one
+// TeamHub keeps its storage in a Map, Cloudflare faked by tests/fake-cloudflare.mjs and
+// Access by tests/fake-access.mjs. What matters: nothing passes without a person's
+// valid Access login for the hub, the Durable Object hears only the verified email,
+// the roster decides who may do what, every server address is made and taken away in
+// Cloudflare as the team changes, and no answer carries a token it should not.
+import assert from "node:assert/strict";
+import fsp from "node:fs/promises";
+import path from "node:path";
+import test, { after, before } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import hub, { TeamHub } from "../server/hub/hub.mjs";
+import { ACCESS_AUD, ACCESS_ISSUER, ACCESS_TEAM_DOMAIN, accessKey, personClaims, signAssertion, startAccessCerts } from "./fake-access.mjs";
+import { ACCOUNT_ID, API_TOKEN, connectorToken, startFakeCloudflare, ZONE, ZONE_ID } from "./fake-cloudflare.mjs";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const HUB_HOST = `team.${ZONE}`;
+const ADMIN = "admin@example.com";
+const PEOPLE_POLICY_ID = "policy-people-0001";
+const GOOGLE_IDP = "idp-google-0001";
+const WORKSPACE = "memory";
+// Made once: RSA key generation is the slow part of these tests.
+const signingKey = accessKey("kid-hub");
+const rotatedKey = accessKey("kid-hub-rotated");
+const strangerKey = accessKey("kid-hub");
+let certs;
+
+before(async () => {
+  certs = await startAccessCerts([signingKey]);
+});
+
+after(async () => {
+  await certs?.close();
+});
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The HUB binding: idFromName, and get, whose stub hands every request to one TeamHub.
+ * Its storage is a Map that copies values in and out, as Durable Object storage does.
+ * blockConcurrencyWhile runs one callback at a time and counts the ones that threw:
+ * in the Workers runtime that resets the object.
+ */
+function fakeNamespace(env) {
+  const data = new Map();
+  const names = [];
+  const received = [];
+  const blocks = { started: 0, running: 0, most: 0, threw: 0 };
+  let queue = Promise.resolve();
+  const ctx = {
+    storage: {
+      get: async (key) => structuredClone(data.get(key)),
+      put: async (key, value) => { data.set(key, structuredClone(value)); },
+      delete: async (key) => data.delete(key),
+      list: async ({ prefix = "" } = {}) => new Map([...data.keys()]
+        .filter((key) => key.startsWith(prefix))
+        .sort()
+        .map((key) => [key, structuredClone(data.get(key))])),
+    },
+    blockConcurrencyWhile(callback) {
+      blocks.started += 1;
+      const run = queue.then(async () => {
+        blocks.running += 1;
+        blocks.most = Math.max(blocks.most, blocks.running);
+        try { return await callback(); }
+        catch (error) { blocks.threw += 1; throw error; }
+        finally { blocks.running -= 1; }
+      });
+      queue = run.catch(() => {});
+      return run;
+    },
+  };
+  let object = null;
+  const namespace = {
+    idFromName(name) {
+      names.push(name);
+      return { name };
+    },
+    get(id) {
+      return {
+        fetch(request) {
+          received.push({ id, headers: new Headers(request.headers) });
+          object ??= new TeamHub(ctx, env);
+          return object.fetch(request);
+        },
+      };
+    },
+  };
+  return { data, names, received, blocks, namespace };
+}
+
+/** A hub for one test: its own fake Cloudflare, with the people policy the deploy made. */
+async function hubFixture(t, { admins = [ADMIN], env: overrides = {} } = {}) {
+  const cf = await startFakeCloudflare();
+  t.after(() => cf.close());
+  cf.state.policies.push({
+    id: PEOPLE_POLICY_ID,
+    reusable: true,
+    name: "Team Memory people",
+    decision: "allow",
+    include: admins.map((email) => ({ email: { email: email.toLowerCase() } })),
+  });
+  const team = {
+    name: "예시 팀",
+    hubHost: HUB_HOST,
+    zone: ZONE,
+    zoneId: ZONE_ID,
+    accountId: ACCOUNT_ID,
+    teamDomain: ACCESS_TEAM_DOMAIN,
+    idpId: GOOGLE_IDP,
+    peoplePolicyId: PEOPLE_POLICY_ID,
+    hubAud: ACCESS_AUD,
+    admins,
+  };
+  const env = { TEAM: JSON.stringify(team), CF_API_TOKEN: API_TOKEN, CF_API_BASE: cf.baseUrl, ACCESS_CERTS_URL: certs.url, ...overrides };
+  const fake = fakeNamespace(env);
+  env.HUB = fake.namespace;
+
+  async function send(pathname, { method = "GET", as = null, claims = null, key = signingKey, body, headers = {} } = {}) {
+    const all = { ...headers };
+    if (as || claims) all["cf-access-jwt-assertion"] = signAssertion(key, claims || personClaims({ email: as }));
+    if (body !== undefined) all["content-type"] = "application/json";
+    const request = new Request(`https://${HUB_HOST}${pathname}`, {
+      method,
+      headers: all,
+      ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}),
+    });
+    const response = await hub.fetch(request, env);
+    const text = await response.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    return { status: response.status, headers: response.headers, text, json };
+  }
+
+  const as = (email) => ({
+    get: (pathname, options) => send(pathname, { ...options, as: email }),
+    post: (pathname, body = {}, options) => send(pathname, { ...options, method: "POST", as: email, body }),
+    put: (pathname, body = {}, options) => send(pathname, { ...options, method: "PUT", as: email, body }),
+    delete: (pathname, options) => send(pathname, { ...options, method: "DELETE", as: email }),
+  });
+
+  /** Puts people on the roster through the admin API, each with a peer when one is given. */
+  async function addPeople(people) {
+    for (const [email, peer] of Object.entries(people)) {
+      assert.equal((await as(ADMIN).post("/api/admin/people", { email })).status, 201, email);
+      if (peer) assert.equal((await as(email).post("/api/me", { peer })).status, 200, email);
+    }
+  }
+
+  const serversApp = () => cf.state.apps.find((app) => app.name === "Team Memory servers") || null;
+  const tunnel = (id) => cf.state.tunnels.find((item) => item.id === id);
+  const people = () => cf.state.policies.find((item) => item.id === PEOPLE_POLICY_ID).include.map((rule) => rule.email.email);
+  return { cf, env, ...fake, send, as, addPeople, serversApp, tunnel, people };
+}
+
+// ------------------------------------------------------------------- the door
+
+test("the hub module imports one literal line of Cloudflare helpers, and nothing it loads uses Node", async () => {
+  const source = await fsp.readFile(path.join(ROOT, "server", "hub", "hub.mjs"), "utf8");
+  const imports = source.split("\n").filter((line) => /^\s*import\b/.test(line));
+  assert.equal(imports.length, 1);
+  assert.match(imports[0], /^import \{ [^}]+ \} from "\.\.\/\.\.\/scripts\/cloudflare-api\.mjs";$/);
+  assert.doesNotMatch(source, /\bprocess\.|\bBuffer\b|\brequire\(/);
+  const helpers = await fsp.readFile(path.join(ROOT, "scripts", "cloudflare-api.mjs"), "utf8");
+  assert.doesNotMatch(helpers, /^\s*import\b/m, "the Worker uploads it as it is, so it imports nothing");
+  assert.doesNotMatch(helpers, /\bprocess\.|\bBuffer\b|\brequire\(/);
+});
+
+test("every request needs a person's valid Access login for the hub: 401 JSON for the API, a Korean page for /", async (t) => {
+  const f = await hubFixture(t);
+  const now = Math.floor(Date.now() / 1000);
+  const { email: _email, ...withoutEmail } = personClaims();
+  const signed = (claims, key = signingKey, header) => ({ "cf-access-jwt-assertion": signAssertion(key, claims, header) });
+  const cases = {
+    "missing assertion": {},
+    "not a JWT": { "cf-access-jwt-assertion": "not-a-jwt" },
+    "bad signature": signed(personClaims({ email: ADMIN }), strangerKey),
+    "wrong aud": signed(personClaims({ email: ADMIN, aud: ["aud-of-another-app"] })),
+    "wrong iss": signed(personClaims({ email: ADMIN, iss: "https://another-team.example" })),
+    expired: signed(personClaims({ email: ADMIN, exp: now - 120 })),
+    "no exp": signed(personClaims({ email: ADMIN, exp: undefined })),
+    "not yet valid": signed(personClaims({ email: ADMIN, nbf: now + 600 })),
+    "no email": signed(withoutEmail),
+    "empty email": signed(personClaims({ email: "  " })),
+    "service token": signed({ ...withoutEmail, common_name: "0000.access", sub: "" }),
+    "service token with an email": signed(personClaims({ email: ADMIN, common_name: "0000.access" })),
+    "another algorithm": signed(personClaims({ email: ADMIN }), signingKey, { alg: "HS256" }),
+    "signature of another token": {
+      "cf-access-jwt-assertion": (() => {
+        const forged = signAssertion(signingKey, personClaims({ email: ADMIN })).split(".");
+        forged[2] = signAssertion(signingKey, personClaims({ email: "stranger@example.com" })).split(".")[2];
+        return forged.join(".");
+      })(),
+    },
+  };
+  for (const [name, headers] of Object.entries(cases)) {
+    const api = await f.send("/api/me", { headers });
+    assert.equal(api.status, 401, name);
+    assert.equal(api.json.error, "unauthorized", name);
+    assert.equal(typeof api.json.detail, "string");
+    assert.match(api.headers.get("content-type"), /application\/json/);
+    const page = await f.send("/", { headers });
+    assert.equal(page.status, 401, name);
+    assert.match(page.headers.get("content-type"), /^text\/html/);
+    assert.match(page.text, /<html lang="ko">/);
+    assert.match(page.text, /로그인을 확인하지 못했습니다/);
+    for (const claim of [ADMIN, "stranger@example.com", ACCESS_AUD, ACCESS_ISSUER, "0000.access"]) {
+      assert.ok(!api.text.includes(claim) && !page.text.includes(claim), `${name}: the answer does not echo ${claim}`);
+    }
+  }
+  assert.deepEqual(f.names, [], "nothing refused reached the Durable Object");
+  assert.equal(f.data.size, 0);
+
+  // Up to 60 seconds of clock difference, and an aud given as one string.
+  for (const claims of [
+    personClaims({ email: ADMIN, exp: now - 30 }),
+    personClaims({ email: ADMIN, nbf: now + 30 }),
+    personClaims({ email: ADMIN, aud: ACCESS_AUD }),
+    personClaims({ email: ADMIN, aud: ["aud-another-app", ACCESS_AUD] }),
+  ]) {
+    assert.equal((await f.send("/api/me", { claims })).status, 200, JSON.stringify(claims));
+  }
+});
+
+test("the Durable Object hears only the verified email: every x-hub-* header a caller sends is dropped", async (t) => {
+  const f = await hubFixture(t);
+  const spoofed = { "x-hub-email": ADMIN, "X-Hub-Admin": "true", "x-hub-anything": "1" };
+  const me = await f.send("/api/me", { as: "Stranger@Example.com", headers: spoofed });
+  assert.equal(me.status, 200);
+  assert.equal(me.json.email, "stranger@example.com", "the assertion's email, in lower case");
+  assert.equal(me.json.member, false);
+  const heard = f.received.at(-1).headers;
+  assert.deepEqual([...heard.keys()].filter((name) => name.startsWith("x-hub-")), ["x-hub-email"]);
+  assert.equal(heard.get("x-hub-email"), "stranger@example.com");
+  assert.ok(f.names.length > 0 && f.names.every((name) => name === "team"), "all state is in the one object named team");
+
+  const admin = await f.send("/api/admin/people", { as: "stranger@example.com", headers: spoofed });
+  assert.equal(admin.status, 403);
+  assert.equal(admin.json.error, "not_member");
+});
+
+test("an unknown key id fetches the team's keys once more at most once a minute, and the keys are fetched again after an hour", async (t) => {
+  const ownCerts = await startAccessCerts([signingKey]);
+  t.after(() => ownCerts.close());
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const f = await hubFixture(t, { env: { ACCESS_CERTS_URL: ownCerts.url } });
+  const call = (key) => f.send("/api/me", { as: ADMIN, key });
+
+  assert.equal((await call(signingKey)).status, 200);
+  assert.equal((await call(signingKey)).status, 200);
+  assert.equal(ownCerts.fetches, 1, "the keys are fetched once and kept");
+
+  // Cloudflare rotates in a new key: the first token signed with it is let in.
+  ownCerts.keys = [signingKey, rotatedKey];
+  assert.equal((await call(rotatedKey)).status, 200);
+  assert.equal(ownCerts.fetches, 2, "one more fetch for the new key id");
+
+  // A made-up key id within the same minute is refused without asking again.
+  const madeUp = { ...signingKey, kid: "kid-made-up" };
+  assert.equal((await call(madeUp)).status, 401);
+  assert.equal((await call(madeUp)).status, 401);
+  assert.equal(ownCerts.fetches, 2);
+  t.mock.timers.tick(61_000);
+  assert.equal((await call(madeUp)).status, 401);
+  assert.equal(ownCerts.fetches, 3, "a minute later it may ask once more");
+
+  // An hour after the last fetch the keys are fetched again, and a retired key stops working.
+  ownCerts.keys = [rotatedKey];
+  t.mock.timers.tick(59 * 60_000);
+  assert.equal((await call(signingKey)).status, 200, "not yet an hour");
+  assert.equal(ownCerts.fetches, 3);
+  t.mock.timers.tick(2 * 60_000);
+  assert.equal((await call(rotatedKey)).status, 200);
+  assert.equal(ownCerts.fetches, 4);
+  assert.equal((await call(signingKey)).status, 401, "the retired key is no longer trusted");
+});
+
+test("a change sent by a page on another site is refused; reads and the app's own requests pass", async (t) => {
+  const f = await hubFixture(t);
+  for (const headers of [{ origin: "https://evil.example" }, { "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }, { origin: "null" }]) {
+    const answer = await f.as(ADMIN).post("/api/admin/people", { email: "mate@example.com" }, { headers });
+    assert.equal(answer.status, 403, JSON.stringify(headers));
+    assert.equal(answer.json.error, "cross_site");
+  }
+  assert.equal(f.data.has("person:mate@example.com"), false);
+  assert.equal((await f.as(ADMIN).get("/api/me", { headers: { origin: "https://evil.example", "sec-fetch-site": "cross-site" } })).status, 200);
+  const same = await f.as(ADMIN).post("/api/admin/people", { email: "mate@example.com" }, { headers: { origin: `https://${HUB_HOST}`, "sec-fetch-site": "same-origin" } });
+  assert.equal(same.status, 201);
+});
+
+// ---------------------------------------------------------------- the roster
+
+test("the first request of all seeds the team and its admins; /api/me answers anyone and counts a member's logins", async (t) => {
+  const f = await hubFixture(t, { admins: [ADMIN, "Second@Example.com", "not an email"] });
+  const stranger = await f.as("stranger@example.com").get("/api/me");
+  assert.equal(stranger.status, 200);
+  assert.deepEqual(stranger.json, {
+    email: "stranger@example.com",
+    member: false,
+    admin: false,
+    peer: null,
+    team: { name: "예시 팀", host: HUB_HOST },
+    servers: [],
+  });
+  assert.equal(f.data.get("meta").name, "예시 팀");
+  assert.match(f.data.get("meta").createdAt, /^\d{4}-\d\d-\d\dT/);
+  assert.deepEqual([...f.data.keys()].filter((key) => key.startsWith("person:")).sort(), ["person:admin@example.com", "person:second@example.com"]);
+  const seeded = f.data.get("person:second@example.com");
+  assert.deepEqual({ ...seeded, addedAt: "x" }, {
+    email: "second@example.com", peer: null, admin: true, addedAt: "x", addedBy: "setup", firstLoginAt: null, lastLoginAt: null,
+  });
+
+  const first = await f.as(ADMIN).get("/api/me");
+  assert.deepEqual(first.json, { email: ADMIN, member: true, admin: true, peer: null, team: { name: "예시 팀", host: HUB_HOST }, servers: [] });
+  const login = f.data.get("person:admin@example.com");
+  assert.ok(login.firstLoginAt);
+  assert.equal(login.lastLoginAt, login.firstLoginAt);
+  await pause(5);
+  await f.as(ADMIN).get("/api/me");
+  const later = f.data.get("person:admin@example.com");
+  assert.equal(later.firstLoginAt, login.firstLoginAt);
+  assert.ok(later.lastLoginAt > login.lastLoginAt);
+
+  // Seeding happens once: an admin removed later is not seeded again.
+  assert.equal((await f.as(ADMIN).delete("/api/admin/people/second%40example.com")).status, 200);
+  await f.as(ADMIN).get("/api/me");
+  assert.equal(f.data.has("person:second@example.com"), false);
+});
+
+test("GET / shows the team, the email signed in, whether the roster has it, and how to join from the app", async (t) => {
+  const f = await hubFixture(t);
+  assert.equal((await f.as(ADMIN).put("/api/admin/team", { name: "<b>팀</b> & co" })).status, 200);
+  const member = await f.as(ADMIN).get("/");
+  assert.equal(member.status, 200);
+  assert.match(member.headers.get("content-type"), /^text\/html; charset=utf-8/);
+  assert.match(member.headers.get("content-security-policy"), /default-src 'none'/);
+  assert.ok(member.text.includes("&lt;b&gt;팀&lt;/b&gt; &amp; co"), "the team's name, escaped");
+  assert.ok(!member.text.includes("<b>팀</b>"));
+  assert.ok(member.text.includes(ADMIN));
+  assert.match(member.text, /팀 명단에 있습니다/);
+  assert.match(member.text, /팀에 들어가기/);
+  assert.ok(member.text.includes(`<p class="address mono">${HUB_HOST}</p>`));
+  assert.ok(member.text.includes(`<a class="button" href="http://127.0.0.1:4180/#/start?team=${HUB_HOST}">앱에서 열기</a>`));
+
+  const stranger = await f.as("stranger@example.com").get("/");
+  assert.equal(stranger.status, 200);
+  assert.ok(stranger.text.includes("stranger@example.com"));
+  assert.match(stranger.text, /팀 명단에 없습니다/);
+});
+
+test("a member's peer is set once: the one given if no one has it, else one made from the email", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({
+    "j.kim@example.com": null,
+    "j_kim@example.org": null,
+    "J-Kim@example.net": null,
+    "x@example.com": null,
+    "--a-very-long-local-part-that-goes-on-and-on@example.com": null,
+    "abcdefghijklmnopqrstuvwxyz01234-z@example.com": null,
+    "+++@example.com": null,
+  });
+  const peer = async (email, body) => {
+    const answer = await f.as(email).post("/api/me", body);
+    return [answer.status, answer.json.peer ?? answer.json.error];
+  };
+  assert.deepEqual(await peer("j.kim@example.com", {}), [200, "j-kim"]);
+  assert.deepEqual(await peer("j_kim@example.org", { peer: null }), [200, "j-kim-2"]);
+  assert.deepEqual(await peer("j-kim@example.net", { peer: "" }), [200, "j-kim-3"]);
+  assert.deepEqual(await peer("--a-very-long-local-part-that-goes-on-and-on@example.com", {}), [200, "a-very-long-local-part-that-goes"]);
+  assert.deepEqual(await peer("abcdefghijklmnopqrstuvwxyz01234-z@example.com", {}), [200, "abcdefghijklmnopqrstuvwxyz01234"]);
+  assert.deepEqual(await peer("+++@example.com", {}), [200, "member"]);
+
+  // Set once: the same again is fine, another is not.
+  assert.deepEqual(await peer("j.kim@example.com", {}), [200, "j-kim"]);
+  assert.deepEqual(await peer("j.kim@example.com", { peer: "j-kim" }), [200, "j-kim"]);
+  assert.deepEqual(await peer("j.kim@example.com", { peer: "jay" }), [409, "peer_set"]);
+
+  // A given peer: checked, and nobody else's, whatever its case.
+  for (const wanted of ["bad peer!", "a".repeat(65), "assistant_claude", "Automation_x", 5, ["x"]]) {
+    assert.deepEqual(await peer("x@example.com", { peer: wanted }), [400, "bad_request"], JSON.stringify(wanted));
+  }
+  assert.deepEqual(await peer("x@example.com", { peer: "J-KIM" }), [409, "peer_taken"]);
+  assert.deepEqual(await peer("x@example.com", { peer: "Xavier.K@home:1_-" }), [200, "Xavier.K@home:1_-"]);
+  assert.equal(f.data.get("person:x@example.com").peer, "Xavier.K@home:1_-");
+
+  assert.deepEqual(await peer("stranger@example.com", { peer: "stranger" }), [403, "not_member"]);
+  assert.deepEqual(await peer("x@example.com", "{not json"), [400, "bad_request"]);
+});
+
+test("the team lists its people and servers to members only", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": null });
+  await f.as(ADMIN).post("/api/me", { peer: "chief" });
+  await f.as("bob@example.com").get("/api/me");
+  assert.equal((await f.as(ADMIN).post("/api/servers", { workspace: WORKSPACE, device: "관리자 Mac" })).status, 201);
+  assert.equal((await f.as("bob@example.com").post("/api/servers", { workspace: "bobs" })).status, 201);
+
+  const listed = await f.as("carol@example.com").get("/api/team");
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.json, {
+    team: { name: "예시 팀", host: HUB_HOST, zone: ZONE },
+    people: [
+      { email: ADMIN, peer: "chief", admin: true, joined: false, servers: ["memory.example.com"] },
+      { email: "bob@example.com", peer: "bob", admin: false, joined: true, servers: ["memory-bob.example.com"] },
+      { email: "carol@example.com", peer: null, admin: false, joined: false, servers: [] },
+    ],
+    servers: [
+      { host: "memory-bob.example.com", label: "bob", owner: "bob@example.com", ownerPeer: "bob", workspace: "bobs", company: false, createdOn: null },
+      { host: "memory.example.com", label: "memory", owner: ADMIN, ownerPeer: "chief", workspace: WORKSPACE, company: true, createdOn: "관리자 Mac" },
+    ],
+  });
+  const stranger = await f.as("stranger@example.com").get("/api/team");
+  assert.equal(stranger.status, 403);
+  assert.equal(stranger.json.error, "not_member");
+  assert.match(stranger.json.detail, /stranger@example\.com is not on the team's roster/);
+});
+
+// --------------------------------------------------------------- servers
+
+test("the first admin server is the company server at memory.<zone>; the others are memory-<label>.<zone>, all in one servers app", async (t) => {
+  const f = await hubFixture(t, { admins: [ADMIN, "boss@example.com"] });
+  await f.addPeople({ "bob@example.com": "Bob.Lee" });
+
+  const writesBefore = f.cf.writes().length;
+  for (const [body, pattern] of [[{}, /workspace/], [{ workspace: "bad workspace" }, /workspace/], [{ workspace: WORKSPACE, label: "Bad_Label" }, /label/], [{ workspace: WORKSPACE, device: "a\nb" }, /device/], [{ workspace: WORKSPACE, replace: "yes" }, /replace/]]) {
+    const refused = await f.as("bob@example.com").post("/api/servers", body);
+    assert.equal(refused.status, 400, JSON.stringify(body));
+    assert.match(refused.json.detail, pattern);
+  }
+  assert.equal((await f.as("stranger@example.com").post("/api/servers", { workspace: WORKSPACE })).status, 403);
+  assert.equal(f.cf.writes().length, writesBefore, "nothing refused touched Cloudflare");
+
+  const made = await f.as(ADMIN).post("/api/servers", { workspace: WORKSPACE, device: "관리자의 MacBook" });
+  assert.equal(made.status, 201);
+  assert.deepEqual(Object.keys(made.json).sort(), ["aud", "server", "teamDomain", "tunnelToken"]);
+  const { server, tunnelToken, teamDomain, aud } = made.json;
+  assert.deepEqual({ ...server, tunnelId: "t", dnsRecordId: "d", createdAt: "c", updatedAt: "u" }, {
+    host: "memory.example.com", label: "memory", owner: ADMIN, workspace: WORKSPACE, company: true, createdOn: "관리자의 MacBook",
+    tunnelId: "t", dnsRecordId: "d", createdAt: "c", updatedAt: "u",
+  });
+  assert.deepEqual(f.data.get("server:memory.example.com"), server);
+  const tunnel = f.tunnel(server.tunnelId);
+  assert.equal(tunnel.name, "team-memory-memory");
+  assert.equal(tunnel.config_src, "cloudflare");
+  assert.equal(tunnelToken, f.cf.state.tunnelTokens[server.tunnelId]);
+  assert.equal(teamDomain, ACCESS_TEAM_DOMAIN);
+  assert.deepEqual(f.cf.state.configurations[server.tunnelId], {
+    ingress: [{ hostname: "memory.example.com", service: "http://gate:8010" }, { service: "http_status:404" }],
+  });
+  const cname = f.cf.state.records.find((record) => record.name === "memory.example.com");
+  assert.deepEqual({ type: cname.type, content: cname.content, proxied: cname.proxied }, { type: "CNAME", content: `${server.tunnelId}.cfargotunnel.com`, proxied: true });
+  assert.equal(server.dnsRecordId, cname.id);
+  let app = f.serversApp();
+  assert.deepEqual({ ...app, id: "i", aud: "a" }, {
+    id: "i",
+    aud: "a",
+    name: "Team Memory servers",
+    type: "self_hosted",
+    domain: "memory.example.com",
+    destinations: [{ type: "public", uri: "memory.example.com" }],
+    allowed_idps: [GOOGLE_IDP],
+    auto_redirect_to_identity: true,
+    session_duration: "24h",
+    policies: [{ id: PEOPLE_POLICY_ID, precedence: 1 }],
+    oauth_configuration: {
+      enabled: true,
+      dynamic_client_registration: { enabled: true, allow_any_on_localhost: true, allow_any_on_loopback: true },
+      grant: { session_duration: "8760h" },
+    },
+  });
+  assert.equal(aud, app.aud);
+  assert.deepEqual(f.data.get("serversApp"), { id: app.id, aud: app.aud });
+  for (const call of f.cf.requests) assert.equal(call.authorization, `Bearer ${API_TOKEN}`);
+
+  // A member's server: memory-<their peer, made valid>, added to the same app.
+  const bobs = await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE });
+  assert.equal(bobs.status, 201);
+  assert.equal(bobs.json.server.host, "memory-bob-lee.example.com");
+  assert.equal(bobs.json.server.label, "bob-lee");
+  assert.equal(bobs.json.server.company, false);
+  assert.equal(f.tunnel(bobs.json.server.tunnelId).name, "team-memory-bob-lee");
+  assert.equal(bobs.json.aud, aud, "one app, so one AUD for every server");
+  assert.notEqual(bobs.json.tunnelToken, tunnelToken);
+  app = f.serversApp();
+  assert.equal(f.cf.state.apps.length, 1);
+  assert.equal(app.domain, "memory.example.com");
+  assert.deepEqual(app.destinations.map((item) => item.uri), ["memory.example.com", "memory-bob-lee.example.com"]);
+
+  // The second admin's: the company server exists, so it is memory-<label> too.
+  const boss = await f.as("boss@example.com").post("/api/servers", { workspace: WORKSPACE, label: "boss" });
+  assert.equal(boss.status, 201);
+  assert.deepEqual([boss.json.server.host, boss.json.server.company], ["memory-boss.example.com", false]);
+  assert.deepEqual(f.serversApp().destinations.map((item) => item.uri), ["memory.example.com", "memory-bob-lee.example.com", "memory-boss.example.com"]);
+
+  // One server per person.
+  const writes = f.cf.writes().length;
+  const again = await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE });
+  assert.equal(again.status, 409);
+  assert.equal(again.json.error, "server_exists");
+  assert.deepEqual(again.json.server, bobs.json.server);
+  assert.equal(f.cf.writes().length, writes);
+
+  const me = await f.as("bob@example.com").get("/api/me");
+  assert.deepEqual(me.json.servers, [bobs.json.server]);
+});
+
+test("a host or name another server has is refused; leftovers of the first sharing on that name go", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": "carol" });
+
+  // The first sharing's apps and tunnel for both names, and an app of the owner's own.
+  const oldTunnel = { id: "11111111-2222-4333-8444-555555555555", name: "team-memory-carol", config_src: "cloudflare", created_at: "2026-01-01T00:00:00.000Z", deleted_at: null };
+  f.cf.state.tunnels.push(oldTunnel);
+  f.cf.state.tunnelTokens[oldTunnel.id] = connectorToken(oldTunnel.id);
+  f.cf.state.apps.push(
+    { id: "legacy-company", aud: "a".repeat(64), name: "Team Memory memory.example.com", domain: "memory.example.com", policies: [] },
+    { id: "legacy-company-gate", aud: "b".repeat(64), name: "Team Memory memory.example.com gate token", domain: "memory.example.com/v3", policies: [] },
+    { id: "legacy-carol", aud: "c".repeat(64), name: "Team Memory memory-carol.example.com", domain: "memory-carol.example.com", policies: [] },
+    { id: "legacy-carol-gate", aud: "d".repeat(64), name: "Team Memory memory-carol.example.com gate token", domain: "memory-carol.example.com/v3", policies: [] },
+    { id: "own-wiki", aud: "e".repeat(64), name: "Wiki", domain: "memory-carol.example.com/wiki", policies: [] },
+  );
+
+  const hubName = await f.as(ADMIN).post("/api/servers", { workspace: WORKSPACE, label: "team" });
+  assert.equal(hubName.status, 409, "team.example.com is the hub's own host");
+  assert.equal(hubName.json.error, "host_taken");
+  assert.equal((await f.as(ADMIN).post("/api/servers", { workspace: WORKSPACE })).status, 201);
+  assert.equal((await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE })).status, 201);
+
+  const ids = () => f.cf.state.apps.map((app) => app.id);
+  assert.ok(!ids().includes("legacy-company") && !ids().includes("legacy-company-gate"), "the company host's old apps are gone");
+  assert.ok(!["legacy-company", "legacy-company-gate"].includes(f.serversApp().id), "the servers app is a new app, not the old one taken over");
+
+  for (const [body, detail] of [
+    [{ workspace: WORKSPACE, label: "bob" }, /memory-bob\.example\.com is taken/],
+    [{ workspace: WORKSPACE, label: "memory" }, /name memory is taken/],
+  ]) {
+    const taken = await f.as("carol@example.com").post("/api/servers", body);
+    assert.equal(taken.status, 409, JSON.stringify(body));
+    assert.equal(taken.json.error, "host_taken");
+    assert.match(taken.json.detail, detail);
+  }
+
+  const carols = await f.as("carol@example.com").post("/api/servers", { workspace: WORKSPACE });
+  assert.equal(carols.status, 201);
+  assert.equal(carols.json.server.host, "memory-carol.example.com");
+  assert.ok(f.tunnel(oldTunnel.id).deleted_at, "the tunnel of that name from before is deleted");
+  assert.notEqual(carols.json.server.tunnelId, oldTunnel.id);
+  assert.notEqual(carols.json.tunnelToken, f.cf.state.tunnelTokens[oldTunnel.id]);
+  assert.deepEqual(ids().filter((id) => id !== f.serversApp().id), ["own-wiki"], "only apps of another name stay");
+  assert.deepEqual(f.serversApp().destinations.map((item) => item.uri), ["memory.example.com", "memory-bob.example.com", "memory-carol.example.com"]);
+  assert.equal(f.blocks.threw, 0, "refusals inside a change come out as answers");
+});
+
+test("replace makes a new tunnel for the same host, so the old computer's connector stops", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob" });
+  const first = (await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE, device: "옛 컴퓨터" })).json;
+  const appWrites = () => f.cf.writes().filter((item) => item.includes("/access/")).length;
+  const before = appWrites();
+  // The old tunnel goes by its id, even renamed by hand.
+  f.tunnel(first.server.tunnelId).name = "renamed-by-hand";
+  await pause(5);
+
+  const moved = await f.as("bob@example.com").post("/api/servers", { workspace: "bob-new", device: "새 컴퓨터", replace: true });
+  assert.equal(moved.status, 200);
+  const { server } = moved.json;
+  assert.equal(server.host, first.server.host);
+  assert.equal(server.workspace, "bob-new");
+  assert.equal(server.createdOn, "새 컴퓨터");
+  assert.equal(server.createdAt, first.server.createdAt);
+  assert.ok(server.updatedAt > first.server.updatedAt);
+  assert.notEqual(server.tunnelId, first.server.tunnelId);
+  assert.ok(f.tunnel(first.server.tunnelId).deleted_at, "the old tunnel is deleted");
+  assert.equal(f.tunnel(server.tunnelId).name, "team-memory-bob");
+  assert.equal(moved.json.tunnelToken, f.cf.state.tunnelTokens[server.tunnelId]);
+  assert.notEqual(moved.json.tunnelToken, first.tunnelToken);
+  const cnames = f.cf.state.records.filter((record) => record.name === server.host);
+  assert.deepEqual(cnames.map((record) => record.content), [`${server.tunnelId}.cfargotunnel.com`]);
+  assert.equal(moved.json.aud, first.aud);
+  assert.equal(appWrites(), before, "the servers app already holds the host");
+  const deletes = f.cf.writes().filter((item) => item.startsWith("DELETE"));
+  assert.deepEqual(deletes.slice(-2), [`DELETE /accounts/${ACCOUNT_ID}/cfd_tunnel/${first.server.tunnelId}/connections`, `DELETE /accounts/${ACCOUNT_ID}/cfd_tunnel/${first.server.tunnelId}`]);
+
+  const renamed = await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE, label: "robert", replace: true });
+  assert.equal(renamed.status, 409, "replace keeps the address");
+  assert.equal(renamed.json.error, "server_exists");
+});
+
+test("Cloudflare errors come back as 502 cloudflare with the client's message, never a token, and leave no record", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob" });
+  f.cf.state.records.push({ id: "r-site", type: "A", name: "memory-bob.example.com", content: "192.0.2.1", proxied: false });
+  const failed = await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE });
+  assert.equal(failed.status, 502);
+  assert.equal(failed.json.error, "cloudflare");
+  assert.match(failed.json.detail, /memory-bob\.example\.com already has a record of type A/);
+  assert.equal(failed.text.includes(API_TOKEN), false);
+  for (const token of Object.values(f.cf.state.tunnelTokens)) assert.equal(failed.text.includes(token), false);
+  assert.equal(f.data.has("server:memory-bob.example.com"), false);
+  assert.equal(f.serversApp(), null);
+
+  // The failure came out as an answer, not as an exception that would reset the object.
+  assert.equal(f.blocks.threw, 0);
+  assert.equal((await f.as("bob@example.com").get("/api/me")).status, 200);
+
+  // A message built from what Cloudflare holds, not by the client, is cut too.
+  f.cf.state.records = [{ id: "r-odd", type: "CNAME", name: "memory-bob.example.com", content: `${API_TOKEN}.example.net`, proxied: true }];
+  const echoed = await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE });
+  assert.equal(echoed.status, 502);
+  assert.match(echoed.json.detail, /already points at \[redacted\]\.example\.net/);
+  assert.equal(echoed.text.includes(API_TOKEN), false);
+
+  const wrongToken = "wrong-cloudflare-token-0123456789abcdef";
+  const g = await hubFixture(t, { env: { CF_API_TOKEN: wrongToken } });
+  const refused = await g.as(ADMIN).post("/api/admin/people", { email: "mate@example.com" });
+  assert.equal(refused.status, 502);
+  assert.equal(refused.json.error, "cloudflare");
+  assert.match(refused.json.detail, /HTTP 403: 10000 Authentication error \(the API token needs Account \/ Access: Apps and Policies \/ Edit\)/);
+  assert.equal(refused.text.includes(wrongToken), false);
+  assert.equal(g.data.has("person:mate@example.com"), false, "no record without the policy");
+});
+
+test("two provisions at once run one after the other, and both hosts end up in the servers app", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": "carol" });
+  const started = f.blocks.started;
+  const answers = await Promise.all(["bob@example.com", "carol@example.com", ADMIN]
+    .map((email) => f.as(email).post("/api/servers", { workspace: WORKSPACE })));
+  assert.deepEqual(answers.map((answer) => answer.status), [201, 201, 201]);
+  assert.equal(f.blocks.started - started, 3, "each change to Cloudflare ran inside blockConcurrencyWhile");
+  assert.equal(f.blocks.most, 1);
+  assert.deepEqual(f.serversApp().destinations.map((item) => item.uri).sort(), ["memory-bob.example.com", "memory-carol.example.com", "memory.example.com"]);
+});
+
+test("a team holds at most 50 servers, as many as one Access app takes", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob" });
+  for (let index = 0; index < 50; index += 1) {
+    f.data.set(`server:memory-s${index}.example.com`, { host: `memory-s${index}.example.com`, label: `s${index}`, owner: `s${index}@example.com`, company: index === 0, createdAt: "2026-01-01T00:00:00.000Z" });
+  }
+  const full = await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE });
+  assert.equal(full.status, 409);
+  assert.equal(full.json.error, "too_many_servers");
+  assert.equal(f.cf.writes().filter((item) => !item.includes("/access/policies")).length, 0);
+});
+
+test("a server is removed by its owner or an admin: hostname, tunnel, servers app and record go, and requests to it end", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": "carol" });
+  const company = (await f.as(ADMIN).post("/api/servers", { workspace: WORKSPACE })).json.server;
+  const bobs = (await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE })).json.server;
+  const pending = (await f.as("carol@example.com").post("/api/requests", { kind: "chat", server: bobs.host })).json.request;
+  const approved = (await f.as(ADMIN).post("/api/requests", { kind: "chat", server: bobs.host })).json.request;
+  assert.equal((await f.as("bob@example.com").post(`/api/requests/${approved.id}/decide`, { approve: true, projects: ["honcho"] })).status, 200);
+  const toCompany = (await f.as("bob@example.com").post("/api/requests", { kind: "collect", server: company.host })).json.request;
+
+  const notOwner = await f.as("carol@example.com").delete(`/api/servers/${bobs.host}`);
+  assert.equal(notOwner.status, 403);
+  assert.equal(notOwner.json.error, "forbidden");
+  assert.equal((await f.as("stranger@example.com").delete(`/api/servers/${bobs.host}`)).json.error, "not_member");
+  assert.equal((await f.as("bob@example.com").delete("/api/servers/memory-nobody.example.com")).status, 404);
+  assert.ok(f.data.has(`server:${bobs.host}`));
+
+  const mark = f.cf.writes().length;
+  const removed = await f.as("bob@example.com").delete(`/api/servers/${bobs.host.toUpperCase()}`);
+  assert.equal(removed.status, 200);
+  assert.deepEqual(removed.json, { removed: bobs.host });
+  assert.equal(f.data.has(`server:${bobs.host}`), false);
+  assert.equal(f.cf.state.records.some((record) => record.name === bobs.host), false);
+  assert.ok(f.tunnel(bobs.tunnelId).deleted_at);
+  assert.deepEqual(f.serversApp().destinations.map((item) => item.uri), [company.host]);
+  assert.equal(f.data.get(`request:${pending.id}`).status, "cancelled");
+  const revoked = f.data.get(`request:${approved.id}`);
+  assert.equal(revoked.status, "revoked");
+  assert.ok(revoked.revokedAt);
+  assert.equal(f.data.get(`request:${toCompany.id}`).status, "pending", "requests to other servers stay");
+  // The hostname goes first, then the tunnel, and only then does the host leave the servers app.
+  const order = f.cf.writes().slice(mark);
+  assert.deepEqual(order, [
+    `DELETE /zones/${ZONE_ID}/dns_records/${bobs.dnsRecordId}`,
+    `DELETE /accounts/${ACCOUNT_ID}/cfd_tunnel/${bobs.tunnelId}/connections`,
+    `DELETE /accounts/${ACCOUNT_ID}/cfd_tunnel/${bobs.tunnelId}`,
+    `PUT /accounts/${ACCOUNT_ID}/access/apps/${f.serversApp().id}`,
+  ]);
+
+  // An admin may remove anyone's; the last one takes the servers app with it.
+  const appId = f.serversApp().id;
+  assert.equal((await f.as(ADMIN).delete(`/api/servers/${company.host}`)).status, 200);
+  assert.equal(f.serversApp(), null);
+  assert.equal(f.data.has("serversApp"), false);
+  assert.ok(f.cf.writes().includes(`DELETE /accounts/${ACCOUNT_ID}/access/apps/${appId}`));
+  assert.equal(f.data.get(`request:${toCompany.id}`).status, "cancelled");
+
+  // A new server afterwards makes a new servers app.
+  assert.equal((await f.as("carol@example.com").post("/api/servers", { workspace: WORKSPACE })).status, 201);
+  assert.deepEqual(f.serversApp().destinations.map((item) => item.uri), ["memory-carol.example.com"]);
+});
+
+// -------------------------------------------------------------- requests
+
+test("a request goes from a member to a teammate's server, and only the right person moves it on", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": null, "dave@example.com": "dave" });
+  const bobs = (await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE })).json.server;
+  const carol = f.as("carol@example.com");
+  const bob = f.as("bob@example.com");
+  const dave = f.as("dave@example.com");
+
+  for (const [body, pattern] of [
+    [{ kind: "write", server: bobs.host }, /kind/],
+    [{ kind: "chat" }, /server/],
+    [{ kind: "chat", server: bobs.host, device: "x".repeat(65) }, /device/],
+    [{ kind: "chat", server: bobs.host, device: "line\nbreak" }, /device/],
+    [{ kind: "collect", server: bobs.host, folders: Array.from({ length: 51 }, (_, index) => `f${index}`) }, /folders/],
+    [{ kind: "collect", server: bobs.host, folders: ["x".repeat(65)] }, /folders/],
+    [{ kind: "collect", server: bobs.host, folders: "honcho" }, /folders/],
+  ]) {
+    const refused = await carol.post("/api/requests", body);
+    assert.equal(refused.status, 400, JSON.stringify(body).slice(0, 80));
+    assert.match(refused.json.detail, pattern);
+  }
+  assert.equal((await carol.post("/api/requests", { kind: "chat", server: "memory-nobody.example.com" })).status, 404);
+  const own = await bob.post("/api/requests", { kind: "chat", server: bobs.host });
+  assert.equal(own.status, 400);
+  assert.equal(own.json.error, "own_server");
+  assert.equal((await f.as("stranger@example.com").post("/api/requests", { kind: "chat", server: bobs.host })).json.error, "not_member");
+
+  const chat = await carol.post("/api/requests", { kind: "chat", server: bobs.host.toUpperCase(), device: "캐럴의 MacBook" });
+  assert.equal(chat.status, 201);
+  assert.deepEqual({ ...chat.json.request, id: "i", createdAt: "c" }, {
+    id: "i", kind: "chat", from: "carol@example.com", fromPeer: null, server: bobs.host, owner: "bob@example.com", device: "캐럴의 MacBook",
+    folders: [], status: "pending", projects: [], createdAt: "c", decidedAt: null, revokedAt: null, dismissedAt: null,
+  });
+  assert.match(chat.json.request.id, /^r-[0-9a-f]{16}$/);
+  const same = await carol.post("/api/requests", { kind: "chat", server: bobs.host, device: "다른 컴퓨터" });
+  assert.equal(same.status, 200, "the pending one is returned as it is");
+  assert.deepEqual(same.json.request, chat.json.request);
+  await pause(5);
+  const collect = await carol.post("/api/requests", { kind: "collect", server: bobs.host, folders: ["honcho", "web-app", "honcho", "  메모  "] });
+  assert.equal(collect.status, 201);
+  assert.deepEqual(collect.json.request.folders, ["honcho", "web-app", "메모"]);
+
+  // Carol's peer, set after her requests, is on them from then on.
+  assert.equal((await carol.post("/api/me", { peer: "carol" })).status, 200);
+  const lists = await bob.get("/api/requests");
+  assert.deepEqual(lists.json.incoming.map((item) => [item.kind, item.fromPeer]), [["collect", "carol"], ["chat", "carol"]], "newest first");
+  assert.deepEqual(lists.json.outgoing, []);
+  assert.deepEqual(lists.json.granted, []);
+  assert.deepEqual((await carol.get("/api/requests")).json.outgoing.map((item) => item.kind), ["collect", "chat"]);
+  assert.deepEqual((await dave.get("/api/requests")).json, { incoming: [], outgoing: [], granted: [] });
+  assert.equal((await f.as("stranger@example.com").get("/api/requests")).json.error, "not_member");
+
+  const chatId = chat.json.request.id;
+  const collectId = collect.json.request.id;
+  const move = async (who, id, action, body) => {
+    const answer = await who.post(`/api/requests/${id}/${action}`, body);
+    return [answer.status, answer.json.request?.status ?? answer.json.error];
+  };
+  // Only the owner decides, only while pending.
+  assert.deepEqual(await move(dave, chatId, "decide", { approve: true }), [403, "forbidden"]);
+  assert.deepEqual(await move(carol, chatId, "decide", { approve: true }), [403, "forbidden"]);
+  assert.deepEqual(await move(bob, chatId, "decide", { approve: "yes" }), [400, "bad_request"]);
+  assert.deepEqual(await move(bob, chatId, "decide", { approve: true, projects: Array.from({ length: 51 }, (_, index) => `p${index}`) }), [400, "bad_request"]);
+  const approved = await bob.post(`/api/requests/${chatId}/decide`, { approve: true, projects: ["honcho", "notes"] });
+  assert.equal(approved.status, 200);
+  assert.equal(approved.json.request.status, "approved");
+  assert.deepEqual(approved.json.request.projects, ["honcho", "notes"]);
+  assert.ok(approved.json.request.decidedAt);
+  assert.deepEqual(await move(bob, chatId, "decide", { approve: false }), [409, "not_pending"]);
+  assert.deepEqual((await bob.get("/api/requests")).json.granted.map((item) => item.id), [chatId]);
+
+  // The owner changes the projects of an approved request only.
+  assert.deepEqual(await move(carol, chatId, "projects", { projects: ["all"] }), [403, "forbidden"]);
+  assert.deepEqual(await move(bob, chatId, "projects", {}), [400, "bad_request"]);
+  assert.deepEqual(await move(bob, collectId, "projects", { projects: ["honcho"] }), [409, "not_approved"]);
+  const narrowed = await bob.post(`/api/requests/${chatId}/projects`, { projects: ["honcho"] });
+  assert.deepEqual(narrowed.json.request.projects, ["honcho"]);
+
+  // The sender cancels only while pending; the owner declines.
+  assert.deepEqual(await move(carol, chatId, "cancel"), [409, "not_pending"]);
+  assert.deepEqual(await move(bob, collectId, "cancel"), [403, "forbidden"]);
+  assert.deepEqual(await move(bob, collectId, "decide", { approve: false, projects: ["ignored"] }), [200, "declined"]);
+  assert.deepEqual(f.data.get(`request:${collectId}`).projects, []);
+  assert.deepEqual((await carol.get("/api/requests")).json.outgoing.map((item) => item.status), ["declined", "approved"]);
+
+  // The sender dismisses what the bell showed.
+  assert.deepEqual(await move(dave, collectId, "dismiss"), [403, "forbidden"]);
+  const dismissed = await carol.post(`/api/requests/${collectId}/dismiss`);
+  assert.equal(dismissed.status, 200);
+  assert.ok(dismissed.json.request.dismissedAt);
+  assert.deepEqual((await carol.get("/api/requests")).json.outgoing.map((item) => item.id), [chatId]);
+
+  // The owner revokes an approved request.
+  assert.deepEqual(await move(carol, chatId, "revoke"), [403, "forbidden"]);
+  const revoked = await bob.post(`/api/requests/${chatId}/revoke`);
+  assert.equal(revoked.json.request.status, "revoked");
+  assert.ok(revoked.json.request.revokedAt);
+  assert.deepEqual(await move(bob, chatId, "revoke"), [409, "not_approved"]);
+  assert.deepEqual((await bob.get("/api/requests")).json.granted, []);
+
+  // A new request once the old one is over; cancelled ones leave the sender's list.
+  const fresh = await carol.post("/api/requests", { kind: "chat", server: bobs.host });
+  assert.equal(fresh.status, 201);
+  assert.notEqual(fresh.json.request.id, chatId);
+  assert.equal(fresh.json.request.fromPeer, "carol");
+  assert.deepEqual(await move(carol, fresh.json.request.id, "cancel"), [200, "cancelled"]);
+  assert.ok(!(await carol.get("/api/requests")).json.outgoing.some((item) => item.id === fresh.json.request.id));
+
+  assert.deepEqual(await move(bob, "r-0000000000000000", "revoke"), [404, "not_found"]);
+  assert.deepEqual(await move(bob, "not-an-id", "revoke"), [404, "not_found"]);
+  assert.equal((await bob.post(`/api/requests/${chatId}/approve`)).status, 404);
+});
+
+// ----------------------------------------------------------------- admin
+
+test("admins add people to the people policy and the roster; others may not", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob" });
+  for (const [method, pathname, body] of [
+    ["GET", "/api/admin/people"],
+    ["POST", "/api/admin/people", { email: "mate@example.com" }],
+    ["DELETE", "/api/admin/people/admin%40example.com"],
+    ["PUT", "/api/admin/team", { name: "다른 이름" }],
+  ]) {
+    const answer = await f.send(pathname, { method, as: "bob@example.com", body });
+    assert.equal(answer.status, 403, `${method} ${pathname}`);
+    assert.equal(answer.json.error, "not_admin");
+  }
+
+  assert.equal((await f.as(ADMIN).post("/api/admin/people", { email: "not an email" })).status, 400);
+  const added = await f.as(ADMIN).post("/api/admin/people", { email: " Mate@Example.com " });
+  assert.equal(added.status, 201);
+  assert.deepEqual({ ...added.json.person, addedAt: "a" }, {
+    email: "mate@example.com", peer: null, admin: false, joined: false, servers: [], addedAt: "a", addedBy: ADMIN, lastLoginAt: null,
+  });
+  assert.deepEqual(f.people(), [ADMIN, "bob@example.com", "mate@example.com"]);
+
+  const writes = f.cf.writes().length;
+  const again = await f.as(ADMIN).post("/api/admin/people", { email: "mate@example.com" });
+  assert.equal(again.status, 200, "an existing member is left as it is");
+  assert.deepEqual(again.json.person, added.json.person);
+  assert.equal(f.cf.writes().length, writes);
+
+  await f.as("mate@example.com").get("/api/me");
+  const listed = await f.as(ADMIN).get("/api/admin/people");
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.json.people.map((person) => [person.email, person.admin, person.joined, person.addedBy]), [
+    [ADMIN, true, false, "setup"],
+    ["bob@example.com", false, false, ADMIN],
+    ["mate@example.com", false, true, ADMIN],
+  ]);
+  for (const person of listed.json.people) {
+    assert.deepEqual(Object.keys(person), ["email", "peer", "admin", "joined", "servers", "addedAt", "addedBy", "lastLoginAt"]);
+  }
+  assert.ok(listed.json.people[2].lastLoginAt);
+});
+
+test("removing a person takes them out of the people policy and the roster, removes their server and ends their requests", async (t) => {
+  const f = await hubFixture(t, { admins: [ADMIN, "boss@example.com"] });
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": "carol" });
+  const company = (await f.as(ADMIN).post("/api/servers", { workspace: WORKSPACE })).json.server;
+  const bobs = (await f.as("bob@example.com").post("/api/servers", { workspace: WORKSPACE })).json.server;
+  const fromBobPending = (await f.as("bob@example.com").post("/api/requests", { kind: "collect", server: company.host })).json.request;
+  const fromBobApproved = (await f.as("bob@example.com").post("/api/requests", { kind: "chat", server: company.host })).json.request;
+  await f.as(ADMIN).post(`/api/requests/${fromBobApproved.id}/decide`, { approve: true, projects: ["honcho"] });
+  const toBob = (await f.as("carol@example.com").post("/api/requests", { kind: "chat", server: bobs.host })).json.request;
+  const unrelated = (await f.as("carol@example.com").post("/api/requests", { kind: "chat", server: company.host })).json.request;
+
+  const self = await f.as(ADMIN).delete("/api/admin/people/admin@example.com");
+  assert.equal(self.status, 409);
+  assert.equal(self.json.error, "own_email");
+  assert.equal((await f.as(ADMIN).delete("/api/admin/people/nobody%40example.com")).status, 404);
+  assert.equal((await f.as(ADMIN).delete("/api/admin/people/not-an-email")).status, 404);
+
+  const removed = await f.as(ADMIN).delete("/api/admin/people/Bob%40Example.com");
+  assert.equal(removed.status, 200);
+  assert.deepEqual(removed.json, { removed: "bob@example.com" });
+  assert.deepEqual(f.people(), [ADMIN, "boss@example.com", "carol@example.com"]);
+  assert.equal(f.data.has("person:bob@example.com"), false);
+  assert.equal(f.data.has(`server:${bobs.host}`), false);
+  assert.ok(f.tunnel(bobs.tunnelId).deleted_at);
+  assert.equal(f.cf.state.records.some((record) => record.name === bobs.host), false);
+  assert.deepEqual(f.serversApp().destinations.map((item) => item.uri), [company.host]);
+  const status = (request) => f.data.get(`request:${request.id}`).status;
+  assert.deepEqual([status(fromBobPending), status(fromBobApproved), status(toBob), status(unrelated)], ["cancelled", "revoked", "cancelled", "pending"]);
+  assert.ok(f.data.get(`request:${fromBobApproved.id}`).revokedAt);
+  // The policy changes before anything else.
+  const writes = f.cf.writes();
+  const policyWrite = writes.lastIndexOf(`PUT /accounts/${ACCOUNT_ID}/access/policies/${PEOPLE_POLICY_ID}`);
+  assert.ok(policyWrite >= 0 && policyWrite < writes.indexOf(`DELETE /accounts/${ACCOUNT_ID}/cfd_tunnel/${bobs.tunnelId}`));
+
+  const after = await f.as("bob@example.com").get("/api/me");
+  assert.deepEqual([after.json.member, after.json.servers], [false, []]);
+  assert.equal((await f.as("bob@example.com").get("/api/team")).status, 403);
+  // Their peer is free again.
+  await f.addPeople({ "bob@example.org": "bob" });
+
+  // Another admin can be removed; then the one left is the last.
+  assert.equal((await f.as(ADMIN).delete("/api/admin/people/boss%40example.com")).status, 200);
+  assert.deepEqual([...f.data.values()].filter((value) => value.admin).map((value) => value.email), [ADMIN]);
+});
+
+test("an admin renames the team; bodies, routes and settings that are wrong get a JSON answer saying so", async (t) => {
+  const f = await hubFixture(t);
+  const renamed = await f.as(ADMIN).put("/api/admin/team", { name: "  새 팀 이름  " });
+  assert.equal(renamed.status, 200);
+  assert.deepEqual(renamed.json, { team: { name: "새 팀 이름", host: HUB_HOST, zone: ZONE } });
+  assert.equal((await f.as(ADMIN).get("/api/me")).json.team.name, "새 팀 이름");
+  for (const name of ["", "   ", "가".repeat(61), "a\u0000b", "a‮b", 7]) {
+    assert.equal((await f.as(ADMIN).put("/api/admin/team", { name })).status, 400, JSON.stringify(name));
+  }
+  assert.equal((await f.as(ADMIN).put("/api/admin/team", { name: "가".repeat(60) })).status, 200);
+
+  assert.deepEqual([(await f.as(ADMIN).post("/api/me", "[1, 2]")).json.error, (await f.as(ADMIN).post("/api/me", "{")).json.error], ["bad_request", "bad_request"]);
+  const big = await f.as(ADMIN).post("/api/me", JSON.stringify({ peer: "x".repeat(70_000) }));
+  assert.equal(big.status, 413);
+  assert.equal(big.json.error, "too_large");
+
+  const missing = await f.as(ADMIN).get("/api/nothing");
+  assert.deepEqual([missing.status, missing.json.error], [404, "not_found"]);
+  const method = await f.as(ADMIN).delete("/api/team");
+  assert.deepEqual([method.status, method.json.error], [405, "method_not_allowed"]);
+  assert.equal((await f.as(ADMIN).delete("/api/servers/%E0%A4%A")).status, 404);
+
+  const broken = await hubFixture(t, { env: { TEAM: "{not json" } });
+  const answer = await broken.as(ADMIN).get("/api/me");
+  assert.deepEqual([answer.status, answer.json.error], [500, "misconfigured"]);
+});

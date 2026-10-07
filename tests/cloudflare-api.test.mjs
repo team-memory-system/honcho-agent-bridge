@@ -11,16 +11,25 @@ import {
   chooseGoogleIdp,
   CloudflareApiError,
   cloudflareClient,
+  ensureAccessApp,
   ensureBypassPolicy,
+  ensureEveryonePolicy,
   ensurePeoplePolicy,
   ensureServerHost,
+  ensureServersApp,
   ensureTunnelCname,
+  EVERYONE_POLICY_NAME,
   findZone,
   accessTeamDomain,
+  HUB_APP_NAME,
+  hubAppBody,
   listIdentityProviders,
   peopleAppBody,
   PEOPLE_POLICY_NAME,
+  removeLegacyHostApps,
   removeServerHost,
+  SERVERS_APP_NAME,
+  serversAppBody,
 } from "../scripts/cloudflare-api.mjs";
 import { ACCOUNT_ID, API_TOKEN, startFakeCloudflare, TEAM_DOMAIN, ZONE, ZONE_ID } from "./fake-cloudflare.mjs";
 
@@ -230,4 +239,109 @@ test("an app matches only when every field the app sets is already so", () => {
   assert.equal(appMatches({ ...existing, policies: [] }, desired), false);
   const gate = bypassAppBody({ host: "memory.example.com", policyId: "b1" });
   assert.equal(appMatches({ ...gate, destinations: [...gate.destinations].reverse() }, gate), true, "destination order does not matter");
+});
+
+// ------------------------------------------------------------- the team hub
+
+const MANAGED_OAUTH_YEAR = {
+  enabled: true,
+  dynamic_client_registration: { enabled: true, allow_any_on_localhost: true, allow_any_on_loopback: true },
+  grant: { session_duration: "8760h" },
+};
+
+test("the servers app holds every server host of the team in one app, made once and changed in place", async (t) => {
+  const { server, client } = await fake(t);
+  const people = await ensurePeoplePolicy(client, ACCOUNT_ID, { add: ["owner@example.com"] });
+  const args = { idpId: "idp-google-0001", policyId: people.id };
+
+  const first = await ensureServersApp(client, ACCOUNT_ID, { ...args, hosts: ["Memory.example.com"] });
+  assert.equal(first.created, true);
+  assert.match(first.aud, /^[0-9a-f]{64}$/);
+  assert.deepEqual(server.requests.find((item) => item.method === "POST" && item.path.endsWith("/access/apps")).body, {
+    name: SERVERS_APP_NAME,
+    type: "self_hosted",
+    domain: "memory.example.com",
+    destinations: [{ type: "public", uri: "memory.example.com" }],
+    allowed_idps: ["idp-google-0001"],
+    auto_redirect_to_identity: true,
+    session_duration: "24h",
+    policies: [{ id: people.id, precedence: 1 }],
+    oauth_configuration: MANAGED_OAUTH_YEAR,
+  });
+
+  const writes = server.writes().length;
+  const same = await ensureServersApp(client, ACCOUNT_ID, { ...args, hosts: ["memory.example.com"], known: { id: first.id, aud: first.aud } });
+  assert.deepEqual(same, { id: first.id, aud: first.aud, created: false, updated: false });
+  assert.equal(server.writes().length, writes, "nothing written when the hosts are already there");
+
+  const hosts = ["memory.example.com", "memory-bob.example.com", "memory-bob.example.com"];
+  const extended = await ensureServersApp(client, ACCOUNT_ID, { ...args, hosts, known: { id: first.id } });
+  assert.deepEqual(extended, { id: first.id, aud: first.aud, created: false, updated: true });
+  assert.equal(server.state.apps.length, 1);
+  assert.deepEqual(server.state.apps[0].destinations, [{ type: "public", uri: "memory.example.com" }, { type: "public", uri: "memory-bob.example.com" }]);
+  assert.equal(server.requests.at(-1).method, "PUT");
+
+  await assert.rejects(ensureServersApp(client, ACCOUNT_ID, { ...args, hosts: [] }), /holds 1 to 50 hosts, not 0/);
+  const many = Array.from({ length: 51 }, (_, index) => `memory-${index}.example.com`);
+  await assert.rejects(ensureServersApp(client, ACCOUNT_ID, { ...args, hosts: many }), /holds 1 to 50 hosts, not 51/);
+  assert.deepEqual(serversAppBody({ hosts: many.slice(0, 2), ...args }).destinations.map((item) => item.uri), many.slice(0, 2));
+});
+
+test("a host's apps from the first sharing go by their exact names, never by domain", async (t) => {
+  const { server, client } = await fake(t);
+  server.state.apps.push(
+    { id: "a-people", aud: "1", name: "Team Memory memory-bob.example.com", domain: "memory-bob.example.com" },
+    { id: "a-gate", aud: "2", name: "Team Memory memory-bob.example.com gate token", domain: "memory-bob.example.com/v3" },
+    { id: "a-servers", aud: "3", name: SERVERS_APP_NAME, domain: "memory-bob.example.com" },
+    { id: "a-other", aud: "4", name: "Team Memory memory-carol.example.com", domain: "memory-carol.example.com" },
+  );
+  assert.deepEqual(await removeLegacyHostApps(client, ACCOUNT_ID, "memory-bob.example.com"), { peopleApp: true, bypassApp: true });
+  assert.deepEqual(server.state.apps.map((app) => app.id), ["a-servers", "a-other"]);
+  assert.deepEqual(await removeLegacyHostApps(client, ACCOUNT_ID, "memory-bob.example.com"), { peopleApp: false, bypassApp: false }, "removing twice is not an error");
+});
+
+test("the everyone policy lets anyone with a login in, keeps the owner's own rules, and never opens another policy", async (t) => {
+  const { server, client } = await fake(t);
+  const people = await ensurePeoplePolicy(client, ACCOUNT_ID, { add: ["owner@example.com"] });
+  const first = await ensureEveryonePolicy(client, ACCOUNT_ID);
+  assert.equal(first.created, true);
+  assert.deepEqual(server.requests.at(-1).body, { name: EVERYONE_POLICY_NAME, decision: "allow", include: [{ everyone: {} }] });
+  const writes = server.writes().length;
+  assert.deepEqual(await ensureEveryonePolicy(client, ACCOUNT_ID, { id: first.id }), { id: first.id, created: false, updated: false });
+  assert.equal(server.writes().length, writes);
+
+  // Another policy's id is not taken: the people policy stays an email list.
+  assert.equal((await ensureEveryonePolicy(client, ACCOUNT_ID, { id: people.id })).id, first.id);
+  assert.deepEqual(server.state.policies.find((item) => item.id === people.id).include, [{ email: { email: "owner@example.com" } }]);
+
+  // Changed by hand: the include is put back, an exclude the owner added stays.
+  const policy = server.state.policies.find((item) => item.id === first.id);
+  policy.include = [{ email: { email: "someone@example.com" } }];
+  policy.exclude = [{ email: { email: "blocked@example.com" } }];
+  assert.deepEqual(await ensureEveryonePolicy(client, ACCOUNT_ID, { id: first.id }), { id: first.id, created: false, updated: true });
+  assert.deepEqual(server.requests.at(-1).body, {
+    name: EVERYONE_POLICY_NAME, decision: "allow", include: [{ everyone: {} }], exclude: [{ email: { email: "blocked@example.com" } }],
+  });
+});
+
+test("the hub app is the hub's host behind the everyone policy, with Google login and a year of Managed OAuth", async (t) => {
+  const desired = hubAppBody({ host: "team.example.com", idpId: "idp-google-0001", policyId: "policy-everyone" });
+  assert.deepEqual(desired, {
+    name: `${HUB_APP_NAME} team.example.com`,
+    type: "self_hosted",
+    domain: "team.example.com",
+    destinations: [{ type: "public", uri: "team.example.com" }],
+    allowed_idps: ["idp-google-0001"],
+    auto_redirect_to_identity: true,
+    session_duration: "24h",
+    policies: [{ id: "policy-everyone", precedence: 1 }],
+    oauth_configuration: MANAGED_OAUTH_YEAR,
+  });
+  assert.equal(desired.name, "Team Memory hub team.example.com");
+  const { server, client } = await fake(t);
+  const made = await ensureAccessApp(client, ACCOUNT_ID, desired);
+  assert.equal(made.created, true);
+  const writes = server.writes().length;
+  assert.equal((await ensureAccessApp(client, ACCOUNT_ID, desired, { id: made.id })).updated, false, "a second run changes nothing");
+  assert.equal(server.writes().length, writes);
 });
