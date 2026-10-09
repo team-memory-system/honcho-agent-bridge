@@ -213,6 +213,19 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
         check: () => login.error,
       };
     }
+    if (login.phase === "idle" && !login.tab) {
+      // A team link opens this step with no click behind it, and the browser blocks a
+      // tab opened without one; the login starts in this button's click instead.
+      return {
+        body: h("div", {}, h("h3", {}, "Google로 로그인을 누르세요"),
+          h("div", { class: "idbox" }, state.team.name ? h("b", {}, state.team.name) : null, host)),
+        foot: [button("Google로 로그인", { kind: "primary", onClick: () => {
+          login.tab = loginTab("Google 로그인으로 넘어가는 중입니다…");
+          drawStep();
+        } })],
+        check: () => "Google로 로그인을 누르세요.",
+      };
+    }
     if (login.phase === "idle") startLogin();
     const leaving = login.phase === "leaving";
     return {
@@ -696,8 +709,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
   detectAgents({ fresh: true });
   loadProjects({ fresh: true });
   if (link) {
-    // A team link starts at the login; the tab is opened by the login step's own button
-    // if the browser blocks one opened without a click.
+    // A team link starts at the login, whose button opens the tab.
     at = 0;
     drawStep();
   } else {
