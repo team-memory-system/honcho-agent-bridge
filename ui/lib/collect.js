@@ -326,6 +326,38 @@ function chosenProjects(projects, agents) {
 }
 
 /**
+ * The folders ticked when the projects step opens: what the saved choice takes, a
+ * folder it never named going by its rest. A computer that never chose collects
+ * every folder, so 수정 shows them all ticked; a first setup ticks none, so no
+ * folder's past conversations go in before someone picks the folder.
+ */
+export function tickedFolders(projects, saved, { edit = false } = {}) {
+  const take = new Set(saved?.take || []);
+  const skip = new Set(saved?.skip || []);
+  return new Set(projects.filter((project) => {
+    if (!saved) return edit;
+    if (skip.has(project.path)) return false;
+    if (take.has(project.path)) return true;
+    return saved.rest !== "skip";
+  }).map((project) => project.path));
+}
+
+/**
+ * The 프로젝트 폴더 line in 설정 as [the folders collected, what happens to new ones]:
+ * the folders taken by name, never the ones left out, which can run to hundreds.
+ */
+export function folderSummary(collect) {
+  const names = (folders) => {
+    if (!folders?.length) return "없음";
+    const shown = folders.slice(0, 6).map((folder) => shortPath(folder).split(/[\\/]/).pop() || shortPath(folder));
+    return shown.join(" · ") + (folders.length > shown.length ? ` 외 ${folders.length - shown.length}개` : "");
+  };
+  if (!collect) return ["모든 폴더", "새로 생기는 폴더도 수집"];
+  if (collect.rest === "skip") return [names(collect.take), "고른 폴더만 수집"];
+  return [collect.skip?.length ? names(collect.take) : "모든 폴더", "새로 생기는 폴더도 수집"];
+}
+
+/**
  * Which project folders' conversations to collect. A folder ticked or not is kept
  * as taken or skipped; 새로 생기는 프로젝트 폴더도 수집 is what happens to the rest.
  */
@@ -338,22 +370,14 @@ export function projectsStep(draft, context, { edit = false } = {}) {
     const chosen = (draft.projects || []).filter((project) => draft.checked.has(project.path));
     const count = chosen.reduce((sum, project) => sum + project.count, 0);
     past.textContent = !draft.projects?.length ? "새로 생기는 대화부터 수집합니다."
+      : !chosen.length ? (edit ? "" : "수집할 폴더를 고르세요.")
       : edit ? `고른 폴더의 지난 대화 ${number(count)}개 중 아직 없는 것을 함께 수집합니다.`
         : `고른 폴더의 지난 대화 ${number(count)}개도 함께 수집합니다.`;
   };
   const servers = activeTargets(draft);
   loadProjects().then((all) => {
     draft.projects = chosenProjects(all, draft.agents || new Set(Object.keys(AGENTS)));
-    if (!draft.checked) {
-      // Ticked: what the saved choice takes. A folder the choice never named goes by its rest.
-      const saved = context?.collect || null;
-      draft.checked = new Set(draft.projects.filter((project) => {
-        if (!saved) return true;
-        if (draft.skip.has(project.path)) return false;
-        if (draft.take.has(project.path)) return true;
-        return saved.rest !== "skip";
-      }).map((project) => project.path));
-    }
+    if (!draft.checked) draft.checked = tickedFolders(draft.projects, context?.collect || null, { edit });
     if (!draft.projects.length) {
       draft.rest = "take";
       restBox.checked = true;
@@ -374,6 +398,7 @@ export function projectsStep(draft, context, { edit = false } = {}) {
       past),
     check() {
       if (!draft.projects) return "폴더를 찾는 중입니다. 잠시 뒤 다시 누르세요.";
+      if (!edit && draft.projects.length && !draft.checked.size) return "수집할 폴더를 하나 이상 고르세요.";
       if (draft.rest === "skip" && !draft.checked.size) return "수집할 폴더를 하나 이상 고르거나, 새로 생기는 프로젝트 폴더도 수집을 켜세요.";
       const empty = servers.find((server) => !server.folders.size);
       if (empty) return `${empty.label}에 쌓을 폴더를 하나 이상 고르거나, 서버 단계에서 그 서버를 끄세요.`;

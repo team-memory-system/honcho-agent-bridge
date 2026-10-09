@@ -264,6 +264,30 @@ test("every option the setup steps send is one the server accepts", async () => 
   for (const key of secrets) assert.equal(key in local, false, `${key} goes to this computer's server`);
 });
 
+test("a first setup ticks no folder, and 수정 shows what the computer collects now", async () => {
+  const { tickedFolders } = await import("../ui/lib/collect.js");
+  const projects = [{ path: "/w/a" }, { path: "/w/b" }, { path: "/w/new" }];
+  const ticked = (saved, options) => [...tickedFolders(projects, saved, options)].sort();
+  assert.deepEqual(ticked(null), [], "a first setup leaves every folder for the person to pick");
+  assert.deepEqual(ticked(null, { edit: true }), ["/w/a", "/w/b", "/w/new"], "a computer that never chose collects every folder");
+  assert.deepEqual(ticked({ take: ["/w/a"], skip: ["/w/b"], rest: "take" }), ["/w/a", "/w/new"], "a folder made later goes by the rest");
+  assert.deepEqual(ticked({ take: ["/w/a"], skip: ["/w/b"], rest: "skip" }, { edit: true }), ["/w/a"]);
+});
+
+test("the 프로젝트 폴더 line names the folders collected, never the hundreds left out", async () => {
+  const { folderSummary } = await import("../ui/lib/collect.js");
+  const skipped = Array.from({ length: 297 }, (_, index) => `/Users/me/dev/skipped-${index}`);
+  assert.deepEqual(
+    folderSummary({ take: ["/Users/me/dev/cmux-remote", "/Users/me/dev/flypiano"], skip: skipped, rest: "take" }),
+    ["cmux-remote · flypiano", "새로 생기는 폴더도 수집"],
+  );
+  assert.deepEqual(folderSummary({ take: [], skip: skipped, rest: "take" }), ["없음", "새로 생기는 폴더도 수집"]);
+  assert.deepEqual(folderSummary({ take: ["/Users/me/dev/a"], skip: [], rest: "skip" }), ["a", "고른 폴더만 수집"]);
+  assert.deepEqual(folderSummary(null), ["모든 폴더", "새로 생기는 폴더도 수집"]);
+  const many = Array.from({ length: 8 }, (_, index) => `/Users/me/dev/p${index}`);
+  assert.equal(folderSummary({ take: many, skip: ["/x"], rest: "skip" })[0], "p0 · p1 · p2 · p3 · p4 · p5 외 2개");
+});
+
 test("files the UI writes are restricted before any bytes reach them", async (t) => {
   // Windows ignores a POSIX creation mode, so `mode: 0o600` on its own protects
   // nothing there. The one file this UI writes is a whole chat history, so it goes

@@ -15,13 +15,13 @@ import {
   applyTargets,
   collectDraft,
   detectAgents,
+  folderSummary,
   loadProjects,
   planProblems,
   projectsStep,
   sameServer,
   serverStep,
   setupBody,
-  shortPath,
 } from "../lib/collect.js";
 import { sendRequest, teamDirectory } from "../lib/team.js";
 import { TOOL_GROUPS, TOOL_INFO } from "../lib/tools.js";
@@ -32,14 +32,9 @@ const STEPS = ["서버", "에이전트", "프로젝트"];
 
 // ── 대화 수집 ────────────────────────────────────────────
 
-function folderSummary(collect) {
-  const names = (folders) => {
-    const shown = folders.slice(0, 6).map((folder) => shortPath(folder).split(/[\\/]/).pop() || shortPath(folder));
-    return shown.join(" · ") + (folders.length > shown.length ? ` 외 ${folders.length - shown.length}개` : "");
-  };
-  if (!collect) return ["모든 폴더", h("div", { class: "s" }, "새로 생기는 폴더도 수집")];
-  if (collect.rest === "skip") return [collect.take.length ? names(collect.take) : "없음", h("div", { class: "s" }, "고른 폴더만 수집")];
-  return [collect.skip.length ? `빼는 폴더 ${names(collect.skip)}` : "모든 폴더", h("div", { class: "s" }, "새로 생기는 폴더도 수집")];
+function folderLine(collect) {
+  const [folders, rest] = folderSummary(collect);
+  return [folders, h("div", { class: "s" }, rest)];
 }
 
 function serverLine(context) {
@@ -79,7 +74,7 @@ function collectBlock(openCollect) {
       context.team?.email ? h("span", { class: "muted" }, ` · ${context.team.email}에서`) : null,
       context.workspace && context.workspace !== "memory" ? h("span", { class: "muted" }, ` · workspace ${context.workspace}`) : null]),
     kv("에이전트", agents),
-    kv("프로젝트 폴더", folderSummary(context.collect)),
+    kv("프로젝트 폴더", folderLine(context.collect)),
     kv("지난 대화", past));
 }
 
