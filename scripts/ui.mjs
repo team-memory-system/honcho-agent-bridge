@@ -473,6 +473,7 @@ const ROUTES = {
   // Past conversations of the collected folders, sent in the background.
   "/api/backfill/start": async () => runCli(["backfill", "start"], { timeout: 60_000 }),
   "/api/backfill/status": async () => runCli(["backfill", "status"], { timeout: 60_000 }),
+  "/api/backfill/stop": async () => runCli(["backfill", "stop"], { timeout: 60_000 }),
   "/api/server/plan": async (body) => runCli(["server", "plan", ...profileOption(body)]),
   "/api/server/prepare": async (body) => runCli(["server", "prepare", ...profileOption(body), ...modelOption(body)]),
   "/api/server/start": async (body) => runCli(["server", "start", ...profileOption(body), ...modelOption(body)]),

@@ -42,6 +42,7 @@ async function fakeHoncho() {
     if (write) {
       const id = decodeURIComponent(write[1]);
       state.sessions.set(id, [...(state.sessions.get(id) || []), ...body.messages]);
+      await state.onWrite?.(id);
       return response.end(JSON.stringify(body.messages));
     }
     if (url.pathname.endsWith("/sessions/list")) return response.end(JSON.stringify({ items: [], total: 0, page: 1, pages: 0 }));
@@ -300,4 +301,49 @@ test("backfill sends the past sessions of the chosen folders to the own server, 
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(primary.sessionIds().includes("claude-late"), "the background run sent the new session");
+});
+
+test("a backfill asked to stop ends after the session it is sending, and the next run carries on", async (t) => {
+  const primary = await fakeHoncho();
+  t.after(() => primary.server.close());
+  const install = await makeInstall(t, primary, { collect: ({ team }) => ({ take: [team], rest: "skip" }) });
+  await writeSessions(install);
+  const stopFile = path.join(install.dataDir, "state", "backfill.stop");
+  const statusFile = path.join(install.dataDir, "state", "backfill-status.json");
+
+  const idle = await cli(["backfill", "stop"], install.env);
+  assert.deepEqual(idle.body, { ok: true, stopping: false }, "nothing runs, so nothing is asked");
+
+  // `backfill stop` leaves the file while a run goes; here the first session's
+  // messages leave it, so the run is caught between two sessions.
+  await fsp.mkdir(path.dirname(stopFile), { recursive: true });
+  await fsp.writeFile(stopFile, "{}");
+  primary.onWrite = () => fsp.writeFile(stopFile, "{}");
+  const stopped = await cli(["backfill", "run"], install.env);
+  assert.equal(stopped.body.ok, true, stopped.text);
+  assert.equal(stopped.body.cancelled, true);
+  assert.equal(stopped.body.sent_sessions, 1, "a stop left before the run began did not end it");
+  assert.equal(stopped.body.remaining, 2);
+  const status = await cli(["backfill", "status"], install.env);
+  assert.equal(status.body.running, null);
+  assert.equal(status.body.stopping, false);
+  assert.equal(status.body.lastRun.cancelled, true);
+  await assert.rejects(fsp.access(stopFile), "the run takes its stop away when it ends");
+
+  primary.onWrite = null;
+  const writes = primary.writes();
+  const rest = await cli(["backfill", "run"], install.env);
+  assert.equal(rest.body.cancelled, undefined);
+  assert.equal(rest.body.considered, 2, "the next run looks only at what the stopped one left");
+  assert.deepEqual(primary.sessionIds(), ["claude-inside", "codex-codex-inside"]);
+  assert.ok(primary.writes() > writes);
+
+  // While a run goes, stop leaves the file and status says it is stopping.
+  await fsp.writeFile(statusFile, JSON.stringify({ version: 1, running: { pid: process.pid, considered: 3, examined: 1 }, lastRun: null }));
+  const asked = await cli(["backfill", "stop"], install.env);
+  assert.equal(asked.body.stopping, true, asked.text);
+  await fsp.access(stopFile);
+  const going = await cli(["backfill", "status"], install.env);
+  assert.equal(going.body.running.pid, process.pid);
+  assert.equal(going.body.stopping, true);
 });

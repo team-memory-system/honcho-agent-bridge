@@ -57,16 +57,30 @@ function collectBlock(openCollect) {
   }
   const agents = Object.keys(AGENTS).filter((name) => context.agents?.[name]).map((name) => AGENTS[name]).join(" · ") || "없음";
   const past = h("span", { class: "muted" }, "확인 중");
-  get("/api/backfill/status").then((status) => {
+  const refreshPast = () => get("/api/backfill/status").then(showPast).catch(() => clear(past));
+  // 멈추기 asks the run to stop after the conversation it is sending; 이어서 보내기
+  // starts one that skips what is already in.
+  const pastButton = (label, path) => button(label, { kind: "small quiet", onClick: (event) => busy(event.currentTarget, async () => {
+    const result = await post(path, {});
+    if (result?.ok === false) throw new Error(result.error || "하지 못했습니다.");
+    await refreshPast();
+  }) });
+  function showPast(status) {
     if (status?.running) {
       const { examined = 0, considered = 0 } = status.running;
-      clear(past, `보내는 중 · ${number(examined)}/${number(considered)}`);
+      clear(past, `${status.stopping ? "멈추는 중" : "보내는 중"} · ${number(examined)}/${number(considered)}`,
+        status.stopping ? null : [" ", pastButton("멈추기", "/api/backfill/stop")]);
+      // Asked again while the page still shows this line.
+      setTimeout(() => { if (past.isConnected) refreshPast(); }, 3_000);
+    } else if (status?.lastRun?.cancelled) {
+      clear(past, `${ago(status.lastRun.finishedAt)} 멈춤 · ${number(status.lastRun.remaining || 0)}개 남음 `, pastButton("이어서 보내기", "/api/backfill/start"));
     } else if (status?.lastRun?.finishedAt) {
       clear(past, `${ago(status.lastRun.finishedAt)} 다 보냄`, status.lastRun.failed ? [" ", tag(`${number(status.lastRun.failed)}개 실패`, "warn")] : null);
     } else {
       clear(past, "새 대화만 수집 중");
     }
-  }).catch(() => clear(past));
+  }
+  refreshPast();
   return block({ title: "대화 수집", tag: tag("켜짐", "ok"), actions: [button("수정", { onClick: openCollect })] },
     kv("서버", serverLine(context)),
     kv("peer 이름", [h("span", { class: "mono" }, context.user?.peerId || ""),
