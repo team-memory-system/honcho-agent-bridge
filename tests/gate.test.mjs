@@ -1172,6 +1172,38 @@ test("Compose gives the gate its state directory and the bridge the gate's scope
   assert.equal(await run("not-the-token"), 1);
 });
 
+test("each image is built by one service, so a first start never builds the same image twice at once", async () => {
+  const compose = await fsp.readFile(COMPOSE, "utf8");
+  const lines = compose.split("\n");
+  const block = (header) => {
+    const start = lines.indexOf(header);
+    assert.ok(start >= 0, `compose.yaml has ${header}`);
+    const end = lines.findIndex((line, index) => index > start && /^\S/.test(line));
+    return lines.slice(start + 1, end < 0 ? undefined : end);
+  };
+  const shared = block("x-honcho-service: &honcho-service").join("\n");
+  const names = block("services:").flatMap((line) => /^ {2}([a-z-]+):$/.exec(line)?.[1] ?? []);
+  const services = names.map((name) => {
+    const own = composeService(compose, name);
+    const merged = /^ {4}<<: \*honcho-service$/m.test(own);
+    return {
+      name,
+      image: /^ {4}image: (.*)$/m.exec(own)?.[1] ?? (merged ? /^ {2}image: (.*)$/m.exec(shared)?.[1] : undefined),
+      builds: /^ {4}build:$/m.test(own) || (merged && /^ {2}build:$/m.test(shared)),
+    };
+  });
+  const builders = new Map();
+  for (const service of services.filter((each) => each.builds)) {
+    builders.set(service.image, [...(builders.get(service.image) || []), service.name]);
+  }
+  for (const [image, names] of builders) assert.equal(names.length, 1, `${image} is built by ${names.join(" and ")}`);
+  for (const service of services.filter((each) => each.image?.endsWith(":${HONCHO_IMAGE_TAG:-local}"))) {
+    assert.ok(builders.has(service.image), `some service builds ${service.name}'s image ${service.image}`);
+  }
+  const image = (name) => services.find((service) => service.name === name).image;
+  assert.equal(image("deriver"), image("api"), "the deriver runs the image the api builds");
+});
+
 /** One `NAME: value` line of a service's environment in compose.yaml, as written. */
 function composeSetting(service, name) {
   return new RegExp(`^ {6}${name}: (.*)$`, "m").exec(service)?.[1];

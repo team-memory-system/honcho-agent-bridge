@@ -2,9 +2,6 @@ name: honcho-agent-bridge
 
 x-honcho-service: &honcho-service
   image: honcho-agent-bridge-server:${HONCHO_IMAGE_TAG:-local}
-  build:
-    context: ./honcho
-    dockerfile: Dockerfile
   env_file:
     - path: ${HONCHO_ENV_FILE:-.env}
       required: false
@@ -24,6 +21,11 @@ x-honcho-service: &honcho-service
 services:
   api:
     <<: *honcho-service
+    # Only the api builds the server image, and the deriver runs it. When both
+    # built it, the first start failed with "image ... already exists".
+    build:
+      context: ./honcho
+      dockerfile: Dockerfile
     entrypoint: ["sh", "docker/entrypoint.sh"]
     ports:
       - "127.0.0.1:${HONCHO_API_PORT:-8001}:8000"
