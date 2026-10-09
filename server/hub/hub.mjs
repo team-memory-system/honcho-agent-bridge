@@ -569,9 +569,11 @@ async function jevScore(env, key, state, checked) {
 // -------------------------------------------------------------- the team's state
 //
 // Durable Object storage, all in the one object:
-//   meta            { name, createdAt }: the team's name, seeded from TEAM.name
+//   meta            { name, createdAt, seededAdmins }: the team's name, seeded from
+//                   TEAM.name, and the emails of TEAM.admins already made admins
 //   person:<email>  { email, peer, admin, addedAt, addedBy, firstLoginAt, lastLoginAt };
-//                   the admins of TEAM.admins are seeded on the first request of all
+//                   each email of TEAM.admins is made an admin once (see seed), and an
+//                   admin makes a member an admin or takes it away
 //   server:<host>   { host, label, owner, workspace, company, createdOn, tunnelId,
 //                   dnsRecordId, createdAt, updatedAt, guardHash?, guardIssuedAt? };
 //                   one per person; guardHash is the SHA-256 (hex) of the server's
@@ -670,6 +672,7 @@ const ROUTES = [
   ["GET", /^\/api\/admin\/people$/, "adminPeople"],
   ["POST", /^\/api\/admin\/people$/, "addPerson"],
   ["DELETE", /^\/api\/admin\/people\/([^/]+)$/, "removePerson"],
+  ["PUT", /^\/api\/admin\/people\/([^/]+)$/, "setAdmin"],
   ["PUT", /^\/api\/admin\/team$/, "renameTeam"],
   ["GET", /^\/api\/admin\/jev$/, "jevStatus"],
   ["PUT", /^\/api\/admin\/jev$/, "setJev"],
@@ -727,18 +730,38 @@ export class TeamHub {
     }
   }
 
-  /** On the first request of all: the team's name and its admins, from TEAM. */
+  /**
+   * On the first request of all, the team's name; and each email of TEAM.admins is
+   * made an admin once, on the first request after the deploy that names it. `team
+   * make` names the admin, so making the team again with another email adds that
+   * admin (a member already on the roster becomes one). meta.seededAdmins remembers
+   * who was made an admin this way, so one removed or taken off as admin later stays so.
+   */
   async seed(team) {
     if (this.seeded) return;
-    if (!(await this.storage.get("meta"))) {
+    const meta = await this.storage.get("meta");
+    if (!meta || !Array.isArray(meta.seededAdmins) || team.admins.some((email) => !meta.seededAdmins.includes(email))) {
       await this.exclusive(async () => {
-        if (await this.storage.get("meta")) return;
         const now = timestamp();
-        for (const email of team.admins) {
-          await this.storage.put(personKey(email), { email, peer: null, admin: true, addedAt: now, addedBy: "setup", firstLoginAt: null, lastLoginAt: null });
+        const current = await this.storage.get("meta");
+        // A hub made before seededAdmins put TEAM.admins on the roster as added by
+        // "setup", and no admin could be taken off or removed there: those count as
+        // made admins already.
+        const done = new Set(!current ? []
+          : Array.isArray(current.seededAdmins) ? current.seededAdmins
+            : [...(await this.people()).values()].filter((person) => person.addedBy === "setup").map((person) => person.email));
+        const fresh = team.admins.filter((email) => !done.has(email));
+        if (current && Array.isArray(current.seededAdmins) && !fresh.length) return;
+        for (const email of fresh) {
+          const person = await this.person(email);
+          await this.storage.put(personKey(email), person
+            ? { ...person, admin: true }
+            : { email, peer: null, admin: true, addedAt: now, addedBy: "setup", firstLoginAt: null, lastLoginAt: null });
         }
         // Last, so a seed cut short runs again.
-        await this.storage.put("meta", { name: team.name, createdAt: now });
+        await this.storage.put("meta", current
+          ? { ...current, seededAdmins: [...done, ...fresh] }
+          : { name: team.name, createdAt: now, seededAdmins: fresh });
       });
     }
     this.seeded = true;
@@ -1126,6 +1149,31 @@ export class TeamHub {
       await this.endRequests((item) => item.from === wanted || item.owner === wanted);
     });
     return json(200, { removed: wanted });
+  }
+
+  /**
+   * PUT /api/admin/people/<email> { admin }: makes a member an admin, or takes it
+   * away. As with removing a person, an admin does not take it from themselves;
+   * another admin can. So the team keeps an admin: whoever takes it from someone
+   * else is one.
+   */
+  async setAdmin({ request, email, params: [rawEmail] }) {
+    await this.admin(email);
+    const wanted = normalizeEmail(rawEmail);
+    const { admin } = await readJson(request);
+    if (typeof admin !== "boolean") throw new HubError(400, "bad_request", "admin is true or false");
+    const person = await this.exclusive(async () => {
+      // Again here: an admin taken off meanwhile changes no one.
+      await this.admin(email);
+      const found = wanted ? await this.person(wanted) : null;
+      if (!found) throw new HubError(404, "not_found", "No one with that email is on the roster");
+      if (Boolean(found.admin) === admin) return found;
+      if (!admin && wanted === email) throw new HubError(409, "own_email", "An admin cannot take admin from themselves; another admin can");
+      const changed = { ...found, admin };
+      await this.storage.put(personKey(wanted), changed);
+      return changed;
+    });
+    return json(200, { person: adminPersonView(person, await this.servers()) });
   }
 
   async renameTeam({ request, email, team }) {

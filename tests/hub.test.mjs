@@ -91,7 +91,9 @@ function fakeNamespace(env) {
       };
     },
   };
-  return { data, names, received, blocks, namespace };
+  // A new deploy: the next request reaches a new TeamHub over the same storage.
+  const restart = () => { object = null; };
+  return { data, names, received, blocks, namespace, restart };
 }
 
 /** A hub for one test: its own fake Cloudflare, with the people policy the deploy made. */
@@ -152,10 +154,16 @@ async function hubFixture(t, { admins = [ADMIN], env: overrides = {} } = {}) {
     }
   }
 
+  /** `team make` again: TEAM names other admins, and the Durable Object starts over. */
+  function redeploy({ admins: named }) {
+    env.TEAM = JSON.stringify({ ...JSON.parse(env.TEAM), admins: named });
+    fake.restart();
+  }
+
   const serversApp = () => cf.state.apps.find((app) => app.name === "Team Memory servers") || null;
   const tunnel = (id) => cf.state.tunnels.find((item) => item.id === id);
   const people = () => cf.state.policies.find((item) => item.id === PEOPLE_POLICY_ID).include.map((rule) => rule.email.email);
-  return { cf, env, ...fake, send, as, addPeople, serversApp, tunnel, people };
+  return { cf, env, ...fake, send, as, addPeople, redeploy, serversApp, tunnel, people };
 }
 
 // ------------------------------------------------------------------- the door
@@ -309,6 +317,7 @@ test("the first request of all seeds the team and its admins; /api/me answers an
   });
   assert.equal(f.data.get("meta").name, "예시 팀");
   assert.match(f.data.get("meta").createdAt, /^\d{4}-\d\d-\d\dT/);
+  assert.deepEqual(f.data.get("meta").seededAdmins, [ADMIN, "second@example.com"]);
   assert.deepEqual([...f.data.keys()].filter((key) => key.startsWith("person:")).sort(), ["person:admin@example.com", "person:second@example.com"]);
   const seeded = f.data.get("person:second@example.com");
   assert.deepEqual({ ...seeded, addedAt: "x" }, {
@@ -825,6 +834,7 @@ test("admins add people to the people policy and the roster; others may not", as
     ["GET", "/api/admin/people"],
     ["POST", "/api/admin/people", { email: "mate@example.com" }],
     ["DELETE", "/api/admin/people/admin%40example.com"],
+    ["PUT", "/api/admin/people/bob%40example.com", { admin: true }],
     ["PUT", "/api/admin/team", { name: "다른 이름" }],
   ]) {
     const answer = await f.send(pathname, { method, as: "bob@example.com", body });
@@ -903,6 +913,99 @@ test("removing a person takes them out of the people policy and the roster, remo
   // Another admin can be removed; then the one left is the last.
   assert.equal((await f.as(ADMIN).delete("/api/admin/people/boss%40example.com")).status, 200);
   assert.deepEqual([...f.data.values()].filter((value) => value.admin).map((value) => value.email), [ADMIN]);
+});
+
+test("an admin makes a teammate an admin or takes it away from another admin, never from themselves", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob", "carol@example.com": "carol" });
+  const writes = f.cf.writes().length;
+  const admins = () => [...f.data.values()].filter((value) => value.email && value.admin).map((value) => value.email).sort();
+
+  assert.equal((await f.as(ADMIN).put("/api/admin/people/bob%40example.com", { admin: "yes" })).status, 400);
+  assert.equal((await f.as(ADMIN).put("/api/admin/people/bob%40example.com", {})).status, 400);
+  assert.equal((await f.as(ADMIN).put("/api/admin/people/nobody%40example.com", { admin: true })).status, 404);
+  assert.equal((await f.as(ADMIN).put("/api/admin/people/not-an-email", { admin: true })).status, 404);
+  const self = await f.as("carol@example.com").put("/api/admin/people/carol%40example.com", { admin: true });
+  assert.deepEqual([self.status, self.json.error], [403, "not_admin"]);
+
+  const made = await f.as(ADMIN).put("/api/admin/people/Bob%40Example.com", { admin: true });
+  assert.equal(made.status, 200);
+  assert.deepEqual([made.json.person.email, made.json.person.admin, made.json.person.peer, made.json.person.addedBy], ["bob@example.com", true, "bob", ADMIN]);
+  assert.deepEqual(Object.keys(made.json.person), ["email", "peer", "admin", "joined", "servers", "addedAt", "addedBy", "lastLoginAt"]);
+  assert.deepEqual(admins(), [ADMIN, "bob@example.com"]);
+  assert.equal((await f.as("bob@example.com").get("/api/me")).json.admin, true);
+  assert.equal((await f.as("bob@example.com").get("/api/admin/people")).status, 200);
+  const again = await f.as(ADMIN).put("/api/admin/people/bob%40example.com", { admin: true });
+  assert.deepEqual([again.status, again.json.person.admin], [200, true], "an admin already is left as it is");
+
+  // No one takes it from themselves; another admin can, and the one left keeps it.
+  const own = await f.as(ADMIN).put("/api/admin/people/admin%40example.com", { admin: false });
+  assert.deepEqual([own.status, own.json.error], [409, "own_email"]);
+  assert.equal((await f.as(ADMIN).put("/api/admin/people/admin%40example.com", { admin: true })).status, 200);
+  const taken = await f.as("bob@example.com").put("/api/admin/people/admin%40example.com", { admin: false });
+  assert.deepEqual([taken.status, taken.json.person.admin], [200, false]);
+  assert.deepEqual(admins(), ["bob@example.com"]);
+  assert.equal((await f.as(ADMIN).get("/api/admin/people")).json.error, "not_admin");
+  assert.equal((await f.as(ADMIN).get("/api/me")).json.member, true, "still on the team");
+  assert.equal((await f.as("bob@example.com").put("/api/admin/people/bob%40example.com", { admin: false })).json.error, "own_email");
+
+  // Two admins taking it from each other at once: one goes first, and the other is no longer an admin.
+  assert.equal((await f.as("bob@example.com").put("/api/admin/people/carol%40example.com", { admin: true })).status, 200);
+  const both = await Promise.all([
+    f.as("bob@example.com").put("/api/admin/people/carol%40example.com", { admin: false }),
+    f.as("carol@example.com").put("/api/admin/people/bob%40example.com", { admin: false }),
+  ]);
+  assert.deepEqual(both.map((answer) => answer.status).sort(), [200, 403]);
+  assert.equal(both.find((answer) => answer.status === 403).json.error, "not_admin");
+  assert.equal(admins().length, 1);
+  assert.equal(f.cf.writes().length, writes, "Cloudflare is not asked: the people policy has them already");
+});
+
+test("each email TEAM names is made an admin once: a new deploy's email is added, and an admin taken off or removed stays so", async (t) => {
+  const f = await hubFixture(t);
+  await f.addPeople({ "bob@example.com": "bob" });
+  const person = (email) => f.data.get(`person:${email}`) || null;
+
+  // team make again, naming bob: a member already, who becomes an admin.
+  f.redeploy({ admins: ["Bob@Example.com"] });
+  assert.equal((await f.as("bob@example.com").get("/api/me")).json.admin, true);
+  assert.deepEqual([person(ADMIN).admin, person("bob@example.com").addedBy], [true, ADMIN]);
+  assert.deepEqual(f.data.get("meta").seededAdmins, [ADMIN, "bob@example.com"]);
+
+  // Naming someone not on the roster yet puts them on it as an admin.
+  f.redeploy({ admins: ["new@example.com"] });
+  await f.as(ADMIN).get("/api/me");
+  assert.deepEqual({ ...person("new@example.com"), addedAt: "x" }, {
+    email: "new@example.com", peer: null, admin: true, addedAt: "x", addedBy: "setup", firstLoginAt: null, lastLoginAt: null,
+  });
+
+  // Taken off as admin, or removed: the same names in a later deploy change nothing.
+  assert.equal((await f.as(ADMIN).put("/api/admin/people/bob%40example.com", { admin: false })).status, 200);
+  assert.equal((await f.as(ADMIN).delete("/api/admin/people/new%40example.com")).status, 200);
+  f.redeploy({ admins: [ADMIN, "bob@example.com", "new@example.com"] });
+  await f.as(ADMIN).get("/api/me");
+  assert.equal(person("bob@example.com").admin, false);
+  assert.equal(person("new@example.com"), null);
+  assert.deepEqual(f.data.get("meta").seededAdmins, [ADMIN, "bob@example.com", "new@example.com"]);
+});
+
+test("a hub made before seededAdmins counts its setup admin as made; an email named for the first time is made an admin", async (t) => {
+  const f = await hubFixture(t);
+  // What the hub kept before: its first admin, a member, and meta without seededAdmins.
+  const old = { peer: null, addedAt: "2026-10-01T00:00:00.000Z", firstLoginAt: null, lastLoginAt: null };
+  f.data.set("meta", { name: "예시 팀", createdAt: "2026-10-01T00:00:00.000Z" });
+  f.data.set(`person:${ADMIN}`, { ...old, email: ADMIN, admin: true, addedBy: "setup" });
+  f.data.set("person:bob@example.com", { ...old, email: "bob@example.com", admin: false, addedBy: ADMIN });
+
+  // The same admin named again: no one changes, and the hub remembers it.
+  assert.equal((await f.as("bob@example.com").get("/api/me")).json.admin, false);
+  assert.deepEqual(f.data.get("meta"), { name: "예시 팀", createdAt: "2026-10-01T00:00:00.000Z", seededAdmins: [ADMIN] });
+
+  // team make again naming the member: they become an admin, and the first one stays one.
+  f.redeploy({ admins: ["bob@example.com"] });
+  assert.equal((await f.as("bob@example.com").get("/api/me")).json.admin, true);
+  assert.equal(f.data.get(`person:${ADMIN}`).admin, true);
+  assert.deepEqual(f.data.get("meta").seededAdmins, [ADMIN, "bob@example.com"]);
 });
 
 test("an admin renames the team; bodies, routes and settings that are wrong get a JSON answer saying so", async (t) => {

@@ -23,6 +23,8 @@ const hubSeen = [];
 const JEV_KEY = "ts-jev-key-for-tests-0123456789";
 // The Jev key the stand-in hub keeps, as { key, setAt, setBy }, or null.
 let jev = null;
+// Whether the stand-in hub's directory says this person is an admin.
+let meAdmin = true;
 
 async function send(pathname, { method = "GET", body, headers = {} } = {}) {
   const response = await realFetch(`http://127.0.0.1:${port}${pathname}`, {
@@ -64,6 +66,19 @@ before(async () => {
             }
             if (request.method === "DELETE") jev = null;
             return Response.json({ set: Boolean(jev), setAt: jev?.setAt ?? null, setBy: jev?.setBy ?? null, ...(jev ? { key: jev.key } : {}) });
+          }
+          if (url.pathname === "/api/team" && request.method === "GET") {
+            return Response.json({
+              team: { name: "예시 팀", host: HUB, zone: "example.com" },
+              people: [{ email: "me@example.com", peer: "me", admin: meAdmin, joined: true, servers: [] }],
+              servers: [],
+            });
+          }
+          if (url.pathname.startsWith("/api/admin/people/") && request.method === "PUT") {
+            const body = await request.json();
+            hubSeen.at(-1).body = body;
+            if (typeof body.admin !== "boolean") return Response.json({ error: "bad_request", detail: "admin is true or false" }, { status: 400 });
+            return Response.json({ person: { email: decodeURIComponent(url.pathname.split("/").at(-1)).toLowerCase(), admin: body.admin } });
           }
           return Response.json({ error: "not_found" }, { status: 404 });
         },
@@ -217,4 +232,23 @@ test("the admin's Jev key goes to the hub, and no route hands it back", async ()
   for (const route of ["/api/team/admin/jev", "/api/team/admin/jev/set", "/api/team/admin/jev/clear"]) {
     assert.equal((await send(route)).status, 405, `${route} takes a JSON POST only`);
   }
+});
+
+test("an admin makes a teammate an admin or takes it away through the hub, and the directory keeps whether this person still is one", async () => {
+  const made = await send("/api/team/admin/set-admin", { method: "POST", body: { email: "Bob@Example.com", admin: true } });
+  assert.deepEqual(made.json, { ok: true, person: { email: "bob@example.com", admin: true } });
+  assert.deepEqual(hubSeen.at(-1), { method: "PUT", path: "/api/admin/people/Bob%40Example.com", email: "me@example.com", body: { admin: true } });
+  // admin goes as the page sent it, and the hub turns down anything but true or false.
+  const odd = await send("/api/team/admin/set-admin", { method: "POST", body: { email: "bob@example.com", admin: "yes" } });
+  assert.deepEqual([odd.json.ok, odd.json.code, odd.json.status], [false, "bad_request", 400]);
+  assert.equal((await send("/api/team/admin/set-admin")).status, 405, "a JSON POST only");
+
+  // Another admin took it away from this person: the next directory says so, and the status follows.
+  assert.equal((await send("/api/team/status")).json.admin, true);
+  meAdmin = false;
+  assert.equal((await send("/api/team/directory", { method: "POST", body: {} })).json.ok, true);
+  assert.equal((await send("/api/team/status")).json.admin, false);
+  meAdmin = true;
+  await send("/api/team/directory", { method: "POST", body: {} });
+  assert.equal((await send("/api/team/status")).json.admin, true);
 });

@@ -13,7 +13,7 @@
 import { loadConfig } from "./config.mjs";
 import { gateDevices, gateGrants, gateStatePaths, grantChat, grantCollect, revokeDevice, revokePerson } from "./gate-access.mjs";
 import { serverProjects } from "./scope-sync.mjs";
-import { CALLBACK_PATH, finishLogin, registerDevice, serverWhoami, signOut, startLogin, teamAuthPaths, teamHost, teamLoginStatus } from "./team-auth.mjs";
+import { CALLBACK_PATH, finishLogin, registerDevice, serverWhoami, setTeam, signOut, startLogin, teamAuthPaths, teamHost, teamLoginStatus } from "./team-auth.mjs";
 import { computerName, hubCall, madeTeam, teamWhoami } from "./team-hub.mjs";
 
 /** The routes that only read, so a GET may ask them. */
@@ -42,6 +42,18 @@ function jevStatus(answer) {
 /** Where the browser comes back to: this app's own address, as the request reached it. */
 function redirectUri(req) {
   return `http://${req.headers.host}${CALLBACK_PATH}`;
+}
+
+/**
+ * Keeps the hub's word on whether this person is an admin, when it changed since the
+ * login: another admin made them one or took it away, and the 관리자 menu follows
+ * without logging in again.
+ */
+async function keepAdmin(directory, paths) {
+  const status = await teamLoginStatus({ paths });
+  const me = list(directory?.people).find((person) => person?.email === status.email);
+  if (!status.hub || typeof me?.admin !== "boolean" || me.admin === status.admin) return;
+  await setTeam({ hub: status.hub, admin: me.admin }, { paths });
 }
 
 /** Owner side: what is opened to whom, and the computers that write here. */
@@ -83,7 +95,9 @@ const ROUTES = {
 
   "/api/team/directory": async () => {
     const { paths } = await context();
-    return { ok: true, ...(await hubCall("GET", "/api/team", undefined, { paths })) };
+    const directory = await hubCall("GET", "/api/team", undefined, { paths });
+    await keepAdmin(directory, paths).catch(() => {});
+    return { ok: true, ...directory };
   },
 
   /** Requests to and from this person, from the hub, with this server's own grants and computers. */
@@ -215,6 +229,12 @@ const ROUTES = {
   "/api/team/admin/remove": async (body) => {
     const { paths } = await context();
     return { ok: true, ...(await hubCall("DELETE", `/api/admin/people/${encodeURIComponent(String(body.email || ""))}`, undefined, { paths })) };
+  },
+
+  /** Makes a teammate an admin (`admin: true`) or takes it away (`admin: false`). */
+  "/api/team/admin/set-admin": async (body) => {
+    const { paths } = await context();
+    return { ok: true, ...(await hubCall("PUT", `/api/admin/people/${encodeURIComponent(String(body.email || ""))}`, { admin: body.admin }, { paths })) };
   },
 
   "/api/team/admin/rename": async (body) => {

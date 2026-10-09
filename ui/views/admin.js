@@ -3,6 +3,8 @@
 // send someone new, and, on the computer that made the team, the Cloudflare API
 // token it runs on. Adding someone takes their Google email and nothing else: they
 // log in at the team's address, and make a server of their own if they want one.
+// An admin makes a teammate an admin too, or takes it away from another admin; no
+// one takes it from themselves, so the team always keeps one.
 // The team's Jev key is set here too: the hub keeps it and judges teammates'
 // questions with it for every shared server of the team, which holds only its own
 // token for the hub's guard. The key never leaves the hub, and the page never sees
@@ -16,6 +18,37 @@ import { app, loadContext } from "../lib/state.js";
 import { button, busy, notice, pageHead, spinner, tag, toast } from "../lib/ui.js";
 
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+/** The hub's refusals of a 관리자 change, in this app's words. */
+const ADMIN_REFUSED = {
+  own_email: "자신은 관리자에서 뺄 수 없습니다. 다른 관리자가 뺄 수 있습니다.",
+  not_admin: "관리자만 할 수 있습니다. 다른 관리자가 관리자에서 뺐을 수 있습니다.",
+};
+
+/** 관리자로 바꾸기 (`admin: true`) or 관리자에서 빼기 (`admin: false`), after asking. */
+async function changeAdmin(target, person, admin, redraw) {
+  const name = person.peer || person.email.split("@")[0];
+  const ok = await confirmWindow(admin
+    ? {
+      title: `${name}을 관리자로 바꿀까요?`,
+      text: `${person.email} 도 관리자 메뉴에서 팀원을 더하고 빼고, 관리자를 바꾸고, Jev 키를 바꿀 수 있습니다.`,
+      confirm: "바꾸기",
+    }
+    : {
+      title: `${name}을 관리자에서 뺄까요?`,
+      text: `${person.email} 은 팀원으로 남고, 관리자 메뉴는 쓰지 못합니다.`,
+      confirm: "빼기",
+    });
+  if (!ok) return;
+  await busy(target, async () => {
+    try {
+      await teamCall("/api/team/admin/set-admin", { email: person.email, admin });
+    } catch (error) {
+      throw ADMIN_REFUSED[error.code] ? new Error(ADMIN_REFUSED[error.code]) : error;
+    }
+    await redraw();
+  }, { done: admin ? `${person.email}를 관리자로 바꿨습니다` : `${person.email}를 관리자에서 뺐습니다` });
+}
 
 /** 팀원 더하기: one Google email. */
 function openAdd(onAdded) {
@@ -147,12 +180,15 @@ export default {
         }, people.map((person) => {
           const own = person.email === team.email;
           const server = (person.servers || [])[0];
+          const toggle = person.admin
+            ? button("관리자에서 빼기", { kind: "small", onClick: (event) => changeAdmin(event.currentTarget, person, false, draw) })
+            : button("관리자로 바꾸기", { kind: "small", onClick: (event) => changeAdmin(event.currentTarget, person, true, draw) });
           return listItem({
             title: person.email,
             tags: own ? [" ", tag("나 · 관리자")] : person.admin ? [" ", tag("관리자")] : fresh.has(person.email) ? [" ", tag("방금 더함", "new")] : [],
             sub: server ? `서버 ${server}` : person.joined ? "서버 없음" : "아직 로그인하지 않음",
             fresh: fresh.has(person.email),
-            end: own ? null : button("팀에서 빼기", { kind: "small danger", onClick: async (event) => {
+            end: own ? null : [toggle, button("팀에서 빼기", { kind: "small danger", onClick: async (event) => {
               const target = event.currentTarget;
               const name = person.peer || person.email.split("@")[0];
               const ok = await confirmWindow({
@@ -163,7 +199,7 @@ export default {
               });
               if (!ok) return;
               await busy(target, async () => { await teamCall("/api/team/admin/remove", { email: person.email }); fresh.delete(person.email); await draw(); }, { done: `${person.email}를 뺐습니다` });
-            } }),
+            } })],
           });
         })),
         made ? block({ title: "Cloudflare", actions: [button("token 바꾸기", { onClick: () => openToken(made, draw) })] },
