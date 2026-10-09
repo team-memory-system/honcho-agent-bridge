@@ -1178,8 +1178,9 @@ dialog.modal::backdrop { background: rgb(36 33 28 / 42%); }
   transform: rotate(45deg);
 }
 .opt input:disabled, .pr input:disabled, .pr-c input:disabled { border-color: var(--line-2); background: var(--sunk); cursor: default; }
-.opt input:indeterminate, .pr input:indeterminate { border-color: var(--accent); background: var(--accent); }
-.opt input:indeterminate::after, .pr input:indeterminate::after { content: ""; position: absolute; left: 3px; top: 6px; width: 7px; height: 2px; background: #fff; }
+/* A box that ticks some of a list. A radio group with none picked is :indeterminate too, and stays plain. */
+.opt input[type="checkbox"]:indeterminate, .pr input[type="checkbox"]:indeterminate { border-color: var(--accent); background: var(--accent); }
+.opt input[type="checkbox"]:indeterminate::after, .pr input[type="checkbox"]:indeterminate::after { content: ""; position: absolute; left: 3px; top: 6px; width: 7px; height: 2px; background: #fff; }
 
 .opt .src, .agent .src { width: 20px; height: 20px; border-radius: 5px; font-size: 11px; }
 
@@ -1198,6 +1199,7 @@ dialog.modal::backdrop { background: rgb(36 33 28 / 42%); }
 .cnt button { width: 26px; height: 24px; padding: 0; border: 0; background: none; color: var(--ink-2); cursor: pointer; }
 .cnt b { min-width: 26px; padding: 2px 0; border-left: 1px solid var(--line-soft); border-right: 1px solid var(--line-soft); text-align: center; font-weight: 600; }
 .cnt-l { color: var(--ink-3); font-size: 12.5px; }
+.cnt-g { display: inline-flex; align-items: center; gap: 8px; }
 
 /* Folders to tick, one column per server when several take them. */
 .pt { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; }

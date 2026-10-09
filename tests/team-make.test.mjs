@@ -10,13 +10,13 @@ import test from "node:test";
 
 import { BYPASS_POLICY_NAME, EVERYONE_POLICY_NAME, hubAppBody, hubGuardAppBody } from "../scripts/cloudflare-api.mjs";
 import { teamMake } from "../scripts/team-hub.mjs";
-import { API_TOKEN, startFakeCloudflare, ZONE } from "./fake-cloudflare.mjs";
+import { ACCOUNT_ID, API_TOKEN, startFakeCloudflare, ZONE, ZONE_ID } from "./fake-cloudflare.mjs";
 
 const HUB_HOST = `team.${ZONE}`;
 const GOOGLE_IDP = "idp-google-0001";
 
-async function makeFixture(t) {
-  const cf = await startFakeCloudflare();
+async function makeFixture(t, fake = {}) {
+  const cf = await startFakeCloudflare(fake);
   t.after(() => cf.close());
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "team-make-"));
   t.after(() => fsp.rm(tmp, { recursive: true, force: true }));
@@ -100,4 +100,49 @@ test("team make on another hub address makes that address's guard app, not the o
   const state = await f.state();
   assert.deepEqual([state.hub.host, state.hub.guardAppId], [`crew.${ZONE}`, guard.id]);
   assert.equal(f.policy(BYPASS_POLICY_NAME).length, 1, "one bypass policy for every app that needs it");
+});
+
+test("team make with several zones or Google logins says which ones, and makes the team once one is named", async (t) => {
+  const f = await makeFixture(t, {
+    zones: [
+      { id: ZONE_ID, name: ZONE, account: { id: ACCOUNT_ID } },
+      { id: "0123456789abcdef0123456789abcd00", name: "example.org", account: { id: ACCOUNT_ID } },
+    ],
+    idps: [
+      { id: "idp-otp-0001", name: "One-time PIN", type: "onetimepin" },
+      { id: GOOGLE_IDP, name: "Google", type: "google" },
+      { id: "idp-google-0002", name: "Team Google", type: "google-apps" },
+    ],
+  });
+  const zone = await teamMake(f.options);
+  assert.equal(zone.ok, false);
+  assert.deepEqual({ choose: zone.choose, choices: zone.choices }, { choose: "zone", choices: [ZONE, "example.org"] });
+  assert.match(zone.error, /--zone <zone> is needed/, "the CLI still names its option");
+
+  const idp = await teamMake({ ...f.options, zone: ZONE });
+  assert.equal(idp.ok, false);
+  assert.deepEqual({ choose: idp.choose, choices: idp.choices }, {
+    choose: "idp",
+    choices: [{ id: GOOGLE_IDP, name: "Google" }, { id: "idp-google-0002", name: "Team Google" }],
+  });
+  assert.equal(f.cf.state.apps.length, 0, "nothing was made before both were known");
+
+  const made = await teamMake({ ...f.options, zone: ZONE, idp: "idp-google-0002" });
+  assert.equal(made.ok, true, made.error);
+  assert.deepEqual(f.app(HUB_HOST).allowed_idps, ["idp-google-0002"]);
+  assert.equal((await f.state()).idpId, "idp-google-0002");
+});
+
+test("the app says team make's refusals in Korean, with the token screen's own permission names", async () => {
+  const { explainWarning } = await import("../ui/lib/collect.js");
+  assert.equal(
+    explainWarning("Cloudflare PUT /accounts/a/workers/scripts/team-memory-hub failed: HTTP 403: 10000 Authentication error (the API token needs Account / Workers / Admin, and Zone / Workers Routes / Edit on the zone)"),
+    "Cloudflare API token에 Account / Workers / Admin, Zone / Workers Routes / Edit 권한이 없습니다. Cloudflare에서 token에 이 권한을 더한 뒤 다시 누르세요.",
+  );
+  assert.equal(
+    explainWarning("The API token cannot see a zone named example.org; check the name and that the token includes it (Zone / Zone / Read)"),
+    "이 Cloudflare API token은 example.org zone을 보지 못합니다. zone 이름과 token의 Zone: Read 권한을 확인하세요.",
+  );
+  assert.match(explainWarning("Zero Trust has no Google login yet; add one under Settings > Authentication > Login methods, then run this again"), /^Cloudflare Zero Trust에 Google 로그인이 없습니다/);
+  assert.equal(explainWarning("The Cloudflare API token is needed: put it in CLOUDFLARE_API_TOKEN (never on the command line)"), "Cloudflare API token을 넣으세요.");
 });

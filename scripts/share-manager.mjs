@@ -776,7 +776,11 @@ export async function chooseZone(client, wanted, saved) {
   const zones = await listZones(client);
   if (zones.length === 1) return findZone(client, zones[0].name);
   if (!zones.length) throw new Error("The API token cannot see any zone; give it Zone / Zone / Read and DNS / Edit on the zone to use");
-  throw new Error(`--zone <zone> is needed: the API token sees ${zones.length} zones (${zones.map((zone) => zone.name).join(", ")})`);
+  // `choose` and `choices` let the app ask which one instead of naming the option.
+  throw Object.assign(new Error(`--zone <zone> is needed: the API token sees ${zones.length} zones (${zones.map((zone) => zone.name).join(", ")})`), {
+    choose: "zone",
+    choices: zones.map((zone) => zone.name),
+  });
 }
 
 /** The Google login named, else the one saved, else the only Google login there is. */

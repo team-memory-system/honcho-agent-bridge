@@ -47,7 +47,12 @@ export const DEFAULT_HUB_LABEL = "team";
 const MAX_TEAM_NAME = 60;
 
 function failure(error) {
-  return { ok: false, error: String(error?.message || error) };
+  return {
+    ok: false,
+    error: String(error?.message || error),
+    // Cloudflare has more than one zone or Google login and none was named: which ones.
+    ...(error?.choose ? { choose: error.choose, choices: error.choices } : {}),
+  };
 }
 
 function apiBase(options) {

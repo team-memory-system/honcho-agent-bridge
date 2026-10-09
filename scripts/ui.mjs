@@ -316,7 +316,8 @@ const TEAM_ROUTES = {
   // The team hub (team-hub.mjs): made once with the admin's API token, which reaches
   // the CLI through its environment only.
   "/api/team/make": async (body) => runCli(["team", "make", ...inlineOption("name", body?.name), ...inlineOption("email", body?.email),
-    ...inlineOption("zone", body?.zone), ...inlineOption("hub", body?.hub)], { timeout: 600_000, env: secretEnvironment(body, CLOUDFLARE_SECRET_FIELDS) }),
+    ...inlineOption("zone", body?.zone), ...inlineOption("hub", body?.hub), ...inlineOption("idp", body?.idp)],
+  { timeout: 600_000, env: secretEnvironment(body, CLOUDFLARE_SECRET_FIELDS) }),
   // This computer's server at the address the team makes for it; the tunnel token
   // goes from the hub to the CLI's own process and nowhere else.
   "/api/team/share": async (body) => runCli(["team", "share", ...inlineOption("label", body?.label), ...(body?.replace === true ? ["--replace"] : [])], { timeout: 900_000 }),

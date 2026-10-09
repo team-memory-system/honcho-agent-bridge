@@ -71,7 +71,8 @@ function joined(names) {
 export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
   const state = {
     path: link ? "link" : null,
-    team: { hub: link, me: null, directory: null, name: "", apiToken: "", email: "", zone: "", hubLabel: "" },
+    // zones and idps: what Cloudflare offered when the token sees more than one.
+    team: { hub: link, me: null, directory: null, name: "", apiToken: "", email: "", zone: "", hubLabel: "", idp: "", zones: [], idps: [] },
     login: { phase: "idle", error: "", tab: null, reopen: null, logouts: null, switchFrom: null, sameAccount: false },
     draft: collectDraft(app.context),
     models: { chosen: new Set(["codex"]), counts: { codex: 1, claude: 1 } },
@@ -138,20 +139,33 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     const name = input("name", { placeholder: "예: 우리 팀", maxlength: "60" });
     const token = input("apiToken", { type: "password", class: "input mono" });
     const email = input("email", { type: "email", class: "input mono", placeholder: "admin@example.com" });
+    const { zones, idps } = state.team;
+    // Cloudflare had more than one and the token did not say which: one to pick, at the top.
+    const choice = (key, text, rows) => notice("warn", h("b", {}, text),
+      opts(...rows.map(([value, title, sub]) => opt({
+        name: `make-${key}`, value, title, sub, checked: state.team[key] === value,
+        onChange: (on) => { if (on) state.team[key] = value; },
+      }))));
     return {
       body: h("div", {}, h("h3", {}, "새 팀 만들기"),
+        zones.length ? choice("zone", `이 token이 보는 zone이 ${zones.length}개입니다. 팀 주소에 쓸 zone을 고르세요.`,
+          zones.map((zone) => [zone, h("span", { class: "mono" }, zone)])) : null,
+        idps.length ? choice("idp", `Cloudflare Zero Trust에 Google 로그인이 ${idps.length}개 있습니다. 팀 주소에 로그인할 때 쓸 것을 고르세요.`,
+          idps.map((idp) => [idp.id, idp.name || idp.id, h("span", { class: "mono" }, idp.id)])) : null,
         field("팀 이름", name),
         field("Cloudflare API token", token, "Cloudflare에서 만든 API token을 여기에만 붙여 넣으세요."),
         field("관리자 Google 이메일", email, "팀 주소로 로그인할 내 Google 계정입니다."),
         h("details", { class: "fold" }, h("summary", {}, "token 권한과 팀 주소"),
           h("p", { class: "hint" }, `token에는 ${TOKEN_PERMISSIONS}만 줍니다.`),
-          field("zone", input("zone", { class: "input mono", placeholder: "example.com" }), "비워 두면 token이 보는 zone이 하나일 때 그것을 씁니다."),
+          zones.length ? null : field("zone", input("zone", { class: "input mono", placeholder: "example.com" }), "비워 두면 token이 보는 zone이 하나일 때 그것을 씁니다."),
           field("팀 주소 이름", input("hubLabel", { class: "input mono", placeholder: "team" }), "팀 주소는 <이름>.<zone>이 됩니다."))),
       next: "만들고 로그인",
       check() {
         if (!state.team.name.trim()) { name.focus(); return "팀 이름을 넣으세요."; }
         if (!state.team.apiToken.trim()) { token.focus(); return "Cloudflare API token을 넣으세요."; }
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(state.team.email.trim())) { email.focus(); return "관리자 Google 이메일을 넣으세요."; }
+        if (zones.length && !zones.includes(state.team.zone)) return "팀 주소에 쓸 zone을 고르세요.";
+        if (idps.length && !idps.some((idp) => idp.id === state.team.idp)) return "팀 주소에 로그인할 때 쓸 Google 로그인을 고르세요.";
         return null;
       },
       // Made before the login: the login is to the team this makes.
@@ -159,10 +173,18 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
         const body = { name: state.team.name.trim(), email: state.team.email.trim(), apiToken: state.team.apiToken.trim() };
         if (state.team.zone.trim()) body.zone = state.team.zone.trim();
         if (state.team.hubLabel.trim()) body.hub = state.team.hubLabel.trim();
+        if (state.team.idp) body.idp = state.team.idp;
         const made = await post("/api/team/make", body);
+        if (!made.ok) {
+          // Nothing was made yet: the step comes back with the list to pick from, token kept.
+          if (["zone", "idp"].includes(made.choose) && made.choices?.length) {
+            state.team[made.choose === "zone" ? "zones" : "idps"] = made.choices;
+            throw Object.assign(new Error(""), { choose: true });
+          }
+          throw new Error(problem(made, "팀을 만들지 못했습니다."));
+        }
         // Kept by the CLI on this computer and in the team hub; the window lets go of it.
         state.team.apiToken = "";
-        if (!made.ok) throw new Error(problem(made, "팀을 만들지 못했습니다."));
         state.team.hub = made.team.host;
       },
     };
@@ -339,19 +361,23 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
   function modelStep() {
     const { chosen, counts } = state.models;
     const row = ([backend, title]) => {
-      const box = opt({
+      // The number of accounts belongs to a subscription that is ticked; kept in place
+      // but not shown otherwise, so an unticked row does not read as one account.
+      const accounts = h("span", { class: "cnt-g" }, h("span", { class: "cnt-l" }, "계정"), counter(counts[backend], {
+        min: 1, max: 5, label: `${title} 계정 수`,
+        onChange: (count) => { counts[backend] = count; },
+      }));
+      const shown = (on) => { accounts.style.visibility = on ? "" : "hidden"; };
+      shown(chosen.has(backend));
+      return opt({
         type: "checkbox",
         name: "models",
         value: backend,
         checked: chosen.has(backend),
         title: `${title} 구독`,
-        end: [h("span", { class: "cnt-l" }, "계정"), counter(counts[backend], {
-          min: 1, max: 5, label: `${title} 계정 수`,
-          onChange: (count) => { counts[backend] = count; chosen.add(backend); box.input.checked = true; },
-        })],
-        onChange: (on) => { if (on) chosen.add(backend); else chosen.delete(backend); },
+        end: accounts,
+        onChange: (on) => { if (on) chosen.add(backend); else chosen.delete(backend); shown(on); },
       });
-      return box;
     };
     return {
       body: h("div", {},
@@ -425,6 +451,12 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     win.foot(firstRun ? null : button("취소", { kind: "quiet", onClick: () => win.close() }), null);
   }
 
+  /** What the step says under its fields, scrolled to so it shows above the buttons. */
+  function say(node) {
+    clear(issue, node);
+    issue.scrollIntoView({ block: "nearest" });
+  }
+
   function drawStep() {
     keys = stepKeys();
     at = Math.min(at, keys.length - 1);
@@ -449,7 +481,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     const label = () => step.next || (last() ? "적용" : "다음");
     const primary = button(label(), { kind: "primary", onClick: async (event) => {
       const problemText = step.check();
-      if (problemText) { clear(issue, notice("warn", problemText)); return; }
+      if (problemText) { say(notice("warn", problemText)); return; }
       keys = stepKeys();
       if (last()) { apply(); return; }
       // The login opens a tab: opened now, in the click, so the browser lets it.
@@ -457,14 +489,16 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
       if (step.run) {
         const target = event.currentTarget;
         target.disabled = true;
-        clear(issue, h("div", { class: "waitline" }, spinner(), "팀을 만드는 중입니다. 1~2분 걸립니다."));
+        say(h("div", { class: "waitline" }, spinner(), "팀을 만드는 중입니다. 1~2분 걸립니다."));
         try {
           await step.run();
         } catch (error) {
           state.login.tab?.close();
           state.login.tab = null;
-          clear(issue, notice("bad", error.message));
           target.disabled = false;
+          // A choice to make first: the step is drawn again with it at the top.
+          if (error.choose) { drawStep(); return; }
+          say(notice("bad", error.message));
           return;
         }
       }

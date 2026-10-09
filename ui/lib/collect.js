@@ -526,6 +526,12 @@ const WARNINGS = [
   [/Honcho URL must not contain credentials/, () => "기억 서버 주소에 아이디·비밀번호·물음표 뒤 값을 넣지 마세요. token은 서버 token 칸에 넣습니다."],
   [/(\S+) does not exist on this computer; conversations there are sent once it does/, (m) => `${shortPath(m[1])} 폴더가 지금은 없습니다. 생기면 그때부터 수집합니다.`],
   [/user peer id is required/, () => "peer 이름을 넣으세요."],
+  // 새 팀 만들기 (team make): what Cloudflare refused, in the words of its token screen.
+  [/The Cloudflare API token is needed/, () => "Cloudflare API token을 넣으세요."],
+  [/The API token cannot see any zone/, () => "이 Cloudflare API token이 보는 zone이 없습니다. token에 쓸 zone의 Zone: Read와 DNS: Edit 권한을 주세요."],
+  [/The API token cannot see a zone named (\S+);/, (m) => `이 Cloudflare API token은 ${m[1]} zone을 보지 못합니다. zone 이름과 token의 Zone: Read 권한을 확인하세요.`],
+  [/Zero Trust has no Google login yet/, () => "Cloudflare Zero Trust에 Google 로그인이 없습니다. Zero Trust의 Settings → Authentication → Login methods에서 Google을 더한 뒤 다시 누르세요."],
+  [/\(the API token needs (.+)\)$/, (m) => `Cloudflare API token에 ${m[1].replace(/,? and /g, ", ").replace(/ on the zone$/, "")} 권한이 없습니다. Cloudflare에서 token에 이 권한을 더한 뒤 다시 누르세요.`],
 ];
 
 export function explainWarning(text) {

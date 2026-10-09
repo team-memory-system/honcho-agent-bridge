@@ -191,7 +191,11 @@ export function chooseGoogleIdp(providers, wanted = "") {
   if (!google.length) {
     throw new CloudflareApiError("Zero Trust has no Google login yet; add one under Settings > Authentication > Login methods, then run this again");
   }
-  throw new CloudflareApiError(`Zero Trust has ${google.length} Google logins; choose one with --idp <name|id>: ${google.map((item) => `${item.name} (${item.id})`).join(", ")}`);
+  // `choose` and `choices` let the app ask which one instead of naming the option.
+  throw Object.assign(new CloudflareApiError(`Zero Trust has ${google.length} Google logins; choose one with --idp <name|id>: ${google.map((item) => `${item.name} (${item.id})`).join(", ")}`), {
+    choose: "idp",
+    choices: google.map((item) => ({ id: item.id, name: item.name || "" })),
+  });
 }
 
 // ------------------------------------------------------------------- tunnels
