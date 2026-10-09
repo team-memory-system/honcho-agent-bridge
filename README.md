@@ -427,13 +427,9 @@ node scripts/cli.mjs setup apply --all-folders                         # every f
   a session ran in decides, so a repository taken inside a skipped home folder is
   still taken, and the other way round; a folder in both is skipped. A session in
   none of them, folders made later included, goes by `rest` (`take` unless
-  `--rest-folders skip`). A folder the list leaves out is never taken by `rest`: an
-  automation run (a session at `/` or in a Symphony workspace), the system's
-  temporary folders (`/tmp`, `/var/folders/…`), and what an app keeps inside a hidden
-  folder of home (`~/.pencil/documents/<id>`, `~/.claude/plugins/cache/…`). The hidden
-  folder itself and a repository inside one (a worktree under a `worktrees` folder,
-  even one removed since) are listed as usual. Naming such a folder in `take` still
-  takes it. Without any of these options setup keeps what is saved.
+  `--rest-folders skip`). An automation run (a session at `/` or in a Symphony
+  workspace) is in no folder the list shows, so `rest` never takes it. Without any
+  of these options setup keeps what is saved.
 - A session with nothing said in it (only tool output, or a bare slash command) makes
   no conversation on the server. A Claude Code session's folder is the first one its
   transcript records, on any line, the same one the list counts it under.
@@ -956,16 +952,24 @@ typed into its form reach the CLI through its environment only.
 
 In the app, 기억 설정 → 대화 수집 → 수정 holds the other servers: its 서버 step lists
 them under 함께 쌓을 서버, each with a box to keep it on, and 다른 서버 더하기 (a
-name, the address and its token). While one is on, the 프로젝트 step is a table with
-a column for each server, and the folders newly ticked for one are sent their past
+name, the address and its token). While one is on, the 프로젝트 step has a column
+of boxes for each server, and the folders newly ticked for one are sent their past
 conversations (`target backfill`) once 적용 is pressed. The projects offered
 are the folders this computer's Claude Code and Codex conversations were held in
 (`GET /api/app/projects`, `scripts/projects.mjs`, reading the same transcripts as
 `target backfill`). A folder counts under the repository it sits in. Outside a
-repository, one-off folders count under the folder that holds them: a folder whose
-name starts with a date, as the Codex app's `~/Documents/Codex/<date>-<task>`. The
-system's temporary folders and an app's folders inside a hidden one are not listed
-(see the folder choice above).
+repository, one-off folders count under the folder that holds them: anything in the
+system's temporary folder (one row for `/var/folders/…/T` and `/private/var/folders/…/T`,
+the same folder), and a folder whose name starts with a date, as the Codex app's
+`~/Documents/Codex/<date>-<task>`.
+
+The step shows them as a tree by path (`ui/lib/folder-tree.js`), so hundreds of
+folders take a screen: a folder that only leads to one other is joined to it
+(`Documents/Codex`), the top of each tree (`~`, `/`) is open at first, and a folder
+opens and closes by its name or its arrow. A folder's box ticks or clears every
+folder inside it and shows – when only some are ticked. When conversations were held
+both in a folder and in folders inside it, the folder's own are the row 이 폴더. What
+is saved is still each listed folder in `take` or `skip`.
 
 On disk, each target keeps its own directory, `<data>/targets/<id>/`:
 `spool/<agent>/pending/` (turns waiting for it), `state/<agent>.json` (what it has

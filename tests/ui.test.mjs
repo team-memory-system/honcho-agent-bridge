@@ -274,6 +274,30 @@ test("a first setup ticks no folder, and 수정 shows what the computer collects
   assert.deepEqual(ticked({ take: ["/w/a"], skip: ["/w/b"], rest: "skip" }, { edit: true }), ["/w/a"]);
 });
 
+test("the projects step shows the folders as a tree, a folder that only leads to one other joined to it", async () => {
+  const { folderTree, openAtFirst } = await import("../ui/lib/folder-tree.js");
+  const items = [
+    { path: "/Users/me/dev/app", display: "~/dev/app" },
+    { path: "/private/tmp", display: "/private/tmp", temp: true },
+    { path: "/Users/me", display: "~" },
+    { path: "/Users/me/dev/lib", display: "~/dev/lib" },
+    { path: "/Users/me/.claude/plugins/cache/x/0.3.10", display: "~/.claude/plugins/cache/x/0.3.10" },
+    { path: "/private/var/folders/ab/cd/T", display: "/private/var/folders/ab/cd/T", temp: true },
+  ];
+  // [label, the folder's own item, how many items are at or under it, the folders inside]
+  const shape = (nodes) => nodes.map((node) => [node.label, node.item?.path || null, node.items.length, ...(node.children.length ? [shape(node.children)] : [])]);
+  assert.deepEqual(shape(folderTree(items)), [
+    ["~", "/Users/me", 4, [
+      ["dev", null, 2, [["app", "/Users/me/dev/app", 1], ["lib", "/Users/me/dev/lib", 1]]],
+      [".claude/plugins/cache/x/0.3.10", "/Users/me/.claude/plugins/cache/x/0.3.10", 1],
+    ]],
+    ["/private", null, 2, [["tmp", "/private/tmp", 1], ["var/folders/ab/cd/T", "/private/var/folders/ab/cd/T", 1]]],
+  ]);
+  assert.deepEqual([...openAtFirst(items)], ["~", "/private"], "the top of each tree is open at first");
+  assert.deepEqual(shape(folderTree([{ path: "C:\\work\\a\\b", display: "C:\\work\\a\\b" }, { path: "C:\\work\\c", display: "C:\\work\\c" }])),
+    [["C:\\work", null, 2, [["a\\b", "C:\\work\\a\\b", 1], ["c", "C:\\work\\c", 1]]]], "a Windows path keeps its own separator");
+});
+
 test("the 프로젝트 폴더 line names the folders collected, never the hundreds left out", async () => {
   const { folderSummary } = await import("../ui/lib/collect.js");
   const skipped = Array.from({ length: 297 }, (_, index) => `/Users/me/dev/skipped-${index}`);

@@ -1218,6 +1218,19 @@ dialog.modal::backdrop { background: rgb(36 33 28 / 42%); }
 .pr .ch { line-height: 1.3; text-align: center; }
 .pr-c { display: flex; justify-content: center; }
 .pt-scroll { max-height: 340px; overflow-y: auto; }
+/* The same folders as a tree (lib/folder-tree.js): a row per folder, indented by depth. */
+.pr.t { grid-template-columns: minmax(0, 1fr) 84px; padding-top: 7px; padding-bottom: 7px; }
+.pr.t.h { padding-top: 8px; padding-bottom: 8px; }
+.pr .tn { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pr.grp .tn { cursor: pointer; }
+.tw { display: inline-grid; flex: none; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--ink-3); cursor: pointer; }
+button.tw:hover { background: var(--sunk); color: var(--ink); }
+.tw .icon { width: 14px; height: 14px; transform: rotate(-90deg); transition: transform 0.12s; }
+.tw[aria-expanded="true"] .icon { transform: none; }
+.pr .tl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr .tl b { font-weight: 600; }
+.pr .tl .th { margin-left: 8px; color: var(--ink-3); font-size: 12.5px; }
+.pr .tl .own { color: var(--ink-2); }
 .row2 { display: flex; align-items: center; gap: 12px; margin-top: 12px; font-size: 13.5px; }
 .row2 input[type="checkbox"] { margin: 0; }
 .row2.note { color: var(--ink-2); }

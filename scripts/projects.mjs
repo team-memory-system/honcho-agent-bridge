@@ -144,7 +144,7 @@ async function mapLimit(items, limit, run) {
 }
 
 /** Sessions run by automation (codex.mjs classifyAutomation), not by someone at a project. */
-function automationCwd(cwd) {
+export function automationCwd(cwd) {
   return cwd === "/" || cwd.replace(/\\/g, "/").includes("/.symphony/workspaces/");
 }
 
@@ -195,55 +195,13 @@ export function systemTempFolders(home) {
   return [...pairs].sort((left, right) => right[0].length - left[0].length);
 }
 
-/** The temporary folder `cwd` is, or is inside, as its real path, or null. */
+/**
+ * The temporary folder `cwd` is, or is inside, as its real path, or null: a session
+ * in /var/folders/…/T itself counts with those in /private/var/folders/…/T.
+ */
 function tempParent(cwd, temps) {
   for (const [name, folder] of temps) if (cwd === name || within(cwd, name)) return folder;
   return null;
-}
-
-/**
- * Whether `folder` is one an app keeps inside a hidden folder of `home`
- * (~/.pencil/documents/<id>). A repository there is a project: one checked out now,
- * or a working copy under a `worktrees` folder (~/.codex/worktrees/<id>/<repo>),
- * which was one even after it is removed.
- */
-function appFolder(folder, home) {
-  const relative = path.relative(home, folder);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
-  const parts = relative.split(/[\\/]+/);
-  if (parts.length < 2 || !parts[0].startsWith(".")) return false;
-  if (parts.slice(0, -1).includes("worktrees")) return false;
-  return !repositoryUnder(folder, path.join(home, parts[0]));
-}
-
-/** Whether a `.git` is at `folder` or above it, up to and including `top`. */
-function repositoryUnder(folder, top) {
-  for (let current = folder; ; current = path.dirname(current)) {
-    try {
-      fs.lstatSync(path.join(current, ".git"));
-      return true;
-    } catch {}
-    if (current === top || path.dirname(current) === current) return false;
-  }
-}
-
-const tempsOfHome = new Map();
-
-/**
- * Whether the project list leaves `cwd` out, so 새로 생기는 프로젝트 폴더도 수집 never
- * takes it either (targets.mjs): an automation run, the system's temporary folders,
- * and what an app keeps inside a hidden folder of home (~/.pencil/documents/<id>,
- * ~/.claude/plugins/cache/…). The hidden folder itself (~/.claude, opened to change
- * its settings) and a repository inside one (appFolder) are still projects.
- */
-export function unlistedFolder(cwd, { home = userHome(), temps } = {}) {
-  if (typeof cwd !== "string" || !cwd || !path.isAbsolute(cwd)) return false;
-  if (automationCwd(cwd)) return true;
-  const folder = path.resolve(cwd);
-  const root = path.resolve(home);
-  if (!temps && !tempsOfHome.has(root)) tempsOfHome.set(root, systemTempFolders(root));
-  if (tempParent(folder, temps || tempsOfHome.get(root))) return true;
-  return appFolder(folder, root);
 }
 
 /** The nearest folder at or above `directory` that holds a `.git`, or null. */
@@ -272,13 +230,13 @@ async function gitRoot(directory, memo) {
 /**
  * The project a session's folder belongs to, by the rule the list below uses: its
  * repository's root, else the folder that holds one-off folders, else the folder.
- * null for no folder, or one the list leaves out (unlistedFolder).
+ * null for no folder, or one only automation runs in.
  */
 export async function projectFolder(cwd, { home = userHome(), temps = systemTempFolders(path.resolve(home)), memo = new Map() } = {}) {
-  if (typeof cwd !== "string" || !cwd || !path.isAbsolute(cwd) || unlistedFolder(cwd, { home, temps })) return null;
+  if (typeof cwd !== "string" || !cwd || !path.isAbsolute(cwd) || automationCwd(cwd)) return null;
   const folder = path.resolve(cwd);
   const root = (await isDirectory(folder)) ? await gitRoot(folder, memo) : null;
-  return root || datedParent(folder) || folder;
+  return root || tempParent(folder, temps) || datedParent(folder) || folder;
 }
 
 /**
@@ -356,11 +314,11 @@ export async function projectScope(projectPath) {
 
 /**
  * This computer's conversation projects, newest first:
- * `{ ok: true, projects: [{ path, name, sessions, lastAt, agents: { claude, codex }, exists, git, folded, folders }], scanned, withoutFolder }`.
- * `git` is a repository root, `folded` a folder that holds one-off folders, and
- * `folders` how many distinct folders the sessions were opened in. Folders nobody
- * picks are left out (unlistedFolder); the `temp` option stands in for the system's
- * temporary folders (systemTempFolders).
+ * `{ ok: true, projects: [{ path, name, sessions, lastAt, agents: { claude, codex }, exists, git, folded, folders, temp }], scanned, withoutFolder }`.
+ * `git` is a repository root, `folded` a folder that holds one-off folders,
+ * `folders` how many distinct folders the sessions were opened in, and `temp` a
+ * temporary folder of the system's. The `temp` option stands in for those
+ * (systemTempFolders).
  */
 export async function conversationProjects({ config, home: given, temp } = {}) {
   const home = path.resolve(given || userHome());
@@ -388,7 +346,7 @@ export async function conversationProjects({ config, home: given, temp } = {}) {
       withoutFolder += 1;
       return;
     }
-    if (unlistedFolder(cwd, { home, temps })) return;
+    if (automationCwd(cwd)) return;
     const key = path.resolve(cwd);
     const entry = byCwd.get(key) || { sessions: [] };
     entry.sessions.push({ provider, mtimeMs });
@@ -400,7 +358,7 @@ export async function conversationProjects({ config, home: given, temp } = {}) {
   for (const [cwd, { sessions }] of byCwd) {
     const exists = await isDirectory(cwd);
     const root = exists ? await gitRoot(cwd, memo) : null;
-    const holder = root ? null : datedParent(cwd);
+    const holder = root ? null : tempParent(cwd, temps) || datedParent(cwd);
     const projectPath = root || holder || cwd;
     let project = projects.get(projectPath);
     if (!project) {
@@ -440,6 +398,7 @@ export async function conversationProjects({ config, home: given, temp } = {}) {
     git: project.git,
     folded: project.folded,
     folders: project.folders,
+    temp: temps.some(([, folder]) => folder === project.path),
     // The scope the project's conversations go to when it is opened to a teammate.
     scope: scopes[index].id,
   }));

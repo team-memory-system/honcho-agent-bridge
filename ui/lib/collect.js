@@ -7,7 +7,8 @@
 import { get, post } from "./api.js";
 import { h, clear } from "./dom.js";
 import { number } from "./format.js";
-import { field, folderTable, opt, opts } from "./kit.js";
+import { folderTreeTable, openAtFirst, treeRows } from "./folder-tree.js";
+import { field, opt, opts } from "./kit.js";
 import { details, notice, spinner, tag } from "./ui.js";
 
 export const AGENTS = { claude: "Claude Code", codex: "Codex" };
@@ -69,6 +70,8 @@ export function collectDraft(context) {
     rest: collect?.rest || "take",
     checked: null,
     projects: null,
+    // The folders shown open in the projects step's tree (lib/folder-tree.js).
+    open: null,
     // Other servers that also take chosen folders (targets): each kept with its folders,
     // and one more to add when `extra.on`.
     targets: (context?.targets || []).map((target) => ({
@@ -322,7 +325,7 @@ function chosenProjects(projects, agents) {
   return projects
     .map((project) => ({ ...project, count: [...agents].reduce((sum, name) => sum + Number(project.agents?.[name] || 0), 0) }))
     .filter((project) => project.count > 0)
-    .map((project) => ({ path: project.path, name: project.name, count: project.count, display: shortPath(project.path) }));
+    .map((project) => ({ path: project.path, name: project.name, count: project.count, display: shortPath(project.path), temp: Boolean(project.temp) }));
 }
 
 /**
@@ -378,6 +381,7 @@ export function projectsStep(draft, context, { edit = false } = {}) {
   loadProjects().then((all) => {
     draft.projects = chosenProjects(all, draft.agents || new Set(Object.keys(AGENTS)));
     if (!draft.checked) draft.checked = tickedFolders(draft.projects, context?.collect || null, { edit });
+    if (!draft.open) draft.open = openAtFirst(draft.projects);
     if (!draft.projects.length) {
       draft.rest = "take";
       restBox.checked = true;
@@ -385,7 +389,7 @@ export function projectsStep(draft, context, { edit = false } = {}) {
     } else if (servers.length) {
       clear(box, matrix(draft, servers, restBox, drawPast));
     } else {
-      clear(box, folderTable(draft.projects, draft.checked, { scroll: true, onChange: drawPast }));
+      clear(box, folderTreeTable(draft.projects, draft.checked, { open: draft.open, onChange: drawPast }));
     }
     drawPast();
   });
@@ -408,7 +412,7 @@ export function projectsStep(draft, context, { edit = false } = {}) {
 }
 
 /**
- * The folders as a table with a column for each server that takes them: the own
+ * The folders as a tree with a column for each server that takes them: the own
  * server's column is what this computer collects, each other server's the folders it
  * also gets. 새로 생기는 폴더 is the own server's alone: another server takes only the
  * folders named for it.
@@ -416,26 +420,15 @@ export function projectsStep(draft, context, { edit = false } = {}) {
 function matrix(draft, servers, restBox, onChange) {
   const columns = [{ label: "내 서버", folders: draft.checked, own: true }, ...servers];
   const template = { gridTemplateColumns: `minmax(0, 1fr) 70px ${columns.map(() => "96px").join(" ")}` };
-  const cell = (checked, change, { disabled = false, label } = {}) => {
-    const box = h("input", { type: "checkbox", checked, disabled, "aria-label": label });
-    box.addEventListener("change", () => change(box.checked));
-    return h("span", { class: "pr-c" }, box);
-  };
-  const rows = draft.projects.map((project) => h("div", { class: "pr m", style: template },
-    h("span", { class: "pn" }, h("b", {}, project.name), h("small", {}, project.display)),
-    h("span", { class: "c" }, `${number(project.count)}개`),
-    columns.map((column) => cell(column.folders.has(project.path), (on) => {
-      if (on) column.folders.add(project.path); else column.folders.delete(project.path);
-      onChange();
-    }, { label: `${project.name} → ${column.label}` }))));
+  const rows = treeRows(draft.projects, columns, { open: draft.open, template, onChange });
   restBox.addEventListener("change", onChange);
   return h("div", { class: "pt" },
     h("div", { class: "pr m g", style: template }, h("span", {}), h("span", {}), h("span", { class: "gl" }, "쌓을 곳")),
     h("div", { class: "pr m h", style: template }, h("span", {}, "폴더"), h("span", { class: "c" }, "대화"),
       columns.map((column) => h("span", { class: "ch" }, column.label, column.company ? [h("br"), tag("승인 요청", "warn")] : null))),
-    h("div", { class: "pt-scroll" }, rows),
+    rows.element,
     h("div", { class: "pr m", style: template }, h("span", { class: "pn" }, h("b", {}, "새로 생기는 폴더")), h("span", {}),
-      columns.map((column) => (column.own ? h("span", { class: "pr-c" }, restBox) : cell(false, () => {}, { disabled: true, label: `새로 생기는 폴더 → ${column.label}` })))));
+      columns.map((column) => (column.own ? h("span", { class: "pr-c" }, restBox) : h("span", { class: "pr-c" }, h("input", { type: "checkbox", disabled: true, "aria-label": `새로 생기는 폴더 → ${column.label}` }))))));
 }
 
 /** A short id for a server being added: it names a folder on this computer. */

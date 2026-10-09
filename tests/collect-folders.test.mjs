@@ -184,11 +184,10 @@ test("the folder choice is read from config, travels in the environment, and nev
   assert.equal(outsideCollectFolders("/", skipping, posix), true, "an automation run at / is not a folder made later");
   assert.equal(outsideCollectFolders("/home/me/.symphony/workspaces/T-1", skipping, posix), true, "nor is a Symphony workspace");
   assert.equal(outsideCollectFolders("/", only, posix), true);
-  // Nor are a temporary folder and an app's folder inside a hidden one, which the list leaves out too.
-  assert.equal(outsideCollectFolders("/tmp/try-1", skipping, posix), true, "a temporary folder is not a folder made later");
-  assert.equal(outsideCollectFolders("/home/me/.pencil/documents/0f4c2a9e", skipping, posix), true, "nor is an app's folder in a hidden one");
-  assert.equal(outsideCollectFolders("/home/me/.claude", skipping, posix), false, "the hidden folder itself is");
-  assert.equal(outsideCollectFolders("/tmp/try-1", { take: ["/tmp"], skip: [], rest: "take" }, posix), false, "a temporary folder named in the choice is taken");
+  // A temporary folder and an app's folder inside a hidden one are folders like any other.
+  assert.equal(outsideCollectFolders("/tmp/try-1", skipping, posix), false, "a temporary folder made later goes by the rest");
+  assert.equal(outsideCollectFolders("/home/me/.pencil/documents/0f4c2a9e", skipping, posix), false, "so does an app's folder in a hidden one");
+  assert.equal(outsideCollectFolders("/tmp/try-1", { take: [], skip: ["/tmp"], rest: "take" }, posix), true, "a temporary folder skipped by name is skipped");
   // The home folder skipped, a repository inside it taken: the deeper one decides.
   const nested = { take: ["/home/me/dev/app"], skip: ["~"], rest: "take" };
   assert.equal(outsideCollectFolders("/home/me", nested, posix), true, "a session in the home folder itself is skipped");
