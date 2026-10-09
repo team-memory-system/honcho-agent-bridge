@@ -51,9 +51,10 @@ question and gets an answer, without reading the underlying messages.
    on it is a link. 기억 reads and searches the memories and asks Honcho or a
    gateway model. 기억 설정 is three blocks whose buttons open windows: 대화 수집's
    수정 is first setup's own steps, other servers and per-folder choices included;
-   MCP 도구; ChatGPT 기록. 팀 holds teammates' memories behind a switch each, and
-   조회 기록. 서버 runs the server (기억 서버); on 모델, the subscription accounts,
-   the model the server uses and the embedding model; and on 공유, it opens the
+   MCP 도구; ChatGPT 기록. 팀 holds teammates' memories behind a switch each.
+   조회 기록 lists who asked this computer's memory what. 서버 runs the server
+   (기억 서버); on 모델, the subscription accounts, the model the server uses and
+   the embedding model; and on 공유, it opens the
    server to the owner's other computers and the team. 백업 copies the raw
    conversations every day at the hour chosen. 관리자, shown only on the computer
    that made the team, holds the team list, the 팀 주소 and the Cloudflare token. A
@@ -791,7 +792,7 @@ Then it writes `HONCHO_TUNNEL_TOKEN`, `HONCHO_ACCESS_TEAM_DOMAIN`, `HONCHO_ACCES
 
 ### Who asked, and Jev / 조회 기록과 Jev
 
-팀 → 조회 기록 lists every call that reached `mcp`: when, who (the email the gate verified), the question, and whether it passed, was refused or failed. The bridge writes each call to `honcho_audit.tool_calls`; the dashboard reads them from the bridge's `GET http://mcp:8765/audit` with `Authorization: Bearer <HONCHO_TEAM_MCP_TOKEN>` (`HONCHO_MCP_AUDIT_URL`, `HONCHO_MCP_BEARER_TOKEN` on the dashboard, `HONCHO_AUDIT_READ=1` on `mcp`), and the app relays `/api/dashboard/audit` to the dashboard. `/audit` is outside `/mcp`, so the gate never passes it on, and `mcp` has no host port. While sharing is off there is no `mcp`: the dashboard answers 502 and the screen says sharing is off. The records stay in the database and show again once it is on.
+조회 기록 lists every call that reached `mcp`: when, who (the email the gate verified), the question, and whether it passed, was refused or failed. The bridge writes each call to `honcho_audit.tool_calls`; the dashboard reads them from the bridge's `GET http://mcp:8765/audit` with `Authorization: Bearer <HONCHO_TEAM_MCP_TOKEN>` (`HONCHO_MCP_AUDIT_URL`, `HONCHO_MCP_BEARER_TOKEN` on the dashboard, `HONCHO_AUDIT_READ=1` on `mcp`), and the app relays `/api/dashboard/audit` to the dashboard. `/audit` is outside `/mcp`, so the gate never passes it on, and `mcp` has no host port. While sharing is off there is no `mcp`: the dashboard answers 502 and the screen says sharing is off. The records stay in the database and show again once it is on.
 
 Jev judges each teammate's `chat` before it reaches the memory, and refuses a question about the owner's private life rather than shared work. A refused question is recorded as `denied` with its score, and a question let through without a judgment carries the reason on its row.
 

@@ -6,8 +6,8 @@
 // its row's switch takes it out and puts it back. 내 기억을 여는 팀원 is the other
 // way: what this computer's server opened to whom (its gate's access.json), with
 // 수정 for the projects and for closing it again, and who collects into it. Who
-// asked my memory is 조회 기록 (audit.js). A team login that ended says so, with
-// 다시 로그인, instead of the screen.
+// asked my memory is the 조회 기록 menu (audit.js). A team login that ended says so,
+// with 다시 로그인, instead of the screen.
 import { post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { confirmWindow, list, listItem } from "../lib/kit.js";
@@ -148,11 +148,7 @@ export default {
       clear(body,
         missing.length ? notice("warn", `${missing.join(", ")}가 이 컴퓨터에 없어 그쪽에는 넣지 않습니다.`) : null,
         list({ title: "팀원 기억", empty: "아직 다른 팀원이 없습니다." }, mates),
-        granted ? list({
-          title: "내 기억을 여는 팀원",
-          actions: [button("조회 기록", { kind: "small", onClick: () => go("audit") })],
-          empty: "아직 없습니다.",
-        }, granted) : null);
+        granted ? list({ title: "내 기억을 여는 팀원", empty: "아직 없습니다." }, granted) : null);
     }
 
     /** What this computer's server opened to whom: chat with its projects, or collecting into it. */

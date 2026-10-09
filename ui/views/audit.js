@@ -1,19 +1,23 @@
-// 조회 기록, under 팀: every call that reached the memory server's MCP bridge, newest
-// first, with what was asked. The dashboard reads at most 1000 rows at a time and
-// has no cursor, so "더 보기" asks again with a larger limit up to that cap.
+// 조회 기록, a menu of its own: every call that reached the memory server's MCP
+// bridge, newest first, with what was asked. It is built from the parts the other
+// screens use: chips for the result with the period's counts, a list a day as on
+// 팀, and a window with all there is about one call. The dashboard reads at most
+// 1000 rows at a time and has no cursor, so "더 보기" asks again with a larger limit
+// up to that cap.
 import { get } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { fullDate, number } from "../lib/format.js";
-import { TOOL_INFO } from "../lib/tools.js";
+import { kv, list, listItem, modal } from "../lib/kit.js";
 import { button, busy, details, empty, errorNotice, notice, pageHead, spinner, tag } from "../lib/ui.js";
 
 const STEP = 200;
 const CAP = 1000;
 const PERIODS = [["1", "1시간"], ["24", "24시간"], ["168", "7일"], ["720", "30일"], ["", "전체 기간"]];
-const RESULTS = [["", "모든 결과"], ["ok", "통과"], ["denied", "거부"], ["error", "오류"]];
+const RESULTS = [["", "전체"], ["ok", "통과"], ["denied", "거부"], ["error", "오류"]];
 const STATUS = { ok: ["통과", "ok"], denied: ["거부", "bad"], error: ["오류", "warn"] };
 
-const clock = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+const clock = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const seconds = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 const dayName = new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", weekday: "short" });
 const longDay = new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
 
@@ -32,179 +36,180 @@ function dayLabel(value) {
   return date.getFullYear() === today.getFullYear() ? label : `${date.getFullYear()}년 ${label}`;
 }
 
-function rowKey(row) {
-  return row.id != null ? String(row.id) : `${row.at}|${row.tool}|${row.caller}`;
+/**
+ * Why a call was refused, failed or went through without a judgment, in a few
+ * words; null for a plain pass. The bridge's own words stay in the call's window.
+ */
+function reasonOf(row) {
+  const error = String(row.error || "").split("\n")[0].trim();
+  if (!error) return null;
+  if (row.status === "error") return error;
+  if (row.status === "denied") {
+    if (error === "out of scope") return "사적인 질문으로 판정";
+    if (error.startsWith("That project is not open")) return "열지 않은 프로젝트";
+    if (error.startsWith("jev unavailable")) return "Jev가 답하지 않아 거부";
+    return error;
+  }
+  if (error.startsWith("not judged")) return "판정 없이 통과 · 팀에 Jev 키 없음";
+  if (error.startsWith("jev unavailable")) return "판정 없이 통과 · Jev가 답하지 않음";
+  return error;
+}
+
+/** The project a teammate asked about: the one named, else the ones open to them. */
+function projectOf(row) {
+  const args = row.arguments || {};
+  if (typeof args.project === "string" && args.project) return args.project;
+  return (Array.isArray(args.projects) ? args.projects : []).map((item) => item?.name || item?.id).filter(Boolean).join(", ");
+}
+
+function scoreOf(row) {
+  return row.jev_score == null ? "" : Number(row.jev_score).toFixed(2);
+}
+
+/** Everything the log holds about one call. */
+function openCall(row) {
+  const [label, kind] = STATUS[row.status] || [row.status || "?", ""];
+  const reason = reasonOf(row);
+  const project = projectOf(row);
+  const at = new Date(row.at);
+  const win = modal({ title: "조회 한 건", big: true, small: true });
+  win.body(
+    h("div", { class: "audit-label" }, "물은 것"),
+    h("pre", { class: "audit-full" }, row.query_text || "원문 없음"),
+    h("div", { class: "audit-facts" },
+      kv("결과", [tag(label, kind), reason ? h("div", { class: "s" }, reason) : null]),
+      kv("누가", [row.caller || "알 수 없음", row.caller_source ? h("div", { class: "s" }, row.caller_source) : null]),
+      kv("언제", `${longDay.format(at)} ${seconds.format(at)}`),
+      project ? kv("프로젝트", project) : null,
+      row.jev_score != null ? kv("Jev 점수", [scoreOf(row), h("div", { class: "s" }, "1에 가까울수록 사적인 질문입니다.")]) : null,
+      kv("도구", h("span", { class: "mono" }, row.tool || "")),
+      row.duration_ms != null ? kv("걸린 시간", `${number(row.duration_ms)}ms`) : null),
+    row.error ? details("서버가 남긴 이유 원문", row.error) : null,
+    row.arguments ? details("보낸 인자 전체", row.arguments) : null,
+  );
+  win.foot(null, button("닫기", { kind: "quiet", onClick: () => win.close() }));
+  win.open();
 }
 
 export default {
   title: "조회 기록",
   async mount(page) {
-    const head = { title: "조회 기록", subtitle: "누가 내 기억에 무엇을 물었는지, 거부된 것까지 그대로 남깁니다.", back: { href: "#/team", label: "팀" } };
     const filters = { hours: "24", status: "", tool: "", caller: "" };
     let limit = STEP;
     let rows = [];
     let summary = {};
     let request = 0;
-    const expanded = new Set();
-    let bridgeTools = [];
+    // Who asked and with which tool, kept across loads, so a filter can be undone.
+    const callers = new Set();
+    const tools = new Set();
 
-    const select = (options, value, label, onChange) => {
-      const control = h("select", { class: "select", "aria-label": label },
-        options.map(([key, text]) => h("option", { value: key, selected: key === value ? true : null }, text)));
+    const select = (label, onChange) => {
+      const control = h("select", { class: "select", "aria-label": label });
       control.addEventListener("change", () => onChange(control.value));
       return control;
     };
-    const period = select(PERIODS, filters.hours, "기간", (value) => { filters.hours = value; load(); });
-    const result = select(RESULTS, filters.status, "결과", (value) => { filters.status = value; load(); });
-    const tool = select([["", "모든 도구"]], "", "도구", (value) => { filters.tool = value; load(); });
-    const callers = h("datalist", { id: "audit-callers" });
-    const caller = h("input", { class: "input", type: "search", list: "audit-callers", placeholder: "호출자 (정확히)", "aria-label": "호출자", autocomplete: "off" });
-    caller.addEventListener("change", () => {
-      if (caller.value.trim() === filters.caller) return;
-      filters.caller = caller.value.trim();
-      load();
-    });
+    const options = (control, choices, value) => clear(control,
+      choices.map(([key, text]) => h("option", { value: key, selected: key === value ? true : null }, text)));
+    const period = select("기간", (value) => { filters.hours = value; load(); });
+    const caller = select("누가", (value) => { filters.caller = value; load(); });
+    const tool = select("도구", (value) => { filters.tool = value; load(); });
+    options(period, PERIODS, filters.hours);
 
-    const refresh = button("새로 고침", { kind: "quiet", iconName: "refresh", onClick: (event) => busy(event.currentTarget, () => load({ keepLimit: true })) });
-    const stats = h("div", { class: "audit-stats" });
-    const list = h("div", {}, h("div", { class: "empty" }, spinner()));
+    const refresh = button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침", onClick: (event) => busy(event.currentTarget, () => load({ keepLimit: true })) });
+    const chips = h("div", { class: "chips" });
+    const pickers = h("div", { class: "audit-pickers" });
+    const bar = h("div", { class: "audit-bar", hidden: true }, chips, pickers);
+    const days = h("div", { class: "audit-days" }, h("div", { class: "empty" }, spinner()));
     const more = h("div", { class: "audit-more" });
 
     page.append(
-      pageHead({ ...head, actions: [refresh] }),
-      h("div", { class: "audit-filters" }, period, result, tool, caller, callers),
-      h("div", { class: "page-body" }, h("div", { class: "pad wide" }, stats, list, more)),
+      pageHead({ title: "조회 기록", subtitle: "누가 내 기억에 무엇을 물었는지, 거부된 것까지 그대로 남깁니다.", actions: [refresh] }),
+      h("div", { class: "page-body" }, h("div", { class: "pad stack" }, bar, days, more)),
     );
 
-    function toolOptions() {
-      const names = new Set([...(bridgeTools.length ? bridgeTools : Object.keys(TOOL_INFO)), ...rows.map((row) => row.tool).filter(Boolean)]);
-      if (filters.tool) names.add(filters.tool);
-      clear(tool, h("option", { value: "" }, "모든 도구"),
-        [...names].sort().map((name) => h("option", { value: name, selected: name === filters.tool ? true : null }, name)));
-    }
-
-    function drawStats() {
+    function drawControls() {
+      // The period's counts do not follow the person chosen, so they are left off then.
+      const counted = !filters.caller;
       const counts = { ok: summary.ok || 0, denied: summary.denied || 0, error: summary.error || 0 };
-      const total = counts.ok + counts.denied + counts.error;
-      const span = PERIODS.find(([key]) => key === filters.hours)?.[1] || "";
-      const stat = (key, label, value, kind = "") => h("button", {
+      counts[""] = counts.ok + counts.denied + counts.error;
+      clear(chips, RESULTS.map(([key, label]) => h("button", {
+        class: "chip",
         type: "button",
-        class: `stat ${kind}`,
         "aria-pressed": String(filters.status === key),
-        title: key ? `${label}만 보기` : "모든 결과 보기",
-        onclick: () => { filters.status = key; result.value = key; load(); },
-      }, h("small", {}, label), h("b", { class: "num" }, number(value)));
-      clear(stats,
-        stat("", `${span} 전체`, total),
-        stat("ok", "통과", counts.ok, "ok"),
-        stat("denied", "거부", counts.denied, "bad"),
-        stat("error", "오류", counts.error, "warn"),
-      );
+        onclick: () => { if (filters.status !== key) { filters.status = key; load(); } },
+      }, label, counted ? h("span", { class: `chip-n ${key === "denied" && counts.denied ? "bad" : ""}` }, number(counts[key])) : null)));
+
+      options(caller, [["", "모든 사람"], ...[...callers].sort().map((name) => [name, name])], filters.caller);
+      options(tool, [["", "모든 도구"], ...[...tools].sort().map((name) => [name, name])], filters.tool);
+      // The team server answers `chat` alone; a choice of one tool is no choice.
+      clear(pickers, period, callers.size ? caller : null, tools.size > 1 || filters.tool ? tool : null);
+      bar.hidden = false;
     }
 
     function entry(row) {
       const [label, kind] = STATUS[row.status] || [row.status || "?", ""];
-      const key = rowKey(row);
-      const line = h("tr", {
-        class: `entry ${row.status || ""}`,
-        tabindex: "0",
-        "aria-expanded": String(expanded.has(key)),
-        title: "눌러서 펼치기",
-      },
-        h("td", { class: "t-when num", title: fullDate(row.at) }, clock.format(new Date(row.at))),
-        h("td", { class: "t-status" }, tag(label, kind)),
-        h("td", { class: "t-who" }, row.caller || h("span", { class: "muted" }, "알 수 없음")),
-        h("td", { class: "t-tool" }, h("code", { class: "mono" }, row.tool || "")),
-        h("td", { class: "t-q" }, row.query_text || h("span", { class: "muted" }, "원문 없음"),
-          row.error ? h("div", { class: "err" }, row.error) : null),
-      );
-      const toggle = (event) => {
-        if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
-        if (event.type === "click" && window.getSelection()?.toString()) return;
+      const sub = [row.caller || "알 수 없음", projectOf(row), reasonOf(row), row.jev_score != null ? `Jev ${scoreOf(row)}` : ""].filter(Boolean).join(" · ");
+      const item = listItem({
+        title: [tag(label, kind), h("span", { class: "audit-q" }, row.query_text || "원문 없음")],
+        sub,
+        end: h("span", { class: "audit-time", title: fullDate(row.at) }, clock.format(new Date(row.at))),
+      });
+      item.classList.add("audit-row");
+      item.tabIndex = 0;
+      item.setAttribute("role", "button");
+      item.setAttribute("aria-label", `${label}: ${row.query_text || "원문 없음"}`);
+      item.addEventListener("click", () => { if (!window.getSelection()?.toString()) openCall(row); });
+      item.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
-        if (expanded.has(key)) {
-          expanded.delete(key);
-          if (line.nextElementSibling?.classList.contains("detail")) line.nextElementSibling.remove();
-        } else {
-          expanded.add(key);
-          line.after(detail(row));
-        }
-        line.setAttribute("aria-expanded", String(expanded.has(key)));
-      };
-      line.addEventListener("click", toggle);
-      line.addEventListener("keydown", toggle);
-      return expanded.has(key) ? [line, detail(row)] : [line];
-    }
-
-    function detail(row) {
-      const facts = [
-        ["언제", `${longDay.format(new Date(row.at))} ${clock.format(new Date(row.at))}`],
-        ["누가", [row.caller, row.caller_source ? `(${row.caller_source})` : ""].filter(Boolean).join(" ")],
-        ["브리지", row.bridge],
-        ["workspace", row.workspace_id],
-        ["걸린 시간", row.duration_ms != null ? `${number(row.duration_ms)}ms` : ""],
-        ["판정 점수", row.jev_score != null ? String(row.jev_score) : ""],
-      ].filter(([, value]) => value);
-      return h("tr", { class: "detail" }, h("td", { colspan: "5" },
-        h("div", { class: "audit-detail" },
-          h("div", {}, h("div", { class: "k" }, "물은 것"), h("pre", { class: "full" }, row.query_text || "원문 없음")),
-          row.error ? h("div", {}, h("div", { class: "k" }, "오류"), h("pre", { class: "full err" }, row.error)) : null,
-          h("dl", { class: "facts" }, facts.map(([name, value]) => [h("dt", {}, name), h("dd", {}, value)])),
-          row.arguments ? details("보낸 인자 전체", row.arguments) : null,
-        ),
-      ));
+        openCall(row);
+      });
+      return item;
     }
 
     function drawRows() {
       if (!rows.length) {
-        clear(list, empty("조건에 맞는 호출이 없습니다", "기간을 넓히거나 조건을 풀어 보세요."));
+        clear(days, empty("조건에 맞는 호출이 없습니다", "기간을 넓히거나 조건을 풀어 보세요."));
         return;
       }
-      const body = [];
-      let day = "";
+      const groups = [];
       for (const row of rows) {
         const key = dayKey(row.at);
-        if (key !== day) {
-          day = key;
-          body.push(h("tr", { class: "day" }, h("th", { colspan: "5", scope: "rowgroup" }, dayLabel(row.at))));
-        }
-        body.push(...entry(row));
+        if (groups.at(-1)?.key !== key) groups.push({ key, label: dayLabel(row.at), rows: [] });
+        groups.at(-1).rows.push(row);
       }
-      clear(list, h("table", { class: "log-table" },
-        h("colgroup", {}, h("col", { class: "c-when" }), h("col", { class: "c-status" }), h("col", { class: "c-who" }), h("col", { class: "c-tool" }), h("col", {})),
-        h("thead", {}, h("tr", {}, ["시각", "결과", "누가", "도구", "물은 것"].map((label) => h("th", { scope: "col" }, label)))),
-        h("tbody", {}, body),
-      ));
+      clear(days, groups.map((group) => list({ title: group.label }, group.rows.map(entry))));
     }
 
     function drawMore() {
       if (!rows.length) { clear(more); return; }
-      const shown = h("span", { class: "muted" }, `최근 ${number(rows.length)}건`);
       if (rows.length < limit) {
         clear(more, h("span", { class: "muted" }, `조건에 맞는 ${number(rows.length)}건을 모두 보였습니다.`));
       } else if (limit < CAP) {
-        clear(more, shown, button(`더 보기 (+${Math.min(STEP, CAP - limit)})`, {
+        clear(more, h("span", { class: "muted" }, `최근 ${number(rows.length)}건`), button(`더 보기 (+${Math.min(STEP, CAP - limit)})`, {
+          kind: "small",
           onClick: (event) => busy(event.currentTarget, async () => {
             limit = Math.min(CAP, limit + STEP);
             await load({ keepLimit: true });
           }),
         }));
       } else {
-        clear(more, notice("", h("b", {}, `한 번에 ${number(CAP)}건까지 봅니다.`), " 더 오래된 호출은 기간을 좁히거나 결과·도구·호출자로 걸러서 보세요."));
+        clear(more, notice("", h("b", {}, `한 번에 ${number(CAP)}건까지 봅니다.`), " 더 오래된 호출은 기간을 좁히거나 결과·사람으로 걸러서 보세요."));
       }
     }
 
     function drawUnavailable(node) {
-      clear(stats);
+      // With nothing to filter, the notice takes the bar's place.
+      bar.hidden = true;
       clear(more);
-      clear(list, node);
+      clear(days, node);
     }
 
     async function load({ keepLimit = false } = {}) {
       const id = ++request;
       if (!keepLimit) {
         limit = STEP;
-        clear(list, h("div", { class: "empty" }, spinner()));
+        clear(days, h("div", { class: "empty" }, spinner()));
         clear(more);
       }
       const query = new URLSearchParams({ limit: String(limit) });
@@ -218,11 +223,13 @@ export default {
         }
         rows = data.rows || [];
         summary = data.summary || {};
-        drawStats();
+        for (const row of rows) {
+          if (row.caller) callers.add(row.caller);
+          if (row.tool) tools.add(row.tool);
+        }
+        drawControls();
         drawRows();
         drawMore();
-        toolOptions();
-        clear(callers, [...new Set(rows.map((row) => row.caller).filter(Boolean))].sort().map((name) => h("option", { value: name })));
       } catch (error) {
         if (id !== request) return;
         // The dashboard names the address it could not reach (audit_url) when the team
@@ -235,11 +242,6 @@ export default {
       }
     }
 
-    toolOptions();
-    get("/api/dashboard/mcp/tools").then((data) => {
-      bridgeTools = (data.tools || []).map((item) => item.name).filter(Boolean);
-      toolOptions();
-    }).catch(() => {});
     await load();
   },
 };

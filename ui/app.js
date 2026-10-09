@@ -35,11 +35,14 @@ const NAV = [
   ["memory", "기억", "memory"],
   ["computer", "기억 설정", "sliders"],
   ["team", "팀", "person"],
+  ["audit", "조회 기록", "log"],
   ["server", "서버", "server"],
   ["backup", "백업", "backup"],
   ["admin", "관리자", "shield"],
 ];
 const APART = new Set(["admin"]);
+// What the quick-jump palette also finds a menu item by.
+const NAV_WORDS = { audit: "로그 누가 내 기억에 물었나" };
 
 // Where an address from before the menus were regrouped (0.4.5), a page that moved
 // to another menu since (0.4.7, 0.4.8), or a page that became a window on its menu's
@@ -66,6 +69,7 @@ const MOVED = {
 const SHELL_ICONS = {
   lock: '<rect x="3.5" y="7" width="9" height="6.5" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/>',
   backup: '<path d="M8 2.5v7M5 7l3 3 3-3"/><path d="M2.5 10.5v3h11v-3"/>',
+  log: '<rect x="3" y="2.5" width="10" height="11" rx="1"/><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3"/>',
 };
 function glyph(name) {
   const body = SHELL_ICONS[name];
@@ -98,7 +102,6 @@ function movedTo() {
 
 /** The menu item a screen sits under: its tab group's first screen, or itself. */
 function menuOf(name) {
-  if (name === "audit") return "team";
   return Object.values(TABS).find((screens) => screens.some(([screen]) => screen === name))?.[0][0] || name;
 }
 
@@ -343,7 +346,7 @@ async function probeAudit() {
 
 function palette() {
   const entries = [
-    ...navItems().map(([name, label]) => ({ label, hint: "화면", screen: name, run: () => go(name) })),
+    ...navItems().map(([name, label]) => ({ label, hint: "화면", words: NAV_WORDS[name], screen: name, run: () => go(name) })),
     { label: "기억에서 찾기", hint: "기억", screen: "memory", run: () => { go("memory"); setTimeout(() => $("#memory-search")?.focus(), 50); } },
     { label: "내 기억에 묻기", hint: "기억", screen: "ask", run: () => go("ask") },
     { label: "대화 수집 수정", hint: "기억 설정", words: "서버 에이전트 프로젝트 폴더 회사 서버", screen: "computer", run: () => go("computer/collect") },
@@ -351,7 +354,6 @@ function palette() {
     { label: "ChatGPT 기록 가져오기", hint: "기억 설정", screen: "computer", run: () => go("computer/import") },
     { label: "구독 계정 더하기", hint: "서버", screen: "models", run: () => go("models") },
     { label: "공유", hint: "서버", words: "다른 컴퓨터 붙이기 서버 token 팀 만들기 초대 코드", screen: "share", run: () => go("share") },
-    { label: "조회 기록", hint: "팀", words: "누가 내 기억에 물었나", screen: "audit", run: () => go("audit") },
     { label: "대화 원본 백업", hint: "백업", screen: "backup", run: () => go("backup") },
     { label: "처음 설정 다시 하기", hint: "시작하기", screen: "", run: () => go("start") },
   ].filter((entry) => !entry.screen || visible(entry.screen))
