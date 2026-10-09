@@ -427,9 +427,16 @@ node scripts/cli.mjs setup apply --all-folders                         # every f
   a session ran in decides, so a repository taken inside a skipped home folder is
   still taken, and the other way round; a folder in both is skipped. A session in
   none of them, folders made later included, goes by `rest` (`take` unless
-  `--rest-folders skip`). An automation run (a session at `/` or in a Symphony
-  workspace) is in no folder the list shows, so `rest` never takes it. Without any
-  of these options setup keeps what is saved.
+  `--rest-folders skip`). A folder the list leaves out is never taken by `rest`: an
+  automation run (a session at `/` or in a Symphony workspace), the system's
+  temporary folders (`/tmp`, `/var/folders/…`), and what an app keeps inside a hidden
+  folder of home (`~/.pencil/documents/<id>`, `~/.claude/plugins/cache/…`). The hidden
+  folder itself and a repository inside one (a worktree under a `worktrees` folder,
+  even one removed since) are listed as usual. Naming such a folder in `take` still
+  takes it. Without any of these options setup keeps what is saved.
+- A session with nothing said in it (only tool output, or a bare slash command) makes
+  no conversation on the server. A Claude Code session's folder is the first one its
+  transcript records, on any line, the same one the list counts it under.
 - The collector reads the choice from `HONCHO_AGENT_COLLECT_FOLDERS`, which
   `configEnvironment` sets for the own server's runs only; a target keeps its own
   folders. A ChatGPT import has no folder and is never held back by it.
@@ -498,8 +505,11 @@ For development or recovery, the same deterministic workflow is available direct
 node scripts/cli.mjs detect
 node scripts/cli.mjs server plan --profile personal
 node scripts/cli.mjs server prepare --profile personal
-# If it returns nextAction "gateway-login": open the app's gateway screen, log in
-# there with Codex and/or Claude, then rerun prepare.
+# If it returns nextAction "gateway-login" on a computer not set up yet (detect's
+# configured: false), the app shows its first setup window over every screen: open
+# it with `ui open --screen start` and apply it; it logs in and does the rest below.
+# On a computer already set up, open 서버 → 모델, log in there with Codex and/or
+# Claude, then rerun prepare.
 node scripts/cli.mjs ui open --screen models
 node scripts/cli.mjs server start --profile personal
 node scripts/cli.mjs server status --profile personal
@@ -523,7 +533,11 @@ screen. This needs subscription-gateway `03aa85d` or newer.
 - **Codex:** the browser stops on a `localhost:1455/auth/callback?…` address that
   does not load. Paste the whole address. It goes to `/api/gw/api/login/callback`,
   and the gateway replays it on its own computer.
-- **취소:** sends `/api/gw/api/login/cancel`.
+- **취소:** sends `/api/gw/api/login/cancel`. An account that 계정 추가 (or the first
+  setup's login) added for this login is then removed again with
+  `/api/gw/api/accounts/remove`, so no account that never logged in is left ahead of
+  the others; the same happens when the login's window is closed or the 5 minutes
+  run out.
 
 The relay sends no `Origin`, which the gateway's same-origin rule accepts. An older
 gateway sends no sign-in prompt, and the screen shows the old "브라우저에 열린 로그인
@@ -642,7 +656,10 @@ Then, in the app's first setup (새 팀 만들기) or in a terminal:
 CLOUDFLARE_API_TOKEN='<api token>' node scripts/cli.mjs team make --name '<team name>' --email <admin's Google email> [--zone <zone>] [--hub team] [--idp <id|name>]
 ```
 
-`--idp` is needed only when Zero Trust has more than one Google login.
+`--idp` is needed only when Zero Trust has more than one Google login. When the token
+sees more than one zone or Zero Trust has more than one Google login and none was
+named, `team make` changes nothing and answers with `choose` (`zone` or `idp`) and
+`choices`; the app's 새 팀 만들기 then lists them at the top of the window to pick one.
 
 `team make` keeps the roster in the reusable Access policy "Team Memory people" (the
 admin's email first), makes the policy "Team Memory everyone" and the hub's Access
@@ -655,7 +672,9 @@ server address. Its `workers.dev` address is turned off and it answers at
 `team.<zone>` through a Workers custom domain. What it made goes into
 `runtime/team-access.json`, and the token into `runtime/cloudflare/api-token`. Running
 it again (a new token: 관리자 → token 바꾸기) deploys the hub again and keeps the team,
-which lives in the Durable Object.
+which lives in the Durable Object. The hub makes the email `--email` names an admin
+once, on its first request after that deploy, so running it again with another email
+adds that admin; an admin taken off or removed in 관리자 is not made one again.
 
 ### Joining, and a server of one's own / 팀에 들어가기
 
@@ -732,6 +751,11 @@ everything the owner has to answer, or the asker has to press, goes to the bell.
 팀원 더하기 takes a Google email and nothing else; the hub adds it to the roster and
 to the people policy. 팀에서 빼기 takes it off both, removes that person's server
 address and closes their requests, so they can no longer log in, ask or collect.
+관리자로 바꾸기 makes a teammate an admin, and 관리자에서 빼기 takes it away from
+another admin (`PUT /api/admin/people/<email>` with `{admin}`); no admin takes it
+from themselves, so the team always keeps one. The teammate's app takes it from the
+hub whenever it reads the team (the 팀 page, the bell) and shows or hides 관리자 once
+the page loads again.
 On the computer that made the team, the Cloudflare block holds the zone and
 token 바꾸기.
 
@@ -938,9 +962,10 @@ conversations (`target backfill`) once 적용 is pressed. The projects offered
 are the folders this computer's Claude Code and Codex conversations were held in
 (`GET /api/app/projects`, `scripts/projects.mjs`, reading the same transcripts as
 `target backfill`). A folder counts under the repository it sits in. Outside a
-repository, one-off folders count under the folder that holds them: anything in the
-system's temporary folder, and a folder whose name starts with a date, as the Codex
-app's `~/Documents/Codex/<date>-<task>`.
+repository, one-off folders count under the folder that holds them: a folder whose
+name starts with a date, as the Codex app's `~/Documents/Codex/<date>-<task>`. The
+system's temporary folders and an app's folders inside a hidden one are not listed
+(see the folder choice above).
 
 On disk, each target keeps its own directory, `<data>/targets/<id>/`:
 `spool/<agent>/pending/` (turns waiting for it), `state/<agent>.json` (what it has
