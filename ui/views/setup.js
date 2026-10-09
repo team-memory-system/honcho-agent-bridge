@@ -533,7 +533,8 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     const ok = await panel.done;
     task.accountId = panel.account();
     task.extra = null;
-    if (!ok) throw new Error("로그인하지 못했습니다. 다시 시도를 누르면 새로 로그인합니다.");
+    // The panel goes with the reason it showed, so the reason stays on the task's line.
+    if (!ok) throw new Error(`${panel.reason() || "로그인하지 못했습니다."} 다시 시도를 누르면 새로 로그인합니다.`);
   }
 
   async function prepareAgain() {

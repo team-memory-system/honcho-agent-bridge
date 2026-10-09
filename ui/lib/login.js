@@ -59,6 +59,14 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
     turning.style.visibility = "hidden";
     finish(result);
   };
+  // Why the login stopped, kept apart from what to press: a screen that drops the
+  // panel when it fails says the reason with its own button.
+  let reason = "";
+  const fail = (why, next = "") => {
+    reason = why;
+    say(next ? `${why} ${next}` : why, true);
+    stop(false);
+  };
 
   function show(prompt) {
     if (!prompt) {
@@ -94,8 +102,7 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
   async function poll() {
     if (Date.now() - since > LOGIN_WAIT_MS) {
       await gateway.post("/login/cancel", { account: accountId }).catch(() => {});
-      say("로그인을 5분 동안 기다렸지만 끝나지 않았습니다. 다시 하세요.", true);
-      stop(false);
+      fail("로그인을 5분 동안 기다렸지만 끝나지 않았습니다.", "다시 하세요.");
       return;
     }
     try {
@@ -104,8 +111,7 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
       if (account?.login?.loggedIn) {
         const connected = await gateway.post("/connect", {}).catch((error) => ({ ok: false, error: error.message }));
         if (connected.ok === false) {
-          say(`로그인은 됐지만 연결하지 못했습니다: ${connected.error || ""}`, true);
-          stop(false);
+          fail(`로그인은 됐지만 연결하지 못했습니다: ${connected.error || ""}`);
           return;
         }
         say(`${account.login.account || backendName(backend)} 로그인을 마쳤습니다.`);
@@ -138,7 +144,8 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
     if (cancel.disabled) return;
     cancel.disabled = true;
     await gateway.post("/login/cancel", { account: accountId }).catch(() => {});
-    say("로그인을 그만두었습니다.");
+    reason = "로그인을 그만두었습니다.";
+    say(reason);
     stop(false);
   });
 
@@ -158,11 +165,10 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
       show(loginPrompt(prompt));
       timer = setInterval(poll, POLL_MS);
     } catch (error) {
-      say(error?.message || String(error), true);
-      stop(false);
+      fail(error?.message || String(error));
     }
   })();
 
   // The account added here, so trying again logs the same one in rather than adding another.
-  return { root, done, cancel: () => cancel.click(), account: () => accountId };
+  return { root, done, cancel: () => cancel.click(), account: () => accountId, reason: () => reason };
 }
