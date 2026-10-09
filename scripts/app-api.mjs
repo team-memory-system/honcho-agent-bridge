@@ -24,6 +24,7 @@ import { installedServerModel, installedServerPorts } from "./server-manager.mjs
 import { configuredTargets, countPending, sentSummary, targetSummary } from "./targets.mjs";
 import { readTeamState, registeredTeamServers, teamAccessPaths } from "./team-access.mjs";
 import { teamAuthPaths, teamLoginStatus } from "./team-auth.mjs";
+import { computerName } from "./team-hub.mjs";
 import { VERSION } from "./version.mjs";
 
 const DEFAULT_HONCHO_URL = "http://127.0.0.1:8001";
@@ -138,6 +139,8 @@ async function teamContext(options = {}) {
     // 관리자: the hub says so, or this computer made the team.
     admin: Boolean(login?.admin || made),
     localHost: share?.team === true && typeof share.host === "string" ? share.host : null,
+    // This computer's name as the hub keeps it on the servers it made (createdOn).
+    computer: computerName(),
     hub: login?.hub || made?.hub || null,
     name: login?.team || made?.name || null,
     email: login?.email || null,

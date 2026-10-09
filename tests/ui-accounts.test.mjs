@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   accountGroups,
+  backendAccounts,
   backendName,
   callbackHost,
   loginEnded,
@@ -188,4 +189,19 @@ test("a login the gateway still waits on is picked up; ended, finished and absen
   ];
   assert.deepEqual(pendingLogin(accounts), { accountId: "claude-2", backend: "claude", prompt: accounts[3].pendingLogin });
   assert.equal(pendingLogin(accounts.slice(0, 3)), null);
+});
+
+test("setup's logins count what the gateway already holds: accounts logged in, and slots whose login never finished", () => {
+  const accounts = [
+    { id: "codex-1", backend: "codex", login: { loggedIn: false } },
+    { id: "codex-2", backend: "codex", login: { loggedIn: true, account: "me@example.com" } },
+    { id: "claude-1", backend: "claude", login: { loggedIn: true } },
+    { id: "codex-3", backend: "codex" },
+    { backend: "codex", login: { loggedIn: true } },
+  ];
+  const codex = backendAccounts(accounts, "codex");
+  assert.deepEqual(codex.loggedIn.map((account) => account.id), ["codex-2"]);
+  assert.deepEqual(codex.empty, ["codex-1", "codex-3"]);
+  assert.deepEqual(backendAccounts(accounts, "claude").empty, []);
+  assert.deepEqual(backendAccounts(null, "codex"), { loggedIn: [], empty: [] });
 });

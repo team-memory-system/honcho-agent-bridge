@@ -9,7 +9,8 @@
 // thing it does (적용 중) and what is left to do (할 일). Where the conversations go,
 // from which agents and which folders, are lib/collect.js's steps, the same ones
 // 기억 설정 → 대화 수집 → 수정 opens.
-import { cli, post } from "../lib/api.js";
+import { cli, gateway, post } from "../lib/api.js";
+import { backendAccounts } from "../lib/accounts.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { number } from "../lib/format.js";
 import { counter, field, modal, opt, opts, progressList, stepper, todoList } from "../lib/kit.js";
@@ -57,6 +58,12 @@ function problem(result, fallback) {
   return lines.join(" ") || fallback;
 }
 
+/** A Google login's id under its name, only when another one has the same name. */
+function idpSub(idp, idps) {
+  const named = (idp.name || "").trim();
+  return named && idps.filter((other) => (other.name || "").trim() === named).length < 2 ? null : h("span", { class: "mono" }, idp.id);
+}
+
 /** "alice와 bob", "alice, bob과 carol": names joined the way a sentence reads. */
 function joined(names) {
   if (names.length < 2) return names.join("");
@@ -68,7 +75,9 @@ function joined(names) {
  * team's address from a team link. `onDone(screen)` hears which screen to open
  * after it; `onCancel` that it was closed half way.
  */
-export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
+export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
+  // The team link this window follows; a later one replaces it (win.follow).
+  let link = team;
   const state = {
     path: link ? "link" : null,
     // zones and idps: what Cloudflare offered when the token sees more than one.
@@ -98,6 +107,8 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
   const myServer = () => me()?.servers?.[0] || null;
   /** The server is the one this computer runs and already shares through the team. */
   const thisComputers = (server) => Boolean(server && app.context?.localServer && server.host === app.context?.team?.localHost);
+  /** This computer made the server: the hub keeps the name of the computer that made it. */
+  const madeHere = (server) => Boolean(server?.createdOn && app.context?.team?.computer && server.createdOn === app.context.team.computer);
   /** The team's company server, when this person is not its owner. */
   const company = () => (state.team.directory?.servers || []).find((server) => server.company && server.owner !== me()?.email) || null;
 
@@ -151,7 +162,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
         zones.length ? choice("zone", `이 token이 보는 zone이 ${zones.length}개입니다. 팀 주소에 쓸 zone을 고르세요.`,
           zones.map((zone) => [zone, h("span", { class: "mono" }, zone)])) : null,
         idps.length ? choice("idp", `Cloudflare Zero Trust에 Google 로그인이 ${idps.length}개 있습니다. 팀 주소에 로그인할 때 쓸 것을 고르세요.`,
-          idps.map((idp) => [idp.id, idp.name || idp.id, h("span", { class: "mono" }, idp.id)])) : null,
+          idps.map((idp) => [idp.id, idp.name || idp.id, idpSub(idp, idps)])) : null,
         field("팀 이름", name),
         field("Cloudflare API token", token, "Cloudflare에서 만든 API token을 여기에만 붙여 넣으세요."),
         field("관리자 Google 이메일", email, "팀 주소로 로그인할 내 Google 계정입니다."),
@@ -299,8 +310,11 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     state.team.directory = await teamDirectory().catch(() => null);
     // A team's peer name comes from the email; nobody types it.
     state.draft.userPeer = who.peer || state.draft.userPeer;
-    // Someone with a server starts from it; this computer's own server is "here".
-    state.draft.server = state.path === "make" || !who.servers?.length || thisComputers(who.servers[0]) ? "here" : "found";
+    // Someone with a server starts from it. This computer's own server is "here", and so
+    // is one this computer made that is gone (the app set up again): it is made again
+    // here and its address moves to it.
+    const own = who.servers?.[0];
+    state.draft.server = state.path === "make" || !own || thisComputers(own) || madeHere(own) ? "here" : "found";
     login.phase = "done";
     if (keys[at] === "login") { at += 1; drawStep(); }
   }
@@ -314,9 +328,13 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
   /** The server step in a team: the server this person has, a new one here, or none; and the company server. */
   function teamServerStep() {
     const draft = state.draft;
-    const here = thisComputers(myServer());
-    const mine = here ? null : myServer();
+    const own = myServer();
+    const here = thisComputers(own);
     const local = app.context?.localServer;
+    // A server this computer made is never one to connect to from here. Not running
+    // here (the app set up again), it is made again and its address moves to it.
+    const gone = !here && !local && madeHere(own);
+    const mine = here || madeHere(own) ? null : own;
     const choices = state.path === "make" || !mine ? ["here", "none"] : ["found", "here", "none"];
     if (!choices.includes(draft.server)) draft.server = choices[0];
     const pick = (choice) => () => { draft.server = choice; frame?.(); };
@@ -331,10 +349,10 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
         return local
           ? opt({ name: "server", value: "here", checked: draft.server === "here", onChange: pick("here"),
             title: ["이 컴퓨터 서버 ", h("span", { class: "mono muted" }, local.apiUrl.replace(/^https?:\/\//, ""))],
-            sub: here ? myServer().host : mine ? "내 서버 주소를 이 컴퓨터 서버로 옮깁니다." : null,
+            sub: here ? own.host : own ? "내 서버 주소를 이 컴퓨터 서버로 옮깁니다." : null,
             end: here ? tag("지금 쌓는 중", "ok") : tag("이 컴퓨터에 있음") })
           : opt({ name: "server", value: "here", checked: draft.server === "here", onChange: pick("here"),
-            title: "이 컴퓨터에 새로 만들기", sub: mine ? `${NEW_SERVER_SUB} 내 서버 주소를 이 컴퓨터 서버로 옮깁니다.` : NEW_SERVER_SUB });
+            title: "이 컴퓨터에 새로 만들기", sub: own ? `${NEW_SERVER_SUB} 내 서버 주소를 이 컴퓨터 서버로 옮깁니다.` : NEW_SERVER_SUB });
       }
       return opt({ name: "server", value: "none", checked: draft.server === "none", onChange: pick("none"), title: "쌓지 않기" });
     });
@@ -343,8 +361,9 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     return {
       body: h("div", {},
         h("h3", {}, "어디에 쌓을까요?"),
-        mine || here ? h("div", { class: "label" }, "내 기억 서버") : h("p", { class: "lead" }, `${me()?.email || ""} 계정에는 아직 기억 서버가 없습니다.`),
+        own ? h("div", { class: "label" }, "내 기억 서버") : h("p", { class: "lead" }, `${me()?.email || ""} 계정에는 아직 기억 서버가 없습니다.`),
         opts(...rows),
+        gone ? h("div", { class: "hint" }, `내 서버 ${own.host}는 이 컴퓨터에서 만든 서버인데, 지금 이 컴퓨터에 없습니다. 새로 만들면 이 주소가 새 서버로 옮겨집니다.`) : null,
         other ? [h("div", { class: "label" }, "함께 쌓을 서버"), opts(opt({
           type: "checkbox",
           name: "company",
@@ -382,7 +401,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     return {
       body: h("div", {},
         h("h3", {}, "기억 서버가 쓸 구독을 고르세요"),
-        h("p", { class: "lead" }, "적용할 때 고른 계정마다 브라우저에서 로그인합니다."),
+        h("p", { class: "lead" }, "적용할 때 고른 계정마다 브라우저에서 로그인합니다. 이 컴퓨터에 이미 로그인된 계정이 있으면 그 계정을 씁니다."),
         opts(...BACKENDS.map(row)),
         h("div", { class: "hint" }, "하나 이상 고르세요. 계정이 여럿이면 +를 누르세요.")),
       check: () => (chosen.size ? null : "구독을 하나 이상 고르세요."),
@@ -527,7 +546,7 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
         if (!state.models.chosen.has(backend)) continue;
         const count = state.models.counts[backend];
         for (let index = 1; index <= count; index += 1) {
-          tasks.push({ title: `${name} 계정 로그인${count > 1 ? ` ${index}/${count}` : ""}`, sub: "브라우저에서 로그인을 마치세요.", run: (task) => login(task, backend) });
+          tasks.push({ title: `${name} 계정 로그인${count > 1 ? ` ${index}/${count}` : ""}`, sub: "브라우저에서 로그인을 마치세요.", run: (task) => login(task, backend, index) });
         }
       }
       tasks.push({ title: "기억 서버 준비", sub: "서버 설정을 쓰고 임베딩 모델을 받습니다. 처음에는 오래 걸립니다.", run: prepareAgain });
@@ -573,7 +592,19 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
     throw new Error(action || problem(result, "설치하지 못했습니다."));
   }
 
-  async function login(task, backend) {
+  async function login(task, backend, index) {
+    // The gateway may hold this backend's accounts already (the app set up again on
+    // this computer): as many logged in as were asked for are used as they are, and
+    // a slot whose login never finished is logged in before another is added.
+    if (!task.accountId) {
+      const status = await gateway.status().catch(() => null);
+      const { loggedIn, empty } = backendAccounts(status?.accounts, backend);
+      if (index <= loggedIn.length) {
+        task.sub = `이미 로그인된 계정 ${loggedIn[index - 1].login?.account || loggedIn[index - 1].id}`;
+        return;
+      }
+      task.accountId = empty[index - loggedIn.length - 1] || null;
+    }
     const panel = gatewayLogin({ backend, accountId: task.accountId || null, label: `${task.title}을 기다리는 중` });
     task.extra = panel.root;
     draw();
@@ -739,6 +770,22 @@ export function openSetup({ firstRun, onDone, onCancel, team: link = "" }) {
       items.length ? todoList(items) : h("p", { class: "lead" }, "이제 대화가 끝날 때마다 기억 서버에 쌓입니다."));
     win.foot(null, button(next[0], { kind: "primary", onClick: () => { win.close("done"); onDone?.(next[1]); } }));
   }
+
+  /**
+   * A team link opened while the window is up (#/start?team= again): the window
+   * starts over from it, at the login, unless setup is already applying.
+   */
+  win.follow = (team) => {
+    if (!team || state.tasks.length || (state.path === "link" && state.team.hub === team)) return;
+    state.login.abort?.();
+    state.login.tab?.close();
+    Object.assign(state.login, { phase: "idle", error: "", tab: null, reopen: null, abort: null });
+    link = team;
+    state.path = "link";
+    state.team.hub = team;
+    at = 0;
+    drawStep();
+  };
 
   detectAgents({ fresh: true });
   loadProjects({ fresh: true });

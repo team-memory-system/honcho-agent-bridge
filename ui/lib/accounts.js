@@ -153,6 +153,19 @@ export function loginEnded(prompt) {
   return `로그인이 끝났지만 되지 않았습니다${message ? `: ${message}` : ""}. 로그인을 다시 누르세요.`;
 }
 
+/**
+ * What the gateway already holds for `backend`, for setup's logins: the accounts
+ * logged in, and the ids of the slots whose login never finished, which a new login
+ * fills before it adds another.
+ */
+export function backendAccounts(accounts, backend) {
+  const own = (Array.isArray(accounts) ? accounts : []).filter((account) => account?.id && account.backend === backend);
+  return {
+    loggedIn: own.filter((account) => account.login?.loggedIn),
+    empty: own.filter((account) => !account.login?.loggedIn).map((account) => account.id),
+  };
+}
+
 /** The first login the gateway is still waiting on, for a screen that did not start it. */
 export function pendingLogin(accounts) {
   for (const account of Array.isArray(accounts) ? accounts : []) {

@@ -251,7 +251,11 @@ function gatedPage(frame, name, blocked) {
 
 /** First setup, or setup again from the palette: one window, over whatever is on the page. */
 function showSetup({ firstRun, team = "" }) {
-  if (setupWindow) return;
+  // A team link opened while the window is up goes to that window.
+  if (setupWindow) {
+    if (team) setupWindow.follow?.(team);
+    return;
+  }
   setupWindow = openSetup({
     firstRun,
     team,
