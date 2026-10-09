@@ -965,6 +965,14 @@ details.group[open] > summary::before { content: "▾"; }
 .audit-label { margin: 0 0 6px; color: var(--ink-3); font-size: 13px; }
 .audit-full { margin: 0 0 6px; padding: 10px 12px; max-height: 240px; overflow: auto; border-radius: var(--radius); background: var(--sunk); font: 13.5px/1.6 var(--sans); white-space: pre-wrap; overflow-wrap: anywhere; }
 .audit-facts { margin-bottom: 4px; }
+
+/* 가드 시험: a question tried as a teammate's, each step judged, then the outcome. */
+.trial-wait { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--ink-3); font-size: 13px; }
+.trial-result { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.trial-result .audit-facts { margin-bottom: 0; }
+.trial-result .audit-full { margin: 0; }
+.trial-score { color: var(--ink-3); font: 12.5px var(--mono); white-space: nowrap; }
+.trial-message { margin-top: 6px; padding: 8px 10px; border-radius: var(--radius); background: color-mix(in srgb, var(--raised) 55%, transparent); color: var(--ink-2); font-size: 13px; }
 /* ── end of the ui/nav block ── */
 
 /* A folder of this computer, chosen inside the page (lib/folders.js). */
@@ -1179,6 +1187,7 @@ dialog.modal::backdrop { background: rgb(36 33 28 / 42%); }
 .fld { display: block; margin-top: 12px; }
 .fld > span { display: block; margin-bottom: 6px; color: var(--ink-2); font-size: 12.5px; font-weight: 600; }
 .fld .input { height: 38px; font-size: 14px; }
+.fld textarea.input { height: auto; }
 .fld .input.mono { font-size: 13px; }
 .hint { margin-top: 6px; color: var(--ink-3); font-size: 12.5px; }
 .subfields { margin: 10px 0 2px; padding: 12px 14px; border-radius: 8px; background: var(--sunk-soft); }

@@ -3,10 +3,13 @@
 // screens use: chips for the result with the period's counts, a list a day as on
 // 팀, and a window with all there is about one call. The dashboard reads at most
 // 1000 rows at a time and has no cursor, so "더 보기" asks again with a larger limit
-// up to that cap.
+// up to that cap. 가드 시험 opens a window in which the owner tries a question as a
+// teammate's (guard-trial.js).
 import { get } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { fullDate, number } from "../lib/format.js";
+import { callReason, callScores, scoreText } from "../lib/guard.js";
+import { openGuardTrial } from "../lib/guard-trial.js";
 import { kv, list, listItem, modal } from "../lib/kit.js";
 import { button, busy, details, empty, errorNotice, notice, pageHead, spinner, tag } from "../lib/ui.js";
 
@@ -36,25 +39,6 @@ function dayLabel(value) {
   return date.getFullYear() === today.getFullYear() ? label : `${date.getFullYear()}년 ${label}`;
 }
 
-/**
- * Why a call was refused, failed or went through without a judgment, in a few
- * words; null for a plain pass. The bridge's own words stay in the call's window.
- */
-function reasonOf(row) {
-  const error = String(row.error || "").split("\n")[0].trim();
-  if (!error) return null;
-  if (row.status === "error") return error;
-  if (row.status === "denied") {
-    if (error === "out of scope") return "사적인 질문으로 판정";
-    if (error.startsWith("That project is not open")) return "열지 않은 프로젝트";
-    if (error.startsWith("jev unavailable")) return "Jev가 답하지 않아 거부";
-    return error;
-  }
-  if (error.startsWith("not judged")) return "판정 없이 통과 · 팀에 Jev 키 없음";
-  if (error.startsWith("jev unavailable")) return "판정 없이 통과 · Jev가 답하지 않음";
-  return error;
-}
-
 /** The project a teammate asked about: the one named, else the ones open to them. */
 function projectOf(row) {
   const args = row.arguments || {};
@@ -62,14 +46,11 @@ function projectOf(row) {
   return (Array.isArray(args.projects) ? args.projects : []).map((item) => item?.name || item?.id).filter(Boolean).join(", ");
 }
 
-function scoreOf(row) {
-  return row.jev_score == null ? "" : Number(row.jev_score).toFixed(2);
-}
-
 /** Everything the log holds about one call. */
 function openCall(row) {
   const [label, kind] = STATUS[row.status] || [row.status || "?", ""];
-  const reason = reasonOf(row);
+  // The bridge's own words stay in the window, under 서버가 남긴 이유 원문.
+  const reason = callReason(row);
   const project = projectOf(row);
   const at = new Date(row.at);
   const win = modal({ title: "조회 한 건", big: true, small: true });
@@ -81,7 +62,8 @@ function openCall(row) {
       kv("누가", [row.caller || "알 수 없음", row.caller_source ? h("div", { class: "s" }, row.caller_source) : null]),
       kv("언제", `${longDay.format(at)} ${seconds.format(at)}`),
       project ? kv("프로젝트", project) : null,
-      row.jev_score != null ? kv("Jev 점수", [scoreOf(row), h("div", { class: "s" }, "1에 가까울수록 사적인 질문입니다.")]) : null,
+      row.jev_score != null ? kv("질문 점수", [scoreText(row.jev_score), h("div", { class: "s" }, "Jev의 판정. 1에 가까울수록 사적인 질문입니다.")]) : null,
+      row.answer_score != null ? kv("답 점수", [scoreText(row.answer_score), h("div", { class: "s" }, "Jev의 판정. 1에 가까울수록 민감한 내용이 든 답입니다.")]) : null,
       kv("도구", h("span", { class: "mono" }, row.tool || "")),
       row.duration_ms != null ? kv("걸린 시간", `${number(row.duration_ms)}ms`) : null),
     row.error ? details("서버가 남긴 이유 원문", row.error) : null,
@@ -116,6 +98,7 @@ export default {
     options(period, PERIODS, filters.hours);
 
     const refresh = button("", { kind: "quiet icon-only", iconName: "refresh", title: "새로 고침", onClick: (event) => busy(event.currentTarget, () => load({ keepLimit: true })) });
+    const trial = button("가드 시험", { kind: "quiet", iconName: "shield", title: "질문 하나를 팀원이 물은 것처럼 판정해 봅니다", onClick: () => openGuardTrial() });
     const chips = h("div", { class: "chips" });
     const pickers = h("div", { class: "audit-pickers" });
     const bar = h("div", { class: "audit-bar", hidden: true }, chips, pickers);
@@ -123,7 +106,7 @@ export default {
     const more = h("div", { class: "audit-more" });
 
     page.append(
-      pageHead({ title: "조회 기록", subtitle: "누가 내 기억에 무엇을 물었는지, 거부된 것까지 그대로 남깁니다.", actions: [refresh] }),
+      pageHead({ title: "조회 기록", subtitle: "누가 내 기억에 무엇을 물었는지, 거부된 것까지 그대로 남깁니다.", actions: [trial, refresh] }),
       h("div", { class: "page-body" }, h("div", { class: "pad stack" }, bar, days, more)),
     );
 
@@ -148,7 +131,7 @@ export default {
 
     function entry(row) {
       const [label, kind] = STATUS[row.status] || [row.status || "?", ""];
-      const sub = [row.caller || "알 수 없음", projectOf(row), reasonOf(row), row.jev_score != null ? `Jev ${scoreOf(row)}` : ""].filter(Boolean).join(" · ");
+      const sub = [row.caller || "알 수 없음", projectOf(row), callReason(row), callScores(row)].filter(Boolean).join(" · ");
       const item = listItem({
         title: [tag(label, kind), h("span", { class: "audit-q" }, row.query_text || "원문 없음")],
         sub,

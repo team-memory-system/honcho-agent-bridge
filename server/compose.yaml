@@ -160,8 +160,9 @@ services:
   # caller sent, so with HONCHO_MCP_SCOPE_FROM_GATE the bridge trusts these, and a
   # teammate's `chat` answers only from the projects opened to them. It answers
   # `chat` alone, over one workspace as one peer; callers cannot point it at another
-  # by header or argument. Its /audit, the record of those calls, is for the
-  # dashboard only: it is not under /mcp, so the gate never passes it on.
+  # by header or argument. Its /audit, the record of those calls, and /guard-trial,
+  # where the owner tries a question as a teammate's, are for the dashboard only:
+  # neither is under /mcp, so the gate never passes them on.
   mcp:
     image: honcho-agent-bridge-mcp:${HONCHO_IMAGE_TAG:-local}
     build:
@@ -185,7 +186,8 @@ services:
       HONCHO_AUDIT_READ: "1"
       HONCHO_MCP_SCOPE_FROM_GATE: "1"
       # Jev judges each teammate's `chat` question first and refuses one about the
-      # owner's private life rather than shared work. Off while HONCHO_JEV_GATE is
+      # owner's private life rather than shared work, then judges the answer and
+      # withholds one that gives such things away. Off while HONCHO_JEV_GATE is
       # empty. In a team the bridge asks the team hub's guard instead
       # (HONCHO_JEV_GUARD_URL): the Jev key stays in the hub, and this server holds
       # only its own token for the guard, which the hub can revoke; the app writes
@@ -200,6 +202,7 @@ services:
       HONCHO_JEV_MODEL: ${HONCHO_JEV_MODEL:-}
       HONCHO_JEV_THRESHOLD: ${HONCHO_JEV_THRESHOLD:-0.7}
       HONCHO_JEV_FAIL_MODE: ${HONCHO_JEV_FAIL_MODE:-open}
+      HONCHO_JEV_ANSWER_FAIL_MODE: ${HONCHO_JEV_ANSWER_FAIL_MODE:-closed}
       HONCHO_JEV_TOOLS: ${HONCHO_JEV_TOOLS:-chat}
     # The bridge has no health route; any HTTP answer (401 without the token) means
     # it is serving.

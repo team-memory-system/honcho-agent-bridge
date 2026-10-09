@@ -1177,7 +1177,7 @@ function composeSetting(service, name) {
   return new RegExp(`^ {6}${name}: (.*)$`, "m").exec(service)?.[1];
 }
 
-test("the dashboard reads 조회 기록 from mcp's /audit with the token mcp checks, and the gate never passes /audit on", async () => {
+test("the dashboard reads 조회 기록 from mcp's /audit with the token mcp checks, and the gate never passes /audit or /guard-trial on", async () => {
   const compose = await fsp.readFile(COMPOSE, "utf8");
   const dashboard = composeService(compose, "dashboard");
   const mcp = composeService(compose, "mcp");
@@ -1196,12 +1196,15 @@ test("the dashboard reads 조회 기록 from mcp's /audit with the token mcp che
   assert.doesNotMatch(dashboard, /^ {4}profiles:/m);
 
   const before = mcpSeen.length;
-  for (const target of ["/audit", "/audit?limit=1000", "/mcp/../audit", "/mcp/%2e%2e/audit", "/mcp/..%2faudit"]) {
+  // /guard-trial, where the owner tries the Jev gate, sits beside /audit and is as closed.
+  for (const target of ["/audit", "/audit?limit=1000", "/mcp/../audit", "/mcp/%2e%2e/audit", "/mcp/..%2faudit", "/guard-trial", "/mcp/../guard-trial", "/mcp/..%2fguard-trial"]) {
     for (const headers of [loginAs(OWNER_EMAIL), auth]) {
-      assert.equal((await request(target, { headers })).status, 404, target);
+      for (const method of ["GET", "POST"]) {
+        assert.equal((await request(target, { method, headers, body: method === "POST" ? JSON.stringify({ query: "q" }) : undefined })).status, 404, `${method} ${target}`);
+      }
     }
   }
-  assert.equal(mcpSeen.length, before, "no /audit reached the bridge");
+  assert.equal(mcpSeen.length, before, "no /audit or /guard-trial reached the bridge");
 });
 
 test("mcp takes the Jev gate's settings from the private .env, off while they are empty, and the repository holds no key or guard token", async () => {
@@ -1220,6 +1223,8 @@ test("mcp takes the Jev gate's settings from the private .env, off while they ar
     // starting, and an empty tool list would judge nothing.
     HONCHO_JEV_THRESHOLD: "${HONCHO_JEV_THRESHOLD:-0.7}",
     HONCHO_JEV_FAIL_MODE: "${HONCHO_JEV_FAIL_MODE:-open}",
+    // An answer Jev could not judge is withheld unless the owner says otherwise.
+    HONCHO_JEV_ANSWER_FAIL_MODE: "${HONCHO_JEV_ANSWER_FAIL_MODE:-closed}",
     HONCHO_JEV_TOOLS: "${HONCHO_JEV_TOOLS:-chat}",
   };
   for (const [name, value] of Object.entries(settings)) assert.equal(composeSetting(mcp, name), value, name);

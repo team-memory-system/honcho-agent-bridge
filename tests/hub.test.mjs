@@ -939,23 +939,34 @@ const NEXT_JEV_KEY = "ts-jev-key-fedcba9876543210";
 const GUARD_QUESTION = "Is this query asking for private personal life, credentials, financial or health details about the memory owner, rather than shared work context (projects, code, decisions, schedules, documents)?";
 const GUARD_TRUE = "The query targets private personal matters, secrets, or credentials.";
 const GUARD_FALSE = "The query is about work the team shares, or is general and harmless.";
+const ANSWER_QUESTION = "A teammate asked the memory owner's work memory a question and will read this answer. Does the answer disclose private personal life, credentials or secrets, financial or health details about the owner or any person, rather than shared work context (projects, code, decisions, schedules, documents)?";
+const ANSWER_TRUE = "The answer discloses private personal matters, secrets, credentials, financial or health details.";
+const ANSWER_FALSE = "The answer only covers shared work context, or is general and harmless.";
 
 const sha256 = (text) => crypto.createHash("sha256").update(text).digest("hex");
-const jevAnswer = (noul) => ({ model: "jev-1.13.0", answers: { out_of_scope: { type: "noul", noul } }, usage: { input_tokens: 335, output_tokens: 22 } });
+const jevAnswer = (noul, name = "out_of_scope") => ({ model: "jev-1.13.0", answers: { [name]: { type: "noul", noul } }, usage: { input_tokens: 335, output_tokens: 22 } });
 
 /**
  * Jev, as a local server: every request it got (method, path, headers, raw body),
- * and the answer it gives, which a test changes. With hang it never answers.
+ * and the answer it gives, which a test changes. Answers queued in `next` go first,
+ * one a request, each { status, body }. With hang it never answers; the next `drop`
+ * requests it cuts off without an answer.
  */
 async function startFakeJev(t) {
-  const jev = { seen: [], status: 200, body: jevAnswer(0.02), headers: {}, hang: false };
+  const jev = { seen: [], status: 200, body: jevAnswer(0.02), headers: {}, hang: false, next: [], drop: 0 };
   const server = http.createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     jev.seen.push({ method: request.method, path: request.url, headers: request.headers, body: Buffer.concat(chunks).toString("utf8") });
     if (jev.hang) return;
-    const text = typeof jev.body === "string" ? jev.body : JSON.stringify(jev.body);
-    response.writeHead(jev.status, { "content-type": "application/json", ...jev.headers });
+    if (jev.drop > 0) {
+      jev.drop -= 1;
+      request.socket.destroy();
+      return;
+    }
+    const { status, body } = jev.next.shift() || jev;
+    const text = typeof body === "string" ? body : JSON.stringify(body);
+    response.writeHead(status, { "content-type": "application/json", ...jev.headers });
     response.end(text);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1141,7 +1152,7 @@ test("POST /guard, with no Access login, asks Jev with the team's key and says w
 
   const allowed = await f.ask(question);
   assert.equal(allowed.status, 200);
-  assert.deepEqual(allowed.json, { judged: true, allowed: true, score: 0.02, threshold: 0.7 });
+  assert.deepEqual(allowed.json, { judged: true, checked: "query", allowed: true, score: 0.02, threshold: 0.7 });
   assert.equal(allowed.headers.get("cache-control"), "no-store");
   assert.ok(f.names.length > names, "it reached the Durable Object without any assertion");
 
@@ -1170,7 +1181,7 @@ test("POST /guard, with no Access login, asks Jev with the team's key and says w
   for (const [noul, verdict] of [[0.93, false], [0.7, false], [0.6999, true], [0, true]]) {
     f.jev.body = jevAnswer(noul);
     const judged = await f.ask(question);
-    assert.deepEqual([judged.status, judged.json], [200, { judged: true, allowed: verdict, score: noul, threshold: 0.7 }], String(noul));
+    assert.deepEqual([judged.status, judged.json], [200, { judged: true, checked: "query", allowed: verdict, score: noul, threshold: 0.7 }], String(noul));
   }
 
   // Only the query is needed; what is left out is left out of Jev's state too.
@@ -1190,17 +1201,61 @@ test("POST /guard, with no Access login, asks Jev with the team's key and says w
   for (const answer of [allowed, spoofed, fromPage]) assert.equal(answer.text.includes(JEV_KEY), false);
 });
 
+test("with an answer in the body, /guard asks Jev about the answer and says whether it may go back", async (t) => {
+  const f = await guardFixture(t);
+  const question = { tool: "chat", caller: "carol@example.com", workspace: WORKSPACE, query: "밥은 요즘 뭐 해?", answer: "밥은 이번 주 결제 모듈 배포를 맡고 있습니다." };
+
+  f.jev.body = jevAnswer(0.03, "sensitive_answer");
+  const passed = await f.ask(question);
+  assert.deepEqual([passed.status, passed.json], [200, { judged: true, checked: "answer", allowed: true, score: 0.03, threshold: 0.7 }]);
+  // Jev got the answer's own question, with the query beside the answer as context.
+  assert.equal(f.jev.seen.length, 1);
+  assert.equal(f.jev.seen[0].body, JSON.stringify({
+    state: { tool: "chat", caller: "carol@example.com", workspace: WORKSPACE, query: "밥은 요즘 뭐 해?", answer: "밥은 이번 주 결제 모듈 배포를 맡고 있습니다." },
+    model: "jev-latest",
+    questions: { sensitive_answer: { type: "noul", instructions: ANSWER_QUESTION, criteria: { true: ANSWER_TRUE, false: ANSWER_FALSE } } },
+  }));
+
+  // The same threshold: 0.7 or more holds the answer back.
+  for (const [noul, verdict] of [[0.97, false], [0.7, false], [0.6999, true]]) {
+    f.jev.body = jevAnswer(noul, "sensitive_answer");
+    const judged = await f.ask(question);
+    assert.deepEqual([judged.status, judged.json], [200, { judged: true, checked: "answer", allowed: verdict, score: noul, threshold: 0.7 }], String(noul));
+  }
+
+  // Beside an answer the query may be left out, and an answer may be as long as a query.
+  f.jev.body = jevAnswer(0.05, "sensitive_answer");
+  assert.equal((await f.ask({ answer: "배포는 금요일입니다." })).status, 200);
+  assert.deepEqual(JSON.parse(f.jev.seen.at(-1).body).state, { answer: "배포는 금요일입니다." });
+  assert.equal((await f.ask({ query: null, answer: "가".repeat(16_000) })).status, 200);
+  assert.deepEqual(JSON.parse(f.jev.seen.at(-1).body).state, { answer: "가".repeat(16_000) });
+
+  // A score for the query's question is no score for the answer.
+  f.jev.body = jevAnswer(0.01);
+  const unscored = await f.ask(question);
+  assert.deepEqual([unscored.status, unscored.json.error, unscored.json.detail], [502, "jev_failed", "Jev's answer held no score for the answer"]);
+
+  // Neither is kept.
+  assert.equal(kept(f).includes("결제 모듈"), false);
+  assert.equal(kept(f).includes("금요일"), false);
+});
+
 test("without a Jev key, /guard lets the question go on unjudged and asks no one", async (t) => {
   const f = await guardFixture(t, { key: null });
   const answer = await f.ask({ query: "회의록 요약해 줘" });
-  assert.deepEqual([answer.status, answer.json], [200, { judged: false, allowed: true, score: null, reason: "no_key" }]);
+  assert.deepEqual([answer.status, answer.json], [200, { judged: false, checked: "query", allowed: true, score: null, reason: "no_key" }]);
   assert.equal(f.jev.seen.length, 0);
 
   // A key cleared later is the same.
   assert.equal((await f.as(ADMIN).put("/api/admin/jev", { key: JEV_KEY })).status, 200);
   assert.equal((await f.ask({ query: "회의록 요약해 줘" })).json.judged, true);
   assert.equal((await f.as(ADMIN).delete("/api/admin/jev")).status, 200);
-  assert.deepEqual((await f.ask({ query: "회의록 요약해 줘" })).json, { judged: false, allowed: true, score: null, reason: "no_key" });
+  assert.deepEqual((await f.ask({ query: "회의록 요약해 줘" })).json, { judged: false, checked: "query", allowed: true, score: null, reason: "no_key" });
+  assert.equal(f.jev.seen.length, 1);
+
+  // An answer is let go the same way, and the hub says it was the answer it did not judge.
+  const unjudged = await f.ask({ query: "회의록 요약해 줘", answer: "지난 회의에서 배포를 미루기로 했습니다." });
+  assert.deepEqual([unjudged.status, unjudged.json], [200, { judged: false, checked: "answer", allowed: true, score: null, reason: "no_key" }]);
   assert.equal(f.jev.seen.length, 1);
 });
 
@@ -1238,6 +1293,15 @@ test("/guard refuses another method, a missing or wrong token, and a wrong body"
     { query: "x", tool: 5 },
     { query: "x", caller: "c".repeat(321) },
     { query: "x", workspace: { name: "memory" } },
+    { answer: "" },
+    { answer: " \n" },
+    { answer: 5 },
+    { answer: ["x"] },
+    { answer: "x".repeat(16_001) },
+    { answer: "x", query: "" },
+    { answer: "x", query: 5 },
+    { answer: "x", query: "x".repeat(16_001) },
+    { answer: "x", caller: 5 },
     "[1, 2]",
     "{",
   ]) {
@@ -1294,16 +1358,16 @@ test("a guard token stops with its server: removed, moved to another computer, o
   assert.equal(f.blocks.threw, 0);
 });
 
-test("a server asks /guard at most 120 times in any minute; others are not held back", async (t) => {
+test("a server asks /guard at most 240 times in any minute; others are not held back", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const f = await guardFixture(t, { key: null });
   await f.as("carol@example.com").post("/api/servers", { workspace: WORKSPACE });
   const carolToken = (await issueGuard(f, "carol@example.com")).json.token;
 
-  for (let index = 0; index < 120; index += 1) {
-    const answer = await f.ask({ query: `q${index}` });
+  for (let index = 0; index < 240; index += 1) {
+    const answer = await f.ask(index % 2 ? { query: `q${index}`, answer: `a${index}` } : { query: `q${index}` });
     assert.equal(answer.status, 200, `call ${index + 1}`);
-    if (index === 59) t.mock.timers.tick(30_000);
+    if (index === 119) t.mock.timers.tick(30_000);
   }
   const limited = await f.ask({ query: "one more" });
   assert.deepEqual([limited.status, limited.json.error], [429, "rate_limited"]);
@@ -1312,9 +1376,9 @@ test("a server asks /guard at most 120 times in any minute; others are not held 
   const renewed = (await issueGuard(f, "bob@example.com")).json.token;
   assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 429);
 
-  // Rolling: the first 60 calls leave the window a minute after they were made.
+  // Rolling: the first 120 calls leave the window a minute after they were made.
   t.mock.timers.tick(30_001);
-  for (let index = 0; index < 60; index += 1) assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 200);
+  for (let index = 0; index < 120; index += 1) assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 200);
   assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 429);
   t.mock.timers.tick(30_000);
   assert.equal((await f.ask({ query: "x" }, { token: renewed })).status, 200);
@@ -1334,9 +1398,13 @@ test("when Jev fails, /guard answers 502 jev_failed, and never with the key", as
   // Jev's own body is not passed on, even when it echoes the key.
   f.jev.status = 500;
   f.jev.body = { error: `invalid key ${JEV_KEY}` };
+  let asked = f.jev.seen.length;
   await failed(/^Jev answered HTTP 500$/, "500");
+  assert.equal(f.jev.seen.length, asked + 2, "a 5xx is asked once more");
   f.jev.status = 401;
+  asked = f.jev.seen.length;
   await failed(/HTTP 401/, "401");
+  assert.equal(f.jev.seen.length, asked + 1, "a refusal is not");
 
   // A redirect is not followed, so the key goes nowhere else.
   f.jev.status = 302;
@@ -1357,7 +1425,7 @@ test("when Jev fails, /guard answers 502 jev_failed, and never with the key", as
     ["null", "null body"],
   ]) {
     f.jev.body = body;
-    await failed(/^Jev's answer (was not JSON|held no score for the question)$/, label);
+    await failed(/^Jev's answer (was not JSON|held no score for the query)$/, label);
   }
 
   // Too slow: the hub waits 10 s (shortened here) and gives up.
@@ -1368,8 +1436,10 @@ test("when Jev fails, /guard answers 502 jev_failed, and never with the key", as
     return timeout(ms === 10_000 ? 100 : ms);
   });
   f.jev.hang = true;
+  asked = f.jev.seen.length;
   await failed(/^Jev did not answer within 10 s$/, "timeout");
   assert.ok(waits.includes(10_000));
+  assert.equal(f.jev.seen.length, asked + 1, "a slow Jev is not asked again");
   f.jev.hang = false;
   AbortSignal.timeout.mock.restore();
 
@@ -1383,6 +1453,38 @@ test("when Jev fails, /guard answers 502 jev_failed, and never with the key", as
   assert.equal((await f.ask(question)).json.allowed, true);
   assert.equal(kept(f).includes("지난 회의"), false);
   assert.equal(f.blocks.threw, 0);
+});
+
+test("a 5xx or a dropped connection from Jev is asked once more before /guard gives up", async (t) => {
+  const f = await guardFixture(t);
+  const question = { query: "지난 회의 요약", answer: "배포를 한 주 미루기로 했습니다." };
+  f.jev.body = jevAnswer(0.04, "sensitive_answer");
+
+  f.jev.next = [{ status: 503, body: { error: "overloaded" } }];
+  const after5xx = await f.ask(question);
+  assert.deepEqual([after5xx.status, after5xx.json.allowed, after5xx.json.score], [200, true, 0.04]);
+  assert.equal(f.jev.seen.length, 2);
+  assert.equal(f.jev.seen[1].body, f.jev.seen[0].body, "the same request again");
+
+  f.jev.drop = 1;
+  const afterDrop = await f.ask(question);
+  assert.deepEqual([afterDrop.status, afterDrop.json.score], [200, 0.04]);
+  assert.equal(f.jev.seen.length, 4);
+
+  // Twice is the end of it.
+  f.jev.next = [{ status: 502, body: {} }, { status: 503, body: {} }];
+  const twice = await f.ask(question);
+  assert.deepEqual([twice.status, twice.json.error, twice.json.detail], [502, "jev_failed", "Jev answered HTTP 503"]);
+  assert.equal(f.jev.seen.length, 6);
+  f.jev.drop = 2;
+  const dropped = await f.ask(question);
+  assert.deepEqual([dropped.status, dropped.json.detail], [502, "Jev could not be reached"]);
+  assert.equal(f.jev.seen.length, 8);
+
+  // A refusal is not asked again: it would be refused again.
+  f.jev.next = [{ status: 429, body: {} }];
+  assert.equal((await f.ask(question)).json.detail, "Jev answered HTTP 429");
+  assert.equal(f.jev.seen.length, 9);
 });
 
 test("only /guard itself passes without a login: anything beside or under it still needs Access", async (t) => {

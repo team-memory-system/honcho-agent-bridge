@@ -44,8 +44,8 @@
 // therefore stays one literal line. Nothing here logs. No answer carries the API
 // token or the Jev key, and the one tunnel token that leaves is the one POST
 // /api/servers hands to the server's own owner. A guard token leaves once, in the
-// answer to POST /api/me/guard; the hub keeps only its SHA-256. The questions sent
-// to /guard go to Jev and are never stored.
+// answer to POST /api/me/guard; the hub keeps only its SHA-256. The questions and
+// answers sent to /guard go to Jev and are never stored.
 import { CLOUDFLARE_API_BASE, CloudflareApiError, cloudflareClient, deleteAccessApp, deleteHostRecord, deleteTunnel, ensurePeoplePolicy, ensureServersApp, ensureTunnel, ensureTunnelCname, ensureTunnelIngress, findTunnel, GATE_ORIGIN, normalizeEmail, removeLegacyHostApps, SERVERS_APP_MAX_HOSTS, SERVERS_APP_NAME, TUNNEL_PREFIX, tunnelToken } from "../../scripts/cloudflare-api.mjs";
 
 const HUB_OBJECT = "team";
@@ -79,14 +79,18 @@ const JEV_KEY = /^[\x21-\x7e]{8,1024}$/;
 const GUARD_TOKEN = /^bearer +([0-9a-f]{64})$/i;
 // A guard token is a server's, so a busy or broken server cannot spend the team's
 // Jev budget alone. Counted in memory: a restarted object starts again from zero.
-const GUARD_CALLS_PER_MINUTE = 120;
+// A teammate's question costs two calls, one for it and one for the answer.
+const GUARD_CALLS_PER_MINUTE = 240;
 const GUARD_WINDOW_MS = 60_000;
-const GUARD_QUERY_LENGTH = 16_000;
+const GUARD_TEXT_LENGTH = 16_000;
 const GUARD_FIELD_LENGTH = 320;
 const JEV_API_BASE = "https://api.typesafe.ai";
 const JEV_MODEL = "jev-latest";
 const JEV_TIMEOUT_MS = 10_000;
-// At this score or above, the question is taken as reaching for the owner's private life.
+// A 5xx or a dropped connection is asked once more, this long after.
+const JEV_RETRY_MS = 300;
+// At this score or above, the question is taken as reaching for the owner's private
+// life, or the answer as giving it away.
 const JEV_THRESHOLD = 0.7;
 const OUT_OF_SCOPE = {
   type: "noul",
@@ -95,6 +99,20 @@ const OUT_OF_SCOPE = {
     true: "The query targets private personal matters, secrets, or credentials.",
     false: "The query is about work the team shares, or is general and harmless.",
   },
+};
+const SENSITIVE_ANSWER = {
+  type: "noul",
+  instructions: "A teammate asked the memory owner's work memory a question and will read this answer. Does the answer disclose private personal life, credentials or secrets, financial or health details about the owner or any person, rather than shared work context (projects, code, decisions, schedules, documents)?",
+  criteria: {
+    true: "The answer discloses private personal matters, secrets, credentials, financial or health details.",
+    false: "The answer only covers shared work context, or is general and harmless.",
+  },
+};
+// What /guard judges, each with its own question to Jev: a teammate's question
+// before it reaches the memory, or the memory's answer before it reaches them.
+const GUARD_CHECKS = {
+  query: { name: "out_of_scope", question: OUT_OF_SCOPE },
+  answer: { name: "sensitive_answer", question: SENSITIVE_ANSWER },
 };
 
 /** An answer other than success: its status, a code and a sentence in English. */
@@ -465,14 +483,20 @@ function requestInput(body) {
 }
 
 /**
- * What a server sends to /guard, as Jev's state: tool, caller and workspace when
- * given, then the query, each as it came. Lengths count characters, not bytes.
+ * What a server sends to /guard, and what of it is judged: the answer when there is
+ * one, else the query. Jev's state is tool, caller and workspace when given, then
+ * the query, then the answer, each as it came; beside an answer the query is only
+ * context and may be left out. Lengths count characters, not bytes.
  */
 function guardInput(body) {
-  const query = body.query;
-  if (typeof query !== "string" || !query.trim() || [...query].length > GUARD_QUERY_LENGTH) {
-    throw new HubError(400, "bad_request", `query takes the question asked, 1 to ${GUARD_QUERY_LENGTH} characters`);
-  }
+  const checked = body.answer === undefined || body.answer === null ? "query" : "answer";
+  const text = (field, what) => {
+    const value = body[field];
+    if (typeof value !== "string" || !value.trim() || [...value].length > GUARD_TEXT_LENGTH) {
+      throw new HubError(400, "bad_request", `${field} takes ${what}, 1 to ${GUARD_TEXT_LENGTH} characters`);
+    }
+    return value;
+  };
   const state = {};
   for (const field of ["tool", "caller", "workspace"]) {
     const value = body[field];
@@ -482,33 +506,50 @@ function guardInput(body) {
     }
     state[field] = value;
   }
-  state.query = query;
-  return state;
+  if (checked === "query" || (body.query !== undefined && body.query !== null)) state.query = text("query", "the question asked");
+  if (checked === "answer") state.answer = text("answer", "the answer about to go out");
+  return { state, checked };
 }
 
 // ---------------------------------------------------------------------- Jev
 
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
- * Jev's score for one question: how surely it reaches for the owner's private life,
- * from 0 to 1. Any failure is a 502 jev_failed whose detail says what went wrong
- * in the hub's own words, never Jev's body, and never the key.
+ * Jev's score for one question or answer (`checked`): how surely it reaches for, or
+ * gives away, the owner's private life, from 0 to 1. A 5xx or a dropped connection
+ * is often Jev's moment rather than the text's, so it is asked once more; a slow
+ * answer is not, since a second wait would double the teammate's. Any failure is a
+ * 502 jev_failed whose detail says what went wrong in the hub's own words, never
+ * Jev's body, and never the key.
  */
-async function jevScore(env, key, state) {
+async function jevScore(env, key, state, checked) {
+  const { name, question } = GUARD_CHECKS[checked];
   const failed = (detail) => new HubError(502, "jev_failed", detail.split(key).join("[redacted]"));
   const base = (loopbackUrl(env.JEV_API_BASE) || JEV_API_BASE).replace(/\/+$/, "");
   const timedOut = (error) => error?.name === "TimeoutError" || error?.name === "AbortError";
+  const slow = `Jev did not answer within ${JEV_TIMEOUT_MS / 1000} s`;
   let response;
-  try {
-    response = await fetch(`${base}/v1/systemone`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ state, model: JEV_MODEL, questions: { out_of_scope: OUT_OF_SCOPE } }),
-      // The key goes to Jev alone: a redirect is a failure, not followed.
-      redirect: "manual",
-      signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
-    });
-  } catch (error) {
-    throw failed(timedOut(error) ? `Jev did not answer within ${JEV_TIMEOUT_MS / 1000} s` : "Jev could not be reached");
+  for (let attempt = 1; ; attempt += 1) {
+    const last = attempt === 2;
+    try {
+      response = await fetch(`${base}/v1/systemone`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ state, model: JEV_MODEL, questions: { [name]: question } }),
+        // The key goes to Jev alone: a redirect is a failure, not followed.
+        redirect: "manual",
+        signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (timedOut(error)) throw failed(slow);
+      if (last) throw failed("Jev could not be reached");
+      await pause(JEV_RETRY_MS);
+      continue;
+    }
+    if (response.status < 500 || last) break;
+    await response.body?.cancel().catch(() => {});
+    await pause(JEV_RETRY_MS);
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
@@ -518,10 +559,10 @@ async function jevScore(env, key, state) {
   try {
     answer = await response.json();
   } catch (error) {
-    throw failed(timedOut(error) ? `Jev did not answer within ${JEV_TIMEOUT_MS / 1000} s` : "Jev's answer was not JSON");
+    throw failed(timedOut(error) ? slow : "Jev's answer was not JSON");
   }
-  const score = answer?.answers?.out_of_scope?.noul;
-  if (typeof score !== "number" || !Number.isFinite(score)) throw failed("Jev's answer held no score for the question");
+  const score = answer?.answers?.[name]?.noul;
+  if (typeof score !== "number" || !Number.isFinite(score)) throw failed(`Jev's answer held no score for the ${checked}`);
   return score;
 }
 
@@ -1154,7 +1195,9 @@ export class TeamHub {
 
   /**
    * POST /guard, from a member's server with its guard token: whether a teammate's
-   * question may go on. Without a key the hub does not judge and lets it go on.
+   * question may go on, or, with an answer in the body, whether that answer may go
+   * back to them. `checked` says which was judged. Without a key the hub does not
+   * judge and lets either go on.
    */
   async guard(request) {
     if (request.method !== "POST") throw new HubError(405, "method_not_allowed", "/guard takes POST");
@@ -1163,11 +1206,11 @@ export class TeamHub {
       throw new HubError(403, "not_member", "The server's owner is no longer on the team's roster");
     }
     this.countGuardCall(server.host);
-    const state = guardInput(await readJson(request));
+    const { state, checked } = guardInput(await readJson(request));
     const record = await this.storage.get("jev");
-    if (!record?.key) return json(200, { judged: false, allowed: true, score: null, reason: "no_key" });
-    const score = await jevScore(this.env, record.key, state);
-    return json(200, { judged: true, allowed: score < JEV_THRESHOLD, score, threshold: JEV_THRESHOLD });
+    if (!record?.key) return json(200, { judged: false, checked, allowed: true, score: null, reason: "no_key" });
+    const score = await jevScore(this.env, record.key, state, checked);
+    return json(200, { judged: true, checked, allowed: score < JEV_THRESHOLD, score, threshold: JEV_THRESHOLD });
   }
 
   /** The server whose current guard token the Authorization header carries; else 401. */
