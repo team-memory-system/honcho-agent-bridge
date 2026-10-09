@@ -144,7 +144,7 @@ async function mapLimit(items, limit, run) {
 }
 
 /** Sessions run by automation (codex.mjs classifyAutomation), not by someone at a project. */
-function automationCwd(cwd) {
+export function automationCwd(cwd) {
   return cwd === "/" || cwd.replace(/\\/g, "/").includes("/.symphony/workspaces/");
 }
 

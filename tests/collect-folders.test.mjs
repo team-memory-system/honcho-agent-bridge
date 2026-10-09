@@ -179,6 +179,10 @@ test("the folder choice is read from config, travels in the environment, and nev
   assert.equal(outsideCollectFolders("/w/b/y", skipping, posix), true);
   assert.equal(outsideCollectFolders("/w/new", skipping, posix), false, "a folder made later goes by the rest");
   assert.equal(outsideCollectFolders(undefined, skipping, posix), false);
+  // Automation runs are in no folder the project list shows, so the rest never takes them.
+  assert.equal(outsideCollectFolders("/", skipping, posix), true, "an automation run at / is not a folder made later");
+  assert.equal(outsideCollectFolders("/home/me/.symphony/workspaces/T-1", skipping, posix), true, "nor is a Symphony workspace");
+  assert.equal(outsideCollectFolders("/", only, posix), true);
   // The home folder skipped, a repository inside it taken: the deeper one decides.
   const nested = { take: ["/home/me/dev/app"], skip: ["~"], rest: "take" };
   assert.equal(outsideCollectFolders("/home/me", nested, posix), true, "a session in the home folder itself is skipped");
