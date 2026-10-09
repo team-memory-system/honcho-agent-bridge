@@ -32,8 +32,8 @@ const STEPS = ["서버", "에이전트", "프로젝트"];
 
 // ── 대화 수집 ────────────────────────────────────────────
 
-function folderLine(collect) {
-  const [folders, rest] = folderSummary(collect);
+function folderLine(collect, automation) {
+  const [folders, rest] = folderSummary(collect, automation);
   return [folders, h("div", { class: "s" }, rest)];
 }
 
@@ -88,7 +88,7 @@ function collectBlock(openCollect) {
       context.team?.email ? h("span", { class: "muted" }, ` · ${context.team.email}에서`) : null,
       context.workspace && context.workspace !== "memory" ? h("span", { class: "muted" }, ` · workspace ${context.workspace}`) : null]),
     kv("에이전트", agents),
-    kv("프로젝트 폴더", folderLine(context.collect)),
+    kv("프로젝트 폴더", folderLine(context.collect, context.collectAutomation)),
     kv("지난 대화", past));
 }
 

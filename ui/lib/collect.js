@@ -40,9 +40,13 @@ export function detectAgents({ fresh = false } = {}) {
   if (!detecting || fresh) detecting = get("/api/status").then((status) => status?.detect || null).catch(() => null);
   return detecting;
 }
-export function loadProjects({ fresh = false } = {}) {
-  if (!projecting || fresh) projecting = get("/api/app/projects").then((result) => result?.projects || []).catch(() => []);
+/** The folder list as /api/app/projects answers it, or null when it cannot be read. */
+function projectList({ fresh = false } = {}) {
+  if (!projecting || fresh) projecting = get("/api/app/projects").catch(() => null);
   return projecting;
+}
+export function loadProjects(options) {
+  return projectList(options).then((result) => result?.projects || []);
 }
 
 /**
@@ -68,6 +72,8 @@ export function collectDraft(context) {
     take: new Set(collect?.take || []),
     skip: new Set(collect?.skip || []),
     rest: collect?.rest || "take",
+    // 자동 실행 대화도 수집: conversations no person took part in.
+    automation: Boolean(context?.collectAutomation),
     checked: null,
     projects: null,
     // The folders shown open in the projects step's tree (lib/folder-tree.js).
@@ -348,8 +354,14 @@ export function tickedFolders(projects, saved, { edit = false } = {}) {
 /**
  * The 프로젝트 폴더 line in 설정 as [the folders collected, what happens to new ones]:
  * the folders taken by name, never the ones left out, which can run to hundreds.
+ * With `automation`, the second part says 자동 실행 대화도 수집 too.
  */
-export function folderSummary(collect) {
+export function folderSummary(collect, automation = false) {
+  const [folders, rest] = foldersAndRest(collect);
+  return [folders, automation ? `${rest} · 자동 실행 대화도 수집` : rest];
+}
+
+function foldersAndRest(collect) {
   const names = (folders) => {
     if (!folders?.length) return "없음";
     const shown = folders.slice(0, 6).map((folder) => shortPath(folder).split(/[\\/]/).pop() || shortPath(folder));
@@ -362,24 +374,38 @@ export function folderSummary(collect) {
 
 /**
  * Which project folders' conversations to collect. A folder ticked or not is kept
- * as taken or skipped; 새로 생기는 프로젝트 폴더도 수집 is what happens to the rest.
+ * as taken or skipped; 새로 생기는 프로젝트 폴더도 수집 is what happens to the rest,
+ * and 자동 실행 대화도 수집 whether conversations no person took part in go too.
  */
 export function projectsStep(draft, context, { edit = false } = {}) {
   const box = h("div", {}, h("div", { class: "pt" }, h("div", { class: "pr" }, spinner(), h("span", { class: "muted" }, "대화가 있는 폴더를 찾는 중…"))));
   const past = h("div", { class: "row2 note" });
   const restBox = h("input", { type: "checkbox", checked: draft.rest === "take" });
   restBox.addEventListener("change", () => { draft.rest = restBox.checked ? "take" : "skip"; });
+  const autoBox = h("input", { type: "checkbox", checked: Boolean(draft.automation) });
+  const autoCount = h("span", { class: "muted" });
+  // The chosen agents' conversations no person took part in, from the folder list.
+  let automation = 0;
   const drawPast = () => {
-    const chosen = (draft.projects || []).filter((project) => draft.checked.has(project.path));
+    if (!draft.projects) return;
+    const chosen = draft.projects.filter((project) => draft.checked.has(project.path));
     const count = chosen.reduce((sum, project) => sum + project.count, 0);
-    past.textContent = !draft.projects?.length ? "새로 생기는 대화부터 수집합니다."
-      : !chosen.length ? (edit ? "" : "수집할 폴더를 고르세요.")
-      : edit ? `고른 폴더의 지난 대화 ${number(count)}개 중 아직 없는 것을 함께 수집합니다.`
-        : `고른 폴더의 지난 대화 ${number(count)}개도 함께 수집합니다.`;
+    const programs = draft.automation && automation ? `자동 실행 대화 ${number(automation)}개` : "";
+    past.textContent = !draft.projects.length ? "새로 생기는 대화부터 수집합니다."
+      : !chosen.length ? (edit ? (programs ? `${programs} 중 아직 없는 것을 함께 수집합니다.` : "") : "수집할 폴더를 고르세요.")
+      : edit ? `고른 폴더의 지난 대화 ${number(count)}개${programs ? `와 ${programs}` : ""} 중 아직 없는 것을 함께 수집합니다.`
+        : `고른 폴더의 지난 대화 ${number(count)}개${programs ? `와 ${programs}` : ""}도 함께 수집합니다.`;
   };
+  autoBox.addEventListener("change", () => {
+    draft.automation = autoBox.checked;
+    drawPast();
+  });
   const servers = activeTargets(draft);
-  loadProjects().then((all) => {
-    draft.projects = chosenProjects(all, draft.agents || new Set(Object.keys(AGENTS)));
+  projectList().then((result) => {
+    const agents = draft.agents || new Set(Object.keys(AGENTS));
+    draft.projects = chosenProjects(result?.projects || [], agents);
+    automation = [...agents].reduce((sum, name) => sum + Number(result?.automation?.[name] || 0), 0);
+    autoCount.textContent = automation ? `${number(automation)}개` : "";
     if (!draft.checked) draft.checked = tickedFolders(draft.projects, context?.collect || null, { edit });
     if (!draft.open) draft.open = openAtFirst(draft.projects);
     if (!draft.projects.length) {
@@ -387,7 +413,7 @@ export function projectsStep(draft, context, { edit = false } = {}) {
       restBox.checked = true;
       clear(box, h("div", { class: "pt" }, h("div", { class: "list-empty" }, "아직 대화가 있는 폴더가 없습니다. 앞으로 생기는 폴더의 대화를 수집합니다.")));
     } else if (servers.length) {
-      clear(box, matrix(draft, servers, restBox, drawPast));
+      clear(box, matrix(draft, servers, { restBox, autoBox, autoCount }, drawPast));
     } else {
       clear(box, folderTreeTable(draft.projects, draft.checked, { open: draft.open, onChange: drawPast }));
     }
@@ -399,6 +425,7 @@ export function projectsStep(draft, context, { edit = false } = {}) {
       h("p", { class: "lead" }, servers.length ? "서버마다 쌓을 폴더를 고르세요. 고른 서버마다 칸이 하나씩 생깁니다." : "고른 에이전트의 대화가 있는 폴더입니다."),
       box,
       servers.length ? null : h("label", { class: "row2" }, restBox, "새로 생기는 프로젝트 폴더도 수집"),
+      servers.length ? null : h("label", { class: "row2" }, autoBox, "자동 실행 대화도 수집", autoCount),
       past),
     check() {
       if (!draft.projects) return "폴더를 찾는 중입니다. 잠시 뒤 다시 누르세요.";
@@ -414,10 +441,10 @@ export function projectsStep(draft, context, { edit = false } = {}) {
 /**
  * The folders as a tree with a column for each server that takes them: the own
  * server's column is what this computer collects, each other server's the folders it
- * also gets. 새로 생기는 폴더 is the own server's alone: another server takes only the
- * folders named for it.
+ * also gets. 새로 생기는 폴더 and 자동 실행 대화 are the own server's alone: another
+ * server takes only the folders named for it, and only the person's conversations.
  */
-function matrix(draft, servers, restBox, onChange) {
+function matrix(draft, servers, { restBox, autoBox, autoCount }, onChange) {
   const columns = [{ label: "내 서버", folders: draft.checked, own: true }, ...servers];
   const template = { gridTemplateColumns: `minmax(0, 1fr) 70px ${columns.map(() => "96px").join(" ")}` };
   const rows = treeRows(draft.projects, columns, { open: draft.open, template, onChange });
@@ -427,8 +454,14 @@ function matrix(draft, servers, restBox, onChange) {
     h("div", { class: "pr m h", style: template }, h("span", {}, "폴더"), h("span", { class: "c" }, "대화"),
       columns.map((column) => h("span", { class: "ch" }, column.label, column.company ? [h("br"), tag("승인 요청", "warn")] : null))),
     rows.element,
-    h("div", { class: "pr m", style: template }, h("span", { class: "pn" }, h("b", {}, "새로 생기는 폴더")), h("span", {}),
-      columns.map((column) => (column.own ? h("span", { class: "pr-c" }, restBox) : h("span", { class: "pr-c" }, h("input", { type: "checkbox", disabled: true, "aria-label": `새로 생기는 폴더 → ${column.label}` }))))));
+    ownRow(template, columns, "새로 생기는 폴더", restBox),
+    ownRow(template, columns, "자동 실행 대화", autoBox, autoCount));
+}
+
+/** A row of the server table only the own server's column takes. */
+function ownRow(template, columns, label, box, hint = null) {
+  return h("div", { class: "pr m", style: template }, h("span", { class: "pn" }, h("b", {}, label), hint ? [" ", hint] : null), h("span", {}),
+    columns.map((column) => h("span", { class: "pr-c" }, column.own ? box : h("input", { type: "checkbox", disabled: true, "aria-label": `${label} → ${column.label}` }))));
 }
 
 /** A short id for a server being added: it names a folder on this computer. */
@@ -472,16 +505,18 @@ export async function applyTargets(draft) {
   return problems;
 }
 
-/** The folder choice as `setup` options: what is ticked, what is not, and the rest. */
+/** The folder choice as `setup` options: what is ticked, what is not, the rest, and 자동 실행 대화. */
 export function folderOptions(draft) {
   if (!draft.projects) return {};
   const take = draft.projects.filter((project) => draft.checked.has(project.path)).map((project) => project.path);
   const skip = draft.projects.filter((project) => !draft.checked.has(project.path)).map((project) => project.path);
-  if (!skip.length && draft.rest === "take") return { allFolders: true };
+  const automation = draft.automation ? "take" : "skip";
+  if (!skip.length && draft.rest === "take") return { allFolders: true, automation };
   return {
     ...(take.length ? { takeFolders: take.join(",") } : {}),
     ...(skip.length ? { skipFolders: skip.join(",") } : {}),
     restFolders: draft.rest,
+    automation,
   };
 }
 

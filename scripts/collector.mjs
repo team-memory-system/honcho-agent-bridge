@@ -17,6 +17,8 @@ import {
   isCloudflareAccessBlock,
 } from "./honcho-access.mjs";
 import { projectFolder, projectScope } from "./projects.mjs";
+import { automationOnly } from "./providers/automation.mjs";
+import { COLLECT_AUTOMATION_ENV } from "./config.mjs";
 import { collectFoldersFromEnvironment, folderMatches, foldersFromEnvironment, outsideCollectFolders } from "./targets.mjs";
 
 const ROOT_URL = (process.env.HONCHO_BASE_URL || "http://127.0.0.1:8001").replace(/\/+$/, "");
@@ -58,6 +60,9 @@ const TARGET_FOLDERS = foldersFromEnvironment(process.env);
 // The folders this computer's own server takes, when setup chose some (config.json
 // `collect`). A target run has its own folders and never this choice.
 const COLLECT_FOLDERS = TARGET_FOLDERS === null ? collectFoldersFromEnvironment(process.env) : null;
+// 자동 실행 대화도 수집 (config.json `collect.automation`): the own server's runs
+// alone, and only when it is on. A target never takes those conversations.
+const COLLECT_AUTOMATION = TARGET_FOLDERS === null && process.env[COLLECT_AUTOMATION_ENV] === "1";
 
 /**
  * Whether this run may not send `parsed`. A session is decided by its own working
@@ -69,9 +74,16 @@ function outsideTargetFolders(parsed) {
   return !folderMatches(parsed?.metadata?.cwd, TARGET_FOLDERS);
 }
 
-/** Whether the own server leaves `parsed` out. A ChatGPT conversation has no folder and is chosen on its own. */
-function outsideCollectedFolders(provider, parsed) {
-  return provider !== "chatgpt" && outsideCollectFolders(parsed?.metadata?.cwd, COLLECT_FOLDERS);
+/**
+ * Why the own server leaves `parsed` out, or null. A conversation no person took part
+ * in (providers/automation.mjs) goes by 자동 실행 대화도 수집 alone: the folder list
+ * shows none of them, so the folder choice says nothing about them, and a target run
+ * never takes one. A ChatGPT conversation has no folder and is chosen on its own.
+ */
+function leftOut(provider, parsed) {
+  if (automationOnly(provider, parsed)) return COLLECT_AUTOMATION ? null : "automation";
+  if (provider !== "chatgpt" && outsideCollectFolders(parsed?.metadata?.cwd, COLLECT_FOLDERS)) return "outside collected folders";
+  return null;
 }
 
 /**
@@ -547,7 +559,8 @@ async function importCodex(args, hookInput) {
 
   const parsed = await getProvider("codex").parseTranscript(rolloutPath, hookInput);
   if (outsideTargetFolders(parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath);
-  if (outsideCollectedFolders("codex", parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath, "outside collected folders");
+  const left = leftOut("codex", parsed);
+  if (left) return skippedOutsideFolders("codex", parsed, rolloutPath, left);
   if (nothingSaid(parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath, "no conversation");
   const sessionId = parsed.session_id;
   const segmentId = codexSegmentId(rolloutPath, parsed.metadata.original_session_id);
@@ -615,9 +628,8 @@ async function importParsedSession(args, parsed, transcriptPath, options = {}) {
   // Every non-Codex write passes here; a target run never writes a session from
   // outside its folders, whoever called.
   if (outsideTargetFolders(parsed)) return skippedOutsideFolders(args.provider, parsed, transcriptPath);
-  if (outsideCollectedFolders(args.provider, parsed)) {
-    return skippedOutsideFolders(args.provider, parsed, transcriptPath, "outside collected folders");
-  }
+  const left = leftOut(args.provider, parsed);
+  if (left) return skippedOutsideFolders(args.provider, parsed, transcriptPath, left);
   if (nothingSaid(parsed)) return skippedOutsideFolders(args.provider, parsed, transcriptPath, "no conversation");
   const sessionId = parsed.session_id;
   return withStateLock(args.provider, async () => {

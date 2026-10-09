@@ -517,7 +517,7 @@ function modelOption(body) {
  * passed through under a name the CLI would ignore in silence.
  */
 const SETUP_OPTIONS = new Set([
-  "userPeer", "honchoUrl", "workspace", "agents", "codexRoot", "dataDir", "takeFolders", "skipFolders", "restFolders", "allFolders",
+  "userPeer", "honchoUrl", "workspace", "agents", "codexRoot", "dataDir", "takeFolders", "skipFolders", "restFolders", "allFolders", "automation",
 ]);
 
 /**

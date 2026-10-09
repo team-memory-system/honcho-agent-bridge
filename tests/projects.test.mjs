@@ -158,7 +158,7 @@ test("the system's temporary folders are the ones that do not hold home", () => 
   assert.equal(datedParent("/2026-10-01/x"), null);
 });
 
-test("automation sessions are left out, and a transcript without a folder is counted apart", async (t) => {
+test("a conversation no person took part in is counted apart by agent, and so is a transcript without a folder", async (t) => {
   const home = await tempDir(t);
   const project = path.join(home, "project");
   await fsp.mkdir(path.join(project, ".git"), { recursive: true });
@@ -167,7 +167,12 @@ test("automation sessions are left out, and a transcript without a folder is cou
 
   await writeTranscript(path.join(codex, "rollout-root.jsonl"), codexLines("/"));
   await writeTranscript(path.join(codex, "rollout-symphony.jsonl"), codexLines(path.join(home, ".symphony", "workspaces", "TEAM-1")));
-  await writeTranscript(path.join(claude, "symphony.jsonl"), claudeLines(path.join(home, ".symphony", "workspaces", "TEAM-2", "src")));
+  // A Codex automation runs in the project, but its session_meta says what it is.
+  await writeTranscript(path.join(codex, "rollout-cron.jsonl"), lines(
+    { type: "session_meta", payload: { id: "a", cwd: project, originator: "codex_cli_rs", thread_source: "automation" } },
+  ));
+  await writeTranscript(path.join(codex, "rollout-exec.jsonl"), lines({ type: "session_meta", payload: { id: "e", cwd: project, originator: "codex_exec", source: "exec" } }));
+  await writeTranscript(path.join(claude, "sdk.jsonl"), lines({ type: "user", cwd: project, entrypoint: "sdk-cli", sessionId: "k", message: { role: "user", content: "x" } }));
   // A cwd outside session_meta is not the session's folder.
   await writeTranscript(path.join(codex, "rollout-nometa.jsonl"), lines({ type: "turn_context", payload: { cwd: project } }));
   await writeTranscript(path.join(claude, "nocwd.jsonl"), lines({ type: "summary", summary: "x" }, { type: "user", cwd: "" }));
@@ -180,8 +185,9 @@ test("automation sessions are left out, and a transcript without a folder is cou
   await writeTranscript(path.join(codex, "rollout-kept.jsonl"), codexLines(project));
 
   const result = await conversationProjects({ home });
-  assert.equal(result.scanned, 10);
+  assert.equal(result.scanned, 12);
   assert.equal(result.withoutFolder, 5);
+  assert.deepEqual(result.automation, { claude: 1, codex: 4 });
   assert.deepEqual(result.projects.map(({ path: where, sessions, agents }) => ({ where, sessions, agents })), [
     { where: project, sessions: 2, agents: { claude: 1, codex: 1 } },
   ]);

@@ -9,7 +9,8 @@
 // counts under the folder above it (the Codex app opens a new
 // ~/Documents/Codex/<YYYY-MM-DD>-<task> or <YYYY-MM-DD>/<task> for each task).
 // `target backfill` finds transcripts with the same two functions below, so the
-// list covers exactly the conversations a backfill would look at.
+// list covers exactly the conversations a backfill would look at. A conversation no
+// person took part in (providers/automation.mjs) is counted apart, not under a folder.
 //
 // Importing this module does nothing on its own.
 import crypto from "node:crypto";
@@ -19,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { userHome } from "./config.mjs";
+import { automationRecord } from "./providers/automation.mjs";
 
 export async function walkFiles(root, accept, depth = Infinity) {
   const found = [];
@@ -59,11 +61,15 @@ const CHUNK_BYTES = 16 * 1024;
 const CONCURRENCY = 16;
 const NEWLINE = 0x0a;
 
-// file path -> { size, mtimeMs, cwd }: a file that has not changed is not read again.
+// file path -> { size, mtimeMs, cwd, automation }: a file that has not changed is not read again.
 const headCache = new Map();
 
-/** The folder a transcript line says the session ran in, if this line says so. */
-function cwdFromLine(provider, line) {
+/**
+ * `{ cwd, automation }` when this transcript line says the folder the session ran in,
+ * else null; `automation` is whether that line already marks a conversation no person
+ * took part in.
+ */
+function headFromLine(provider, line) {
   let record;
   try {
     record = JSON.parse(line);
@@ -75,11 +81,11 @@ function cwdFromLine(provider, line) {
   const value = provider === "codex"
     ? (record.type === "session_meta" ? record.payload?.cwd : undefined)
     : record.cwd;
-  return typeof value === "string" && value ? value : null;
+  return typeof value === "string" && value ? { cwd: value, automation: automationRecord(provider, record) } : null;
 }
 
-/** The cwd from the first 512 KB of a transcript, reading no further than it takes to find it. */
-async function readCwd(provider, file) {
+/** The head from the first 512 KB of a transcript, reading no further than it takes to find it. */
+async function readHead(provider, file) {
   const handle = await fsp.open(file, "r");
   try {
     let pending = Buffer.alloc(0);
@@ -95,21 +101,21 @@ async function readCwd(provider, file) {
       while ((end = pending.indexOf(NEWLINE, start)) !== -1) {
         const line = pending.toString("utf8", start, end).trim();
         start = end + 1;
-        const cwd = line ? cwdFromLine(provider, line) : null;
-        if (cwd) return cwd;
+        const head = line ? headFromLine(provider, line) : null;
+        if (head) return head;
       }
       pending = pending.subarray(start);
     }
     // The last line: whole at the end of the file, or cut at 512 KB and then not JSON.
     const rest = pending.toString("utf8").trim();
-    return rest ? cwdFromLine(provider, rest) : null;
+    return rest ? headFromLine(provider, rest) : null;
   } finally {
     await handle.close();
   }
 }
 
-/** `{ cwd, mtimeMs }` for one transcript, or null for one that is gone. */
-async function transcriptCwd(provider, file) {
+/** `{ cwd, automation, mtimeMs }` for one transcript, or null for one that is gone. */
+async function transcriptHead(provider, file) {
   let stat;
   try {
     stat = await fsp.stat(file);
@@ -117,16 +123,17 @@ async function transcriptCwd(provider, file) {
     return null;
   }
   const cached = headCache.get(file);
-  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return { cwd: cached.cwd, mtimeMs: stat.mtimeMs };
-  let cwd;
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return { cwd: cached.cwd, automation: cached.automation, mtimeMs: stat.mtimeMs };
+  let head;
   try {
-    cwd = await readCwd(provider, file);
+    head = await readHead(provider, file);
   } catch {
     // Unreadable now; tried again next time.
-    return { cwd: null, mtimeMs: stat.mtimeMs };
+    return { cwd: null, automation: false, mtimeMs: stat.mtimeMs };
   }
-  headCache.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, cwd });
-  return { cwd, mtimeMs: stat.mtimeMs };
+  const { cwd = null, automation = false } = head || {};
+  headCache.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, cwd, automation });
+  return { cwd, automation, mtimeMs: stat.mtimeMs };
 }
 
 async function mapLimit(items, limit, run) {
@@ -314,11 +321,12 @@ export async function projectScope(projectPath) {
 
 /**
  * This computer's conversation projects, newest first:
- * `{ ok: true, projects: [{ path, name, sessions, lastAt, agents: { claude, codex }, exists, git, folded, folders, temp }], scanned, withoutFolder }`.
+ * `{ ok: true, projects: [{ path, name, sessions, lastAt, agents: { claude, codex }, exists, git, folded, folders, temp }], scanned, withoutFolder, automation: { claude, codex } }`.
  * `git` is a repository root, `folded` a folder that holds one-off folders,
  * `folders` how many distinct folders the sessions were opened in, and `temp` a
  * temporary folder of the system's. The `temp` option stands in for those
- * (systemTempFolders).
+ * (systemTempFolders). `automation` counts, by agent, the conversations no person
+ * took part in, which no project counts (providers/automation.mjs automationRecord).
  */
 export async function conversationProjects({ config, home: given, temp } = {}) {
   const home = path.resolve(given || userHome());
@@ -332,10 +340,11 @@ export async function conversationProjects({ config, home: given, temp } = {}) {
   for (const provider of PROVIDERS) {
     for (const file of await transcriptFiles({ sources }, provider)) transcripts.push({ provider, file });
   }
-  const heads = await mapLimit(transcripts, CONCURRENCY, ({ provider, file }) => transcriptCwd(provider, file));
+  const heads = await mapLimit(transcripts, CONCURRENCY, ({ provider, file }) => transcriptHead(provider, file));
 
   let scanned = 0;
   let withoutFolder = 0;
+  const automation = { claude: 0, codex: 0 };
   const byCwd = new Map();
   transcripts.forEach(({ provider }, index) => {
     const head = heads[index];
@@ -346,7 +355,10 @@ export async function conversationProjects({ config, home: given, temp } = {}) {
       withoutFolder += 1;
       return;
     }
-    if (automationCwd(cwd)) return;
+    if (head.automation) {
+      automation[provider] += 1;
+      return;
+    }
     const key = path.resolve(cwd);
     const entry = byCwd.get(key) || { sessions: [] };
     entry.sessions.push({ provider, mtimeMs });
@@ -402,5 +414,5 @@ export async function conversationProjects({ config, home: given, temp } = {}) {
     // The scope the project's conversations go to when it is opened to a teammate.
     scope: scopes[index].id,
   }));
-  return { ok: true, projects: list, scanned, withoutFolder };
+  return { ok: true, projects: list, scanned, withoutFolder, automation };
 }

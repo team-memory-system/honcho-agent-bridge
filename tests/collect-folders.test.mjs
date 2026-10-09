@@ -2,7 +2,8 @@
 // only some folders, or every folder but some, so folders made later are taken
 // too. What matters: a session outside the choice never reaches the own server, a
 // ChatGPT import is never held back by it, a target keeps its own folders, and
-// `backfill` sends the past sessions of the chosen folders once and only once.
+// `backfill` sends the past sessions of the chosen folders once and only once. A
+// conversation no person took part in goes by 자동 실행 대화도 수집 alone.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -13,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { COLLECT_FOLDERS_ENV, collectFolders, configEnvironment } from "../scripts/config.mjs";
+import { COLLECT_AUTOMATION_ENV, COLLECT_FOLDERS_ENV, collectAutomation, collectFolders, configEnvironment } from "../scripts/config.mjs";
 import { collectFoldersFromEnvironment, outsideCollectFolders, targetEnvironment } from "../scripts/targets.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -119,12 +120,13 @@ function hook(provider, transcript, env) {
   });
 }
 
-async function writeClaude(file, { sessionId, cwd, turns }) {
+async function writeClaude(file, { sessionId, cwd, entrypoint, turns }) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   const rows = turns.map(([role, text], index) => ({
     uuid: `${sessionId}-${index + 1}`,
     sessionId,
     cwd,
+    entrypoint,
     timestamp: `2026-09-20T10:00:0${index}Z`,
     message: role === "user" ? { role, content: text } : { role, content: [{ type: "text", text }] },
   }));
@@ -180,9 +182,9 @@ test("the folder choice is read from config, travels in the environment, and nev
   assert.equal(outsideCollectFolders("/w/b/y", skipping, posix), true);
   assert.equal(outsideCollectFolders("/w/new", skipping, posix), false, "a folder made later goes by the rest");
   assert.equal(outsideCollectFolders(undefined, skipping, posix), false);
-  // Automation runs are in no folder the project list shows, so the rest never takes them.
-  assert.equal(outsideCollectFolders("/", skipping, posix), true, "an automation run at / is not a folder made later");
-  assert.equal(outsideCollectFolders("/home/me/.symphony/workspaces/T-1", skipping, posix), true, "nor is a Symphony workspace");
+  // A program's conversation is decided before this, by 자동 실행 대화도 수집; here a folder is a folder.
+  assert.equal(outsideCollectFolders("/", skipping, posix), false, "a session at / goes by the rest");
+  assert.equal(outsideCollectFolders("/home/me/.symphony/workspaces/T-1", skipping, posix), false, "so does one in a Symphony workspace");
   assert.equal(outsideCollectFolders("/", only, posix), true);
   // A temporary folder and an app's folder inside a hidden one are folders like any other.
   assert.equal(outsideCollectFolders("/tmp/try-1", skipping, posix), false, "a temporary folder made later goes by the rest");
@@ -197,9 +199,19 @@ test("the folder choice is read from config, travels in the environment, and nev
   assert.equal(outsideCollectFolders("/w/a", { take: ["/w/a"], skip: ["/w/a"], rest: "take" }, posix), true, "a folder both taken and skipped is skipped");
   assert.equal(outsideCollectFolders("/anything", null, posix), false);
 
+  assert.equal(collectAutomation(config), false, "자동 실행 대화도 수집 is off unless config says so");
+  assert.equal(COLLECT_AUTOMATION_ENV in env, false);
+  const automated = { ...config, collect: { ...config.collect, automation: true } };
+  assert.equal(collectAutomation(automated), true);
+  assert.deepEqual(collectFolders(automated), { take: [], skip: ["/w/b"], rest: "take" }, "the switch does not change the folders");
+  assert.equal(collectFolders({ collect: { automation: true } }), null, "every folder, and programs' conversations too");
+  const automatedEnv = configEnvironment(automated, "claude");
+  assert.equal(automatedEnv[COLLECT_AUTOMATION_ENV], "1");
+
   const target = { id: "team", honcho: { baseUrl: "http://127.0.0.1:2" }, folders: ["/w/a"] };
-  const targetEnv = targetEnvironment({ ...config, targets: [target] }, target, "claude", env);
+  const targetEnv = targetEnvironment({ ...automated, targets: [target] }, target, "claude", automatedEnv);
   assert.equal(COLLECT_FOLDERS_ENV in targetEnv, false, "a target takes its own folders, not the own server's choice");
+  assert.equal(COLLECT_AUTOMATION_ENV in targetEnv, false, "and never a conversation no person took part in");
 });
 
 test("setup takes some folders, skips some, says what the rest does, or takes every folder again", async (t) => {
@@ -235,6 +247,57 @@ test("setup takes some folders, skips some, says what the rest does, or takes ev
   assert.deepEqual(kept.body.config.collect, { take: [], skip: [install.side], rest: "take" }, "a plan without a choice keeps the saved one");
   const all = await cli(["setup", "plan", "--all-folders"], install.env);
   assert.equal(all.body.config.collect, undefined, "every folder again");
+
+  // 자동 실행 대화도 수집 is saved with the folders, kept when not given, and off again with skip.
+  const automated = await cli(["setup", "apply", "--automation", "take"], install.env);
+  assert.equal(automated.body.ok, true, automated.text);
+  assert.deepEqual(JSON.parse(await fsp.readFile(install.configPath, "utf8")).collect, { take: [], skip: [install.side], rest: "take", automation: true });
+  const keptOn = await cli(["setup", "plan", "--all-folders"], install.env);
+  assert.deepEqual(keptOn.body.config.collect, { automation: true }, "every folder, programs' conversations still on");
+  const off = await cli(["setup", "plan", "--automation", "skip"], install.env);
+  assert.deepEqual(off.body.config.collect, { take: [], skip: [install.side], rest: "take" });
+  const unclear = await cli(["setup", "plan", "--automation", "maybe"], install.env);
+  assert.equal(unclear.body.ok, false);
+  assert.ok(unclear.body.issues.some((issue) => issue.includes("--automation")));
+});
+
+test("a conversation no person took part in goes by 자동 실행 대화도 수집 alone, wherever it ran, and never to a target", async (t) => {
+  const primary = await fakeHoncho();
+  const target = await fakeHoncho();
+  t.after(() => { primary.server.close(); target.server.close(); });
+  const install = await makeInstall(t, primary, {
+    collect: ({ team }) => ({ take: [team], rest: "skip" }),
+    targets: ({ team }) => [{ id: "team", honcho: { baseUrl: target.url, workspaceId: "memory" }, folders: [team], enabled: true }],
+  });
+  const files = await writeSessions(install);
+  // A Codex automation in the chosen folder, a `claude -p` run in one not chosen, and one at /.
+  const cron = path.join(install.home, ".codex", "sessions", "2026", "09", "20", "rollout-cron.jsonl");
+  await writeCodex(cron, { sessionId: "cron", cwd: install.team, turns: [["user", "Automation: check the build"], ["assistant", "build is green"]] });
+  const sdk = path.join(install.home, ".claude", "projects", "side", "sdk.jsonl");
+  await writeClaude(sdk, { sessionId: "sdk", cwd: install.side, entrypoint: "sdk-cli", turns: [["user", "summarize the log"], ["assistant", "three errors"]] });
+  const root = path.join(install.home, ".claude", "projects", "root", "root.jsonl");
+  await writeClaude(root, { sessionId: "root", cwd: "/", entrypoint: "sdk-ts", turns: [["user", "list the files"], ["assistant", "none"]] });
+  const all = [["claude", files.inside], ["claude", files.outside], ["codex", files.codex], ["codex", cron], ["claude", sdk], ["claude", root]];
+
+  for (const [provider, file] of all) {
+    const result = await hook(provider, file, install.env);
+    assert.equal(result.status, 0, result.stdout);
+  }
+  assert.deepEqual(primary.sessionIds(), ["claude-inside", "codex-codex-inside"], "off: the person's sessions of the chosen folder");
+  assert.deepEqual(target.sessionIds(), ["claude-inside", "codex-codex-inside"]);
+
+  const on = await cli(["setup", "apply", "--automation", "take"], install.env);
+  assert.equal(on.body.ok, true, on.text);
+  for (const [provider, file] of all) {
+    const result = await hook(provider, file, install.env);
+    assert.equal(result.status, 0, result.stdout);
+  }
+  assert.deepEqual(primary.sessionIds(), ["claude-inside", "claude-root", "claude-sdk", "codex-codex-inside", "codex-cron"],
+    "on: every program's conversation, in a folder not chosen or at / too; the person's still by folder");
+  assert.deepEqual(target.sessionIds(), ["claude-inside", "codex-codex-inside"], "a target never takes one");
+  const peers = (id) => primary.sessions.get(id).map((message) => message.peer_id);
+  assert.deepEqual(peers("codex-cron"), ["automation_codex", "assistant_codex"]);
+  assert.deepEqual(peers("claude-sdk"), ["automation_claude", "assistant_claude"]);
 });
 
 test("a session outside the chosen folders never reaches the own server, and a target keeps its own folders", async (t) => {
@@ -300,6 +363,9 @@ test("backfill sends the past sessions of the chosen folders to the own server, 
   t.after(() => primary.server.close());
   const install = await makeInstall(t, primary, { collect: ({ team }) => ({ take: [team], rest: "skip" }) });
   await writeSessions(install);
+  // A program's conversation in the chosen folder waits for 자동 실행 대화도 수집.
+  const cron = path.join(install.home, ".codex", "sessions", "2026", "09", "19", "rollout-cron.jsonl");
+  await writeCodex(cron, { sessionId: "cron", cwd: install.team, turns: [["user", "Automation: check the build"], ["assistant", "build is green"]] });
 
   const before = await cli(["backfill", "status"], install.env);
   assert.equal(before.body.ok, true);
@@ -308,7 +374,7 @@ test("backfill sends the past sessions of the chosen folders to the own server, 
   const run = await cli(["backfill", "run"], install.env);
   assert.equal(run.body.ok, true, run.text);
   assert.equal(run.body.sent_sessions, 2);
-  assert.equal(run.body.outside_folders, 1);
+  assert.equal(run.body.outside_folders, 2);
   assert.deepEqual(primary.sessionIds(), ["claude-inside", "codex-codex-inside"]);
 
   const writes = primary.writes();
@@ -332,6 +398,18 @@ test("backfill sends the past sessions of the chosen folders to the own server, 
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(primary.sessionIds().includes("claude-late"), "the background run sent the new session");
+  while ((await cli(["backfill", "status"], install.env)).body.running && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  // Turning 자동 실행 대화도 수집 on looks again at what was left out, as the app does after 적용.
+  const on = await cli(["setup", "apply", "--automation", "take"], install.env);
+  assert.equal(on.body.ok, true, on.text);
+  const automated = await cli(["backfill", "run"], install.env);
+  assert.equal(automated.body.considered, 2, "the two left out, and only those");
+  assert.equal(automated.body.sent_sessions, 1);
+  assert.equal(automated.body.outside_folders, 1, "the person's session outside the chosen folder stays out");
+  assert.ok(primary.sessionIds().includes("codex-cron"));
 });
 
 test("a backfill asked to stop ends after the session it is sending, and the next run carries on", async (t) => {

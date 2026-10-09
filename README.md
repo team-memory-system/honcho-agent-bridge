@@ -412,34 +412,44 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 
 Setup can choose which project folders' conversations this computer's own server
 takes, and the app's 프로젝트 step does: the folders that held this computer's
-Claude Code and Codex conversations (`GET /api/app/projects`), ticked or not, and
-새로 생기는 프로젝트 폴더도 수집 for every folder they do not name. A first setup ticks
-none and asks for at least one, since every ticked folder's past conversations go
-in at 적용.
+Claude Code and Codex conversations (`GET /api/app/projects`), ticked or not,
+새로 생기는 프로젝트 폴더도 수집 for every folder they do not name, and 자동 실행 대화도
+수집 for conversations no person took part in. A first setup ticks none and asks for
+at least one, since every ticked folder's past conversations go in at 적용.
 
 ```bash
 node scripts/cli.mjs setup apply --skip-folders ~/private            # every folder but that one
 node scripts/cli.mjs setup apply --take-folders ~/work --rest-folders skip   # that one and nothing else
 node scripts/cli.mjs setup apply --all-folders                         # every folder again
+node scripts/cli.mjs setup apply --automation take                     # programs' conversations too
 ```
 
 - `config.json` keeps it as `collect: { take, skip, rest }`. The deepest named folder
   a session ran in decides, so a repository taken inside a skipped home folder is
   still taken, and the other way round; a folder in both is skipped. A session in
   none of them, folders made later included, goes by `rest` (`take` unless
-  `--rest-folders skip`). An automation run (a session at `/` or in a Symphony
-  workspace) is in no folder the list shows, so `rest` never takes it. Without any
-  of these options setup keeps what is saved.
+  `--rest-folders skip`). Without any of these options setup keeps what is saved.
+- 자동 실행 대화도 수집 (`--automation take|skip`, `collect.automation: true`) takes
+  the conversations in which every prompt came from a program: a Codex automation or
+  watchdog, a Symphony task, a subagent, `codex exec`, `claude -p` and the Agent SDK,
+  a scripted agy run. The switch alone decides them, wherever they ran: the list
+  shows none of them under a folder and counts them apart (`automation` in `GET
+  /api/app/projects`, by the line it reads the folder from). They go to the own
+  server as `automation_codex`, `automation_claude` and `automation_agy`, never to a
+  target. It is off unless set; setup keeps what is saved when it is not given. A
+  conversation the person typed in even once is theirs and goes by its folder.
 - A session with nothing said in it (only tool output, or a bare slash command) makes
   no conversation on the server. A Claude Code session's folder is the first one its
   transcript records, on any line, the same one the list counts it under.
-- The collector reads the choice from `HONCHO_AGENT_COLLECT_FOLDERS`, which
-  `configEnvironment` sets for the own server's runs only; a target keeps its own
-  folders. A ChatGPT import has no folder and is never held back by it.
+- The collector reads the choice from `HONCHO_AGENT_COLLECT_FOLDERS`, and the switch
+  from `HONCHO_AGENT_COLLECT_AUTOMATION=1`, which `configEnvironment` sets for the own
+  server's runs only; a target keeps its own folders. A ChatGPT import has no folder
+  and is never held back by it.
 - `backfill run` sends the past sessions of the chosen folders, oldest first, through
   the same importer, deduped against what the hook already sent; `backfill start`
   runs it in the background (first setup does, and so does 대화 수집's 적용) and
-  `backfill status` says how far it got. `backfill stop` ends a run after the
+  `backfill status` says how far it got; turning 자동 실행 대화도 수집 on makes the next
+  run look again at what it left out. `backfill stop` ends a run after the
   conversation it is sending (기억 설정 → 지난 대화 → 멈추기; 이어서 보내기 starts
   again). Its progress is in `<dataDir>/state/backfill.json`, so a run carries on where
   the last one stopped, and `/api/app/flow` reads `backfill-status.json` for the

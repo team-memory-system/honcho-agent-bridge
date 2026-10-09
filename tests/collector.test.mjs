@@ -245,7 +245,7 @@ test("collector recovery compares stored source metadata instead of guessing fro
   assert.ok(saved.sessions["claude-session-1"].reconciled_source_hashes_at);
 });
 
-test("Codex subagent prompts are stored as automation rather than direct user memory", async (t) => {
+test("Codex subagent prompts are left out by default and, with 자동 실행 대화도 수집 on, stored as automation rather than direct user memory", async (t) => {
   const api = await startApi();
   t.after(() => api.server.close());
   const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-subagent-"));
@@ -268,10 +268,17 @@ test("Codex subagent prompts are stored as automation rather than direct user me
     HONCHO_AGENT_HOOK_STATE: path.join(directory, "state.json"),
     HONCHO_AGENT_HOOK_LOG: path.join(directory, "collector.log"),
   };
-
-  const result = JSON.parse(
+  delete env.HONCHO_AGENT_COLLECT_AUTOMATION;
+  const run = async () => JSON.parse(
     (await execFileAsync(process.execPath, [COLLECTOR, "--provider", "codex", "--transcript", transcript], { env })).stdout,
   );
+
+  const left = await run();
+  assert.equal(left.skipped, "automation");
+  assert.equal(api.requests.length, 0, "nothing reaches the server");
+
+  env.HONCHO_AGENT_COLLECT_AUTOMATION = "1";
+  const result = await run();
   assert.equal(result.session_id, "codex-child");
   const sessionCreate = api.requests.find((entry) => entry.url === "/v3/workspaces/memory/sessions");
   assert.equal(sessionCreate.body.metadata.parent_session_id, "parent");
@@ -281,7 +288,7 @@ test("Codex subagent prompts are stored as automation rather than direct user me
   assert.equal(messageWrite.body.messages[0].metadata.automation_kind, "codex_subagent");
 });
 
-test("Claude Agent SDK sessions are stored as automation; interactive and unmarked sessions stay the person's", async (t) => {
+test("Claude Agent SDK sessions are left out by default and, with 자동 실행 대화도 수집 on, stored as automation; interactive and unmarked sessions stay the person's", async (t) => {
   const api = await startApi();
   t.after(() => api.server.close());
   const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-bridge-claude-sdk-"));
@@ -295,6 +302,20 @@ test("Claude Agent SDK sessions are stored as automation; interactive and unmark
     HONCHO_AGENT_HOOK_LOG: path.join(directory, "collector.log"),
   };
   delete env.HONCHO_CLAUDE_AUTOMATION_PEER;
+  delete env.HONCHO_AGENT_COLLECT_AUTOMATION;
+  const off = path.join(directory, "off.jsonl");
+  await fsp.writeFile(
+    off,
+    [
+      { uuid: "off-user", sessionId: "session-off", entrypoint: "sdk-cli", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp/project", type: "user", message: { role: "user", content: "Current position (X black, O white, . empty):" } },
+      { uuid: "off-assistant", sessionId: "session-off", entrypoint: "sdk-cli", timestamp: "2026-01-01T00:00:01Z", type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "e5" }] } },
+    ].map((row) => JSON.stringify(row)).join("\n") + "\n",
+  );
+  const left = JSON.parse((await execFileAsync(process.execPath, [COLLECTOR, "--provider", "claude", "--transcript", off], { env })).stdout);
+  assert.equal(left.skipped, "automation");
+  assert.equal(api.requests.length, 0, "nothing reaches the server");
+
+  env.HONCHO_AGENT_COLLECT_AUTOMATION = "1";
   const cases = [
     { name: "sdk-cli", entrypoint: "sdk-cli", userPeer: "automation_claude" },
     { name: "sdk-ts", entrypoint: "sdk-ts", userPeer: "automation_claude" },

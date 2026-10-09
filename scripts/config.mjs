@@ -57,6 +57,8 @@ export async function loadConfig() {
 
 // Where the collector reads which folders this computer's own server takes.
 export const COLLECT_FOLDERS_ENV = "HONCHO_AGENT_COLLECT_FOLDERS";
+// Set to "1" when the own server also takes conversations no person took part in.
+export const COLLECT_AUTOMATION_ENV = "HONCHO_AGENT_COLLECT_AUTOMATION";
 
 /**
  * The folders this computer's own server takes, from config.json `collect`:
@@ -75,6 +77,15 @@ export function collectFolders(config) {
   const rest = collect.rest === "skip" ? "skip" : "take";
   if (!skip.length && rest === "take") return null;
   return { take, skip, rest };
+}
+
+/**
+ * 자동 실행 대화도 수집: whether the own server also takes conversations no person
+ * took part in (providers/automation.mjs), config.json `collect.automation`. Off
+ * unless it says true.
+ */
+export function collectAutomation(config) {
+  return config?.collect?.automation === true;
 }
 
 export function configEnvironment(config, provider = "") {
@@ -107,6 +118,7 @@ export function configEnvironment(config, provider = "") {
   }
   const folders = collectFolders(config);
   if (folders) env[COLLECT_FOLDERS_ENV] = JSON.stringify(folders);
+  if (collectAutomation(config)) env[COLLECT_AUTOMATION_ENV] = "1";
   return Object.fromEntries(Object.entries(env).filter(([, value]) => value !== ""));
 }
 

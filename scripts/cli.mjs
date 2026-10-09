@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   CONFIG_VERSION,
+  collectAutomation,
   collectFolders,
   configEnvironment,
   hostConfigPaths,
@@ -28,6 +29,7 @@ import {
 } from "./honcho-access.mjs";
 import { VERSION } from "./version.mjs";
 import { WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
+import { automationOnly } from "./providers/automation.mjs";
 import {
   installedServerDir,
   installedServerPorts,
@@ -390,7 +392,9 @@ async function setupPlan(options = {}) {
       ...(access ? { access } : {}),
     },
     agents,
-    ...(collect.collect ? { collect: collect.collect } : {}),
+    // The folder choice and 자동 실행 대화도 수집; none of it when every folder is taken
+    // and conversations no person took part in are not.
+    ...(collect.collect || collect.automation ? { collect: { ...(collect.collect || {}), ...(collect.automation ? { automation: true } : {}) } } : {}),
     // Written by `target add|set|remove`. Setup rebuilds the rest of the file and
     // must not drop the other servers some folders also go to.
     ...(Array.isArray(existing?.targets) ? { targets: existing.targets } : {}),
@@ -1168,9 +1172,18 @@ function parseFolders(value, flag = "--folders") {
  * session ran in deciding, and `--rest-folders take|skip` says what happens to a
  * session in none of them, folders made later included (take when not given).
  * `--all-folders` takes every folder again. Without any of them, what config.json
- * says stays.
+ * says stays. `--automation take|skip` is 자동 실행 대화도 수집 (`collect.automation`),
+ * kept as saved when not given.
  */
 function collectChoice(options, existing) {
+  const given = options.automation;
+  const automation = given === "take" || given === "skip" ? given === "take" : collectAutomation(existing);
+  const asked = given === undefined || given === "take" || given === "skip" ? [] : ["--automation takes take or skip"];
+  const folders = folderChoice(options, existing);
+  return { ...folders, automation, issues: [...asked, ...folders.issues] };
+}
+
+function folderChoice(options, existing) {
   const kept = collectFolders(existing);
   const named = ["takeFolders", "skipFolders", "restFolders"].filter((key) => options[key] !== undefined);
   if (options.allFolders !== undefined) {
@@ -1572,7 +1585,8 @@ async function targetBackfill(id, options = {}) {
     agents: targetAgents(config, target),
     sinceMs: since.sinceMs,
     limit,
-    accepts: (parsed) => folderMatches(parsed.metadata?.cwd, target.folders),
+    // Another server takes the person's conversations in its folders, never a program's.
+    accepts: (parsed) => folderMatches(parsed.metadata?.cwd, target.folders) && !automationOnly(parsed.provider, parsed),
     envFor: (provider) => targetEnvironment(config, target, provider, { ...process.env, HONCHO_AGENT_IMPORT_TRIGGER: "backfill" }),
     progressPath: targetPaths(config, id).backfill,
     filterKey: foldersKey(target.folders),
@@ -1634,13 +1648,15 @@ async function ownBackfillRun(options = {}) {
   const writeStatus = (fields) => writeJsonAtomic(paths.status, { version: 1, ...fields });
   try {
     const filter = collectFolders(config);
+    const automation = collectAutomation(config);
     let lastWrite = 0;
     const result = await backfillSessions({
       config,
       agents: config.agents || {},
       sinceMs: since.sinceMs,
       limit,
-      accepts: (parsed) => !outsideCollectFolders(parsed.metadata?.cwd, filter),
+      // A conversation no person took part in goes by 자동 실행 대화도 수집 alone, as in the collector.
+      accepts: (parsed) => (automationOnly(parsed.provider, parsed) ? automation : !outsideCollectFolders(parsed.metadata?.cwd, filter)),
       envFor: (provider) => withoutTargetFilter({
         ...process.env,
         ...configEnvironment(config, provider),
@@ -1648,7 +1664,8 @@ async function ownBackfillRun(options = {}) {
         HONCHO_AGENT_IMPORT_TRIGGER: "backfill",
       }),
       progressPath: paths.progress,
-      filterKey: JSON.stringify(filter || {}),
+      // Turning 자동 실행 대화도 수집 on looks again at what it left out.
+      filterKey: JSON.stringify(automation ? { ...(filter || {}), automation } : filter || {}),
       shouldStop: () => fileThere(paths.stop),
       // The screen reads how far it got; a write every few seconds is enough.
       onProgress: async (progress) => {
@@ -1852,7 +1869,7 @@ function usage() {
       "host status [--profile personal]",
       "host stop [--profile personal]",
       "gateway open",
-      "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--take-folders <dir,dir>] [--skip-folders <dir,dir>] [--rest-folders take|skip] [--all-folders] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN; its Cloudflare Access service token in HONCHO_CF_ACCESS_CLIENT_ID, HONCHO_CF_ACCESS_CLIENT_SECRET)",
+      "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--take-folders <dir,dir>] [--skip-folders <dir,dir>] [--rest-folders take|skip] [--all-folders] [--automation take|skip] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN; its Cloudflare Access service token in HONCHO_CF_ACCESS_CLIENT_ID, HONCHO_CF_ACCESS_CLIENT_SECRET)",
       "backfill run|start|status|stop [--since YYYY-MM-DD] (past conversations of the collected folders to this computer's own server; start runs it in the background, stop ends it after the session it is sending)",
       "bridge disconnect (removes the shared-bridge settings 0.3.28 and before saved)",
       "target list",

@@ -22,9 +22,8 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { COLLECT_FOLDERS_ENV, collectFolders, installPaths } from "./config.mjs";
+import { COLLECT_AUTOMATION_ENV, COLLECT_FOLDERS_ENV, collectFolders, installPaths } from "./config.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
-import { automationCwd } from "./projects.mjs";
 import { publicUrl } from "./redact.mjs";
 
 /** A target id is a slug: it names a directory and appears in check names. */
@@ -160,16 +159,15 @@ function deepestHolding(cwd, folders, options) {
 /**
  * Whether this computer's own server leaves out a session that ran in `cwd`: the
  * deepest folder of `take` and `skip` that holds it decides, a skip when both name
- * the same one; a session in none of them, or with no folder, goes by `rest`. An
- * automation run (projects.mjs automationCwd, such as one at `/`) is in no folder
- * the project list shows, so `rest` never takes it: 새로 생기는 프로젝트 폴더도
- * 수집 is about project folders.
+ * the same one; a session in none of them, or with no folder, goes by `rest`. A
+ * conversation no person took part in is decided before this, by 자동 실행 대화도
+ * 수집 (providers/automation.mjs).
  */
 export function outsideCollectFolders(cwd, filter, options) {
   if (!filter) return false;
   const take = deepestHolding(cwd, filter.take, options);
   const skip = deepestHolding(cwd, filter.skip, options);
-  if (take < 0 && skip < 0) return filter.rest === "skip" || (typeof cwd === "string" && automationCwd(cwd));
+  if (take < 0 && skip < 0) return filter.rest === "skip";
   return skip >= take;
 }
 
@@ -263,8 +261,10 @@ export function targetEnvironment(config, target, provider, baseEnv = process.en
   env.HONCHO_AGENT_HOOK_LOG = paths.log(provider);
   env[TARGET_ID_ENV] = target.id;
   env[TARGET_FOLDERS_ENV] = JSON.stringify(target.folders);
-  // The own server's folder choice says nothing about what a target takes.
+  // The own server's folder choice says nothing about what a target takes, and a
+  // target never takes a conversation no person took part in.
   delete env[COLLECT_FOLDERS_ENV];
+  delete env[COLLECT_AUTOMATION_ENV];
   return env;
 }
 

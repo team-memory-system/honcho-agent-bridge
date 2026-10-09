@@ -7,6 +7,7 @@ import test from "node:test";
 import { parseTranscript as parseAgy } from "../scripts/providers/agy.mjs";
 import { classifyAutomation as classifyClaudeAutomation, parseTranscript as parseClaude } from "../scripts/providers/claude.mjs";
 import { classifyAutomation as classifyCodexAutomation, parseTranscript as parseCodex } from "../scripts/providers/codex.mjs";
+import { automationOnly, automationRecord } from "../scripts/providers/automation.mjs";
 
 async function fixture(t, name, rows) {
   const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "honcho-agent-sync-"));
@@ -161,4 +162,27 @@ test("Claude automation classifier treats only sdk-* entrypoints as automation",
     assert.deepEqual(classifyClaudeAutomation("x", { entrypoint }), [false, null], String(entrypoint));
   }
   assert.deepEqual(classifyClaudeAutomation("x", {}), [false, null]);
+});
+
+test("a conversation is a program's only when every prompt in it is; the person typing once makes it theirs", () => {
+  const parsed = (metadata, ...prompts) => ({ metadata, turns: prompts.flatMap((content) => [{ role: "user", content }, { role: "assistant", content: "ok" }]) });
+  const cli = { originator: "codex_cli_rs", source_app: "cli", cwd: "/w" };
+  assert.equal(automationOnly("codex", parsed(cli, "Automation: check the build", "Automation: check it again")), true);
+  assert.equal(automationOnly("codex", parsed(cli, "Automation: check the build", "why did it fail?")), false, "the person answered in it");
+  assert.equal(automationOnly("codex", parsed(cli, "hello")), false);
+  assert.equal(automationOnly("codex", parsed({ ...cli, source_app: "exec" }, "run the tests")), true);
+  assert.equal(automationOnly("claude", parsed({ entrypoint: "sdk-cli" }, "x")), true);
+  assert.equal(automationOnly("claude", parsed({ entrypoint: "cli" }, "x")), false);
+  assert.equal(automationOnly("codex", { metadata: cli, turns: [] }), false, "a conversation with nothing said is decided elsewhere");
+  assert.equal(automationOnly("chatgpt", parsed({}, "x")), false, "a ChatGPT conversation is the person's");
+
+  // The line the folder list reads: Codex's session_meta, or Claude Code's first record with a folder.
+  const meta = (payload) => ({ type: "session_meta", payload: { cwd: "/w", originator: "codex_cli_rs", source: "cli", ...payload } });
+  assert.equal(automationRecord("codex", meta({ thread_source: "automation" })), true);
+  assert.equal(automationRecord("codex", meta({ thread_source: "user" })), false);
+  assert.equal(automationRecord("codex", meta({ cwd: "/" })), true);
+  assert.equal(automationRecord("codex", meta({ source: { subagent: { thread_spawn: {} } } })), true);
+  assert.equal(automationRecord("claude", { cwd: "/w", entrypoint: "sdk-ts" }), true);
+  assert.equal(automationRecord("claude", { cwd: "/w", entrypoint: "cli" }), false);
+  assert.equal(automationRecord("agy", { cwd: "/w" }), false);
 });

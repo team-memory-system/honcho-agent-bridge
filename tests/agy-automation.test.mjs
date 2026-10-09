@@ -147,7 +147,7 @@ function startApi() {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, requests, port: server.address().port })));
 }
 
-test("the collector stores a scripted agy conversation under automation_agy and a listed one as the person's", async (t) => {
+test("the collector leaves a scripted agy conversation out unless 자동 실행 대화도 수집 is on, then stores it under automation_agy, and a listed one as the person's", async (t) => {
   const api = await startApi();
   t.after(() => api.server.close());
   const home = await temporaryDirectory(t, "collector");
@@ -163,6 +163,15 @@ test("the collector stores a scripted agy conversation under automation_agy and 
   delete env.HONCHO_AGY_AUTOMATION_PEER;
   delete env.HONCHO_ASSISTANT_NAME;
   delete env.HONCHO_AGY_ASSISTANT_NAME;
+  delete env.HONCHO_AGENT_COLLECT_AUTOMATION;
+
+  const off = await conversation(home, "antigravity-cli", SCRIPTED, "2026-08-01T00:00:00Z");
+  const left = JSON.parse((await execFileAsync(process.execPath, [COLLECTOR, "--provider", "agy", "--transcript", off], { env })).stdout);
+  assert.equal(left.skipped, "automation");
+  assert.equal(left.new_messages, 0);
+  assert.equal(api.requests.length, 0, "nothing reaches the server");
+
+  env.HONCHO_AGENT_COLLECT_AUTOMATION = "1";
   const cases = [
     { id: SCRIPTED, product: "antigravity-cli", userPeer: "automation_agy" },
     { id: LISTED, product: "antigravity-cli", userPeer: "user_test" },

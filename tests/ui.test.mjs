@@ -257,7 +257,11 @@ test("every option the setup steps send is one the server accepts", async () => 
     setupBody(draft({ checked: new Set(["/w/a", "/w/b"]) }), {}),
   ]) for (const key of Object.keys(body)) sent.add(key);
   for (const key of sent) assert.ok(accepted.includes(key) || secrets.includes(key), `the steps send "${key}", which the server drops`);
-  for (const key of ["takeFolders", "skipFolders", "restFolders", "allFolders", ...secrets]) assert.ok(sent.has(key), `the steps never send "${key}"`);
+  for (const key of ["takeFolders", "skipFolders", "restFolders", "allFolders", "automation", ...secrets]) assert.ok(sent.has(key), `the steps never send "${key}"`);
+  // 자동 실행 대화도 수집 is sent either way, so turning it off is saved too.
+  assert.equal(setupBody(draft({}), {}).automation, "skip");
+  assert.equal(setupBody(draft({ automation: true }), {}).automation, "take");
+  assert.equal(setupBody(draft({ automation: true, checked: new Set(["/w/a", "/w/b"]) }), {}).automation, "take");
   // This computer's own server takes no token: one typed for another server stays behind.
   const local = setupBody(draft({ server: "here" }), { localServer: { apiUrl: "http://127.0.0.1:8001" } });
   assert.equal(local.honchoUrl, "http://127.0.0.1:8001");
@@ -308,6 +312,7 @@ test("the 프로젝트 폴더 line names the folders collected, never the hundre
   assert.deepEqual(folderSummary({ take: [], skip: skipped, rest: "take" }), ["없음", "새로 생기는 폴더도 수집"]);
   assert.deepEqual(folderSummary({ take: ["/Users/me/dev/a"], skip: [], rest: "skip" }), ["a", "고른 폴더만 수집"]);
   assert.deepEqual(folderSummary(null), ["모든 폴더", "새로 생기는 폴더도 수집"]);
+  assert.deepEqual(folderSummary(null, true), ["모든 폴더", "새로 생기는 폴더도 수집 · 자동 실행 대화도 수집"]);
   const many = Array.from({ length: 8 }, (_, index) => `/Users/me/dev/p${index}`);
   assert.equal(folderSummary({ take: many, skip: ["/x"], rest: "skip" })[0], "p0 · p1 · p2 · p3 · p4 · p5 외 2개");
 });

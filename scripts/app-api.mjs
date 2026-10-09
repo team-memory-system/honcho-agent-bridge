@@ -8,7 +8,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { collectFolders, installPaths, loadConfig, readJson } from "./config.mjs";
+import { collectAutomation, collectFolders, installPaths, loadConfig, readJson } from "./config.mjs";
 import {
   ACCESS_REFUSED_KO,
   configuredAccess,
@@ -86,6 +86,8 @@ export async function appContext(options = {}) {
     agents: { codex: Boolean(config?.agents?.codex), claude: Boolean(config?.agents?.claude) },
     // The folders the own server takes ({ take, skip, rest }), or null for every folder.
     collect: collectFolders(config),
+    // 자동 실행 대화도 수집: whether it also takes conversations no person took part in.
+    collectAutomation: collectAutomation(config),
     honcho: { url: publicUrl(endpoints.honchoUrl), hasToken: Boolean(endpoints.honchoToken), hasAccess: Boolean(endpoints.honchoAccess) },
     localServer: endpoints.localServer ? { ...endpoints.localServer, chatModel: await installedServerModel() } : null,
     dashboardUrl: endpoints.dashboardUrl,
