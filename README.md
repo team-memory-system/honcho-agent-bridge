@@ -413,7 +413,9 @@ Use the bundled `setup-memory` skill. It follows this sequence:
 Setup can choose which project folders' conversations this computer's own server
 takes, and the app's 프로젝트 step does: the folders that held this computer's
 Claude Code and Codex conversations (`GET /api/app/projects`), ticked or not, and
-새로 생기는 프로젝트 폴더도 수집 for every folder they do not name.
+새로 생기는 프로젝트 폴더도 수집 for every folder they do not name. A first setup ticks
+none and asks for at least one, since every ticked folder's past conversations go
+in at 적용.
 
 ```bash
 node scripts/cli.mjs setup apply --skip-folders ~/private            # every folder but that one
@@ -425,16 +427,20 @@ node scripts/cli.mjs setup apply --all-folders                         # every f
   a session ran in decides, so a repository taken inside a skipped home folder is
   still taken, and the other way round; a folder in both is skipped. A session in
   none of them, folders made later included, goes by `rest` (`take` unless
-  `--rest-folders skip`). Without any of these options setup keeps what is saved.
+  `--rest-folders skip`). An automation run (a session at `/` or in a Symphony
+  workspace) is in no folder the list shows, so `rest` never takes it. Without any
+  of these options setup keeps what is saved.
 - The collector reads the choice from `HONCHO_AGENT_COLLECT_FOLDERS`, which
   `configEnvironment` sets for the own server's runs only; a target keeps its own
   folders. A ChatGPT import has no folder and is never held back by it.
 - `backfill run` sends the past sessions of the chosen folders, oldest first, through
   the same importer, deduped against what the hook already sent; `backfill start`
   runs it in the background (first setup does, and so does 대화 수집's 적용) and
-  `backfill status` says how far it got. Its progress is in
-  `<dataDir>/state/backfill.json`, so a run carries on where the last one stopped, and
-  `/api/app/flow` reads `backfill-status.json` for the 대시보드's 남은 대화.
+  `backfill status` says how far it got. `backfill stop` ends a run after the
+  conversation it is sending (기억 설정 → 지난 대화 → 멈추기; 이어서 보내기 starts
+  again). Its progress is in `<dataDir>/state/backfill.json`, so a run carries on where
+  the last one stopped, and `/api/app/flow` reads `backfill-status.json` for the
+  대시보드's 남은 대화.
 
 ### Collecting from another computer
 
