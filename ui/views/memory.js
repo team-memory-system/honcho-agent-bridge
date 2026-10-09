@@ -237,7 +237,7 @@ export default {
 
     function sessionItem(item) {
       return h("button", { class: "item", type: "button", "aria-current": isCurrent("session", item.id), onclick: () => openSession(item.id) },
-        h("div", { class: "top" }, h("div", { class: "t" }, item.title || "제목 없는 대화"), h("span", { class: "when" }, relativeDay(item.createdAt))),
+        h("div", { class: "top" }, h("div", { class: "t" }, item.title || "제목 없는 대화"), h("span", { class: "when" }, relativeDay(item.startedAt))),
         item.preview ? h("div", { class: "p" }, item.preview) : null,
         h("div", { class: "m" }, srcBadge(item.source), sourceLabel(item.source), item.project ? [h("span", { class: "sep" }), item.project] : null),
       );

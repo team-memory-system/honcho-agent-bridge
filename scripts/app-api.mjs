@@ -337,9 +337,12 @@ function titleFrom(content) {
 }
 
 /**
- * One page of conversations, newest first, each with a title and an opening line.
- * Honcho stores neither, so both come from the conversation's first messages:
- * the first thing a person said that is not a harness preamble.
+ * One page of conversations, newest first, each with a title, an opening line and
+ * when it started. Honcho stores none of them, so all come from the conversation's
+ * first messages: the first thing a person said that is not a harness preamble, and
+ * the first message's own time, which the importer takes from the transcript. The
+ * session's created_at is when it reached the server: for past conversations sent
+ * together, one moment for all of them.
  */
 export async function sessionsPage({ workspace, page = 1, size = 30, source = "" } = {}, options = {}) {
   const endpoints = await appEndpoints(options);
@@ -349,6 +352,7 @@ export async function sessionsPage({ workspace, page = 1, size = 30, source = ""
   const items = await Promise.all((listing.items || []).map(async (session) => {
     let opening = null;
     let preview = "";
+    let startedAt = null;
     try {
       const messages = await honchoPost(
         endpoints,
@@ -356,6 +360,7 @@ export async function sessionsPage({ workspace, page = 1, size = 30, source = ""
         {},
       );
       const list = messages.items || [];
+      startedAt = list[0]?.created_at || null;
       opening = list.find((message) => message.metadata?.direct_user && !PREAMBLE.test(message.content || ""))
         || list.find((message) => !PREAMBLE.test(message.content || ""))
         || null;
@@ -368,7 +373,7 @@ export async function sessionsPage({ workspace, page = 1, size = 30, source = ""
     const metadata = session.metadata || {};
     return {
       id: session.id,
-      createdAt: session.created_at,
+      startedAt: startedAt || session.created_at,
       source: metadata.source || session.id.split("-")[0] || "",
       project: metadata.cwd ? String(metadata.cwd).split(/[\\/]/).filter(Boolean).at(-1) : "",
       title: opening ? titleFrom(opening.content) : "",

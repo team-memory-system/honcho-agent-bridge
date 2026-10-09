@@ -56,7 +56,7 @@ function send(pathname, { method = "GET", body } = {}) {
 
 const MESSAGES = {
   "codex-1": [
-    { id: "p", peer_id: "user_t", content: "<environment_context>\n  <cwd>/x</cwd>", metadata: { direct_user: true } },
+    { id: "p", peer_id: "user_t", content: "<environment_context>\n  <cwd>/x</cwd>", metadata: { direct_user: true }, created_at: "2026-09-28T07:00:00Z" },
     { id: "q", peer_id: "user_t", content: "통합 화면을 만들자\n자세한 건 나중에", metadata: { direct_user: true } },
     { id: "r", peer_id: "assistant_codex", content: "좋습니다. 먼저 목록부터 봅니다.", metadata: {} },
   ],
@@ -204,6 +204,7 @@ test("a conversation is named by what the person first said, not by a harness pr
   assert.equal(item.preview, "좋습니다. 먼저 목록부터 봅니다.");
   assert.equal(item.source, "codex");
   assert.equal(item.project, "team-memory");
+  assert.equal(item.startedAt, "2026-09-28T07:00:00Z", "when the conversation started, not when it reached the server");
   const listing = upstreams.honcho.requests.find((request) => request.url.includes("/sessions/list"));
   assert.match(listing.url, /reverse=true/, "newest first");
   assert.deepEqual(listing.body, { filters: { metadata: { source: "codex" } } });
