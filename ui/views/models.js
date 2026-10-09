@@ -25,10 +25,12 @@ function planLabel(plan) {
 
 /** 계정 더하기: which subscription, then that account's login, in one window. */
 function openAddAccount(onDone, backend = null) {
-  const win = modal({ title: "구독 계정 더하기", big: true, small: true });
+  let panel = null;
+  // Closed any way while the login waits, the login stops and its account goes.
+  const win = modal({ title: "구독 계정 더하기", big: true, small: true, onClose: () => panel?.cancel() });
   let chosen = backend || "codex";
   const start = () => {
-    const panel = gatewayLogin({ backend: chosen, label: `${subscription(chosen)} 로그인을 기다리는 중` });
+    panel = gatewayLogin({ backend: chosen, label: `${subscription(chosen)} 로그인을 기다리는 중` });
     win.body(h("p", { class: "lead", style: { marginTop: "4px" } }, `${subscription(chosen)} 구독 계정으로 로그인합니다. 브라우저에 로그인 창이 열립니다.`), panel.root);
     win.foot(null, button("닫기", { onClick: () => { panel.cancel(); win.close(); } }));
     panel.done.then((ok) => {
@@ -165,8 +167,8 @@ export default {
               await draw();
             }, { done: "로그아웃했습니다" }) })
             : login.cliAvailable ? button("로그인", { kind: "small primary", onClick: () => {
-              const win = modal({ title: `${subscription(account.backend)} 로그인`, big: true, small: true });
               const panel = gatewayLogin({ backend: account.backend, accountId: account.id });
+              const win = modal({ title: `${subscription(account.backend)} 로그인`, big: true, small: true, onClose: () => panel.cancel() });
               win.body(panel.root);
               win.foot(null, button("닫기", { onClick: () => { panel.cancel(); win.close(); } }));
               win.open();

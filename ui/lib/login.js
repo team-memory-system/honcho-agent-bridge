@@ -14,7 +14,9 @@ const POLL_MS = 3_000;
 /**
  * Logs in `accountId` (an account already added), or adds one for `backend` first.
  * `done` resolves true once the gateway says it is logged in and connected, false
- * when it was cancelled or gave up after five minutes.
+ * when it was cancelled or gave up after five minutes. An account added here whose
+ * login did not finish is taken away again before `done` resolves: left, it would be
+ * an empty slot ahead of the accounts added after it.
  */
 export function gatewayLogin({ backend, accountId = null, prompt: given = null, label }) {
   const intro = h("div", { class: "hint", style: { marginTop: "2px" } });
@@ -47,16 +49,27 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
   let text = null;
   let since = Date.now();
   let timer = null;
+  let added = false;
+  let settled = false;
   let finish;
   const done = new Promise((resolve) => { finish = resolve; });
   const say = (message, bad = false) => {
     status.textContent = message;
     status.style.color = bad ? "var(--bad)" : "";
   };
-  const stop = (result) => {
+  // Once: a cancel that comes after the login finished changes nothing.
+  const stop = async (result) => {
+    if (settled) return;
+    settled = true;
     clearInterval(timer);
     timer = null;
     turning.style.visibility = "hidden";
+    if (!result && added) {
+      const id = accountId;
+      added = false;
+      accountId = null;
+      await gateway.post("/accounts/remove", { account: id }).catch(() => {});
+    }
     finish(result);
   };
   // Why the login stopped, kept apart from what to press: a screen that drops the
@@ -141,7 +154,7 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
     }
   });
   cancel.addEventListener("click", async () => {
-    if (cancel.disabled) return;
+    if (cancel.disabled || settled) return;
     cancel.disabled = true;
     await gateway.post("/login/cancel", { account: accountId }).catch(() => {});
     reason = "로그인을 그만두었습니다.";
@@ -153,10 +166,11 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
     try {
       let prompt = given;
       if (!accountId) {
-        const added = await gateway.post("/accounts/add", { backend });
-        if (!added.ok) throw new Error(added.error || "계정을 더하지 못했습니다.");
-        accountId = added.account.id;
-        prompt = added.login?.prompt;
+        const made = await gateway.post("/accounts/add", { backend });
+        if (!made.ok) throw new Error(made.error || "계정을 더하지 못했습니다.");
+        accountId = made.account.id;
+        added = true;
+        prompt = made.login?.prompt;
       } else if (!prompt) {
         const started = await gateway.post("/login", { account: accountId });
         if (started.ok === false) throw new Error(started.error || "로그인을 시작하지 못했습니다.");
@@ -169,6 +183,7 @@ export function gatewayLogin({ backend, accountId = null, prompt: given = null, 
     }
   })();
 
-  // The account added here, so trying again logs the same one in rather than adding another.
+  // The account being logged in, so trying again logs the same one in rather than
+  // adding another; null once an account added here was taken away again.
   return { root, done, cancel: () => cancel.click(), account: () => accountId, reason: () => reason };
 }
