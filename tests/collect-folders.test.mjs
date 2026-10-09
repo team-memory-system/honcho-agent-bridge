@@ -184,6 +184,11 @@ test("the folder choice is read from config, travels in the environment, and nev
   assert.equal(outsideCollectFolders("/", skipping, posix), true, "an automation run at / is not a folder made later");
   assert.equal(outsideCollectFolders("/home/me/.symphony/workspaces/T-1", skipping, posix), true, "nor is a Symphony workspace");
   assert.equal(outsideCollectFolders("/", only, posix), true);
+  // Nor are a temporary folder and an app's folder inside a hidden one, which the list leaves out too.
+  assert.equal(outsideCollectFolders("/tmp/try-1", skipping, posix), true, "a temporary folder is not a folder made later");
+  assert.equal(outsideCollectFolders("/home/me/.pencil/documents/0f4c2a9e", skipping, posix), true, "nor is an app's folder in a hidden one");
+  assert.equal(outsideCollectFolders("/home/me/.claude", skipping, posix), false, "the hidden folder itself is");
+  assert.equal(outsideCollectFolders("/tmp/try-1", { take: ["/tmp"], skip: [], rest: "take" }, posix), false, "a temporary folder named in the choice is taken");
   // The home folder skipped, a repository inside it taken: the deeper one decides.
   const nested = { take: ["/home/me/dev/app"], skip: ["~"], rest: "take" };
   assert.equal(outsideCollectFolders("/home/me", nested, posix), true, "a session in the home folder itself is skipped");
@@ -262,6 +267,33 @@ test("skipping a folder takes every other one, folders made later included", asy
     assert.equal(result.status, 0, result.stdout);
   }
   assert.deepEqual(primary.sessionIds(), ["claude-inside", "claude-later", "codex-codex-inside"]);
+});
+
+test("a session with nothing said in it makes no conversation, and its folder still decides it", async (t) => {
+  const primary = await fakeHoncho();
+  t.after(() => primary.server.close());
+  const install = await makeInstall(t, primary, { collect: ({ team, side }) => ({ take: [team], skip: [side], rest: "take" }) });
+  const files = await writeSessions(install);
+  // Only tool calls and their output: the folder is on those records, not on a turn with text.
+  const quiet = path.join(install.home, ".claude", "projects", "side", "quiet.jsonl");
+  const rows = [
+    { type: "summary", summary: "a resumed session" },
+    { uuid: "q-1", sessionId: "quiet", cwd: install.side, timestamp: "2026-09-20T10:00:00Z", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } },
+    { uuid: "q-2", sessionId: "quiet", cwd: install.side, timestamp: "2026-09-20T10:00:01Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } },
+  ];
+  await fsp.mkdir(path.dirname(quiet), { recursive: true });
+  await fsp.writeFile(quiet, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+  // No folder anywhere and nothing said: the rest of the folders are taken, but there is nothing to take.
+  const blank = path.join(install.home, ".claude", "projects", "elsewhere", "blank.jsonl");
+  await fsp.mkdir(path.dirname(blank), { recursive: true });
+  await fsp.writeFile(blank, `${JSON.stringify({ uuid: "b-1", sessionId: "blank", message: { role: "user", content: "/clear" } })}\n`);
+
+  for (const file of [files.inside, quiet, blank]) {
+    const result = await hook("claude", file, install.env);
+    assert.equal(result.status, 0, result.stdout);
+  }
+  const made = primary.requests.filter((entry) => entry.method === "POST" && /\/sessions$/.test(entry.path)).map((entry) => entry.body.id);
+  assert.deepEqual([...new Set(made)], ["claude-inside"], "only the session with a conversation was made on the server");
 });
 
 test("backfill sends the past sessions of the chosen folders to the own server, once", async (t) => {

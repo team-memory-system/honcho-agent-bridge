@@ -74,6 +74,14 @@ function outsideCollectedFolders(provider, parsed) {
   return provider !== "chatgpt" && outsideCollectFolders(parsed?.metadata?.cwd, COLLECT_FOLDERS);
 }
 
+/**
+ * A transcript with nothing said in it: only tool output, a bare slash command, or a
+ * session closed before the first prompt. It makes no conversation on the server.
+ */
+function nothingSaid(parsed) {
+  return !parsed?.turns?.length;
+}
+
 function skippedOutsideFolders(provider, parsed, transcriptPath, skipped = "outside target folders") {
   return {
     ok: true,
@@ -540,6 +548,7 @@ async function importCodex(args, hookInput) {
   const parsed = await getProvider("codex").parseTranscript(rolloutPath, hookInput);
   if (outsideTargetFolders(parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath);
   if (outsideCollectedFolders("codex", parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath, "outside collected folders");
+  if (nothingSaid(parsed)) return skippedOutsideFolders("codex", parsed, rolloutPath, "no conversation");
   const sessionId = parsed.session_id;
   const segmentId = codexSegmentId(rolloutPath, parsed.metadata.original_session_id);
   if (segmentId) for (const turn of parsed.turns) turn.segment_id = segmentId;
@@ -609,6 +618,7 @@ async function importParsedSession(args, parsed, transcriptPath, options = {}) {
   if (outsideCollectedFolders(args.provider, parsed)) {
     return skippedOutsideFolders(args.provider, parsed, transcriptPath, "outside collected folders");
   }
+  if (nothingSaid(parsed)) return skippedOutsideFolders(args.provider, parsed, transcriptPath, "no conversation");
   const sessionId = parsed.session_id;
   return withStateLock(args.provider, async () => {
     const state = await loadState(args.provider);

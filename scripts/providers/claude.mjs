@@ -41,6 +41,9 @@ export async function parseTranscript(transcriptPath) {
     if (metadata.entrypoint == null && typeof obj.entrypoint === "string" && obj.entrypoint) {
       metadata.entrypoint = obj.entrypoint;
     }
+    // The folder the session ran in: the first record that names one, as the folder list
+    // reads it (projects.mjs). A session with nothing said in it still has a folder.
+    if (metadata.cwd == null && typeof obj.cwd === "string" && obj.cwd) metadata.cwd = obj.cwd;
     // isCompactSummary rows hold the summary Claude Code writes when it compacts a session.
     if (obj.isSidechain || obj.isCompactSummary) continue;
     const queuedText = queuedHumanPrompt(obj);
@@ -72,7 +75,6 @@ export async function parseTranscript(transcriptPath) {
     if (!text) continue;
     if (message.role === "user" && BARE_COMMAND.test(text)) continue;
     metadata.original_session_id ??= obj.sessionId || obj.session_id;
-    metadata.cwd ??= obj.cwd;
     metadata.git_branch ??= obj.gitBranch;
     metadata.version ??= obj.version;
     turns.push({

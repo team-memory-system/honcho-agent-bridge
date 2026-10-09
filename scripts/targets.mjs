@@ -24,7 +24,7 @@ import path from "node:path";
 
 import { COLLECT_FOLDERS_ENV, collectFolders, installPaths } from "./config.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
-import { automationCwd } from "./projects.mjs";
+import { unlistedFolder } from "./projects.mjs";
 import { publicUrl } from "./redact.mjs";
 
 /** A target id is a slug: it names a directory and appears in check names. */
@@ -160,16 +160,16 @@ function deepestHolding(cwd, folders, options) {
 /**
  * Whether this computer's own server leaves out a session that ran in `cwd`: the
  * deepest folder of `take` and `skip` that holds it decides, a skip when both name
- * the same one; a session in none of them, or with no folder, goes by `rest`. An
- * automation run (projects.mjs automationCwd, such as one at `/`) is in no folder
- * the project list shows, so `rest` never takes it: 새로 생기는 프로젝트 폴더도
- * 수집 is about project folders.
+ * the same one; a session in none of them, or with no folder, goes by `rest`. A
+ * folder the project list leaves out (projects.mjs unlistedFolder: an automation run
+ * such as one at `/`, a temporary folder, an app's folder inside a hidden one) is
+ * never taken by `rest`: 새로 생기는 프로젝트 폴더도 수집 is about project folders.
  */
 export function outsideCollectFolders(cwd, filter, options) {
   if (!filter) return false;
   const take = deepestHolding(cwd, filter.take, options);
   const skip = deepestHolding(cwd, filter.skip, options);
-  if (take < 0 && skip < 0) return filter.rest === "skip" || (typeof cwd === "string" && automationCwd(cwd));
+  if (take < 0 && skip < 0) return filter.rest === "skip" || unlistedFolder(cwd, options?.home ? { home: options.home } : {});
   return skip >= take;
 }
 

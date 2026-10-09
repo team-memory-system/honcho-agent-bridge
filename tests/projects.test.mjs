@@ -17,6 +17,7 @@ import {
   projectScope,
   systemTempFolders,
   transcriptFiles,
+  unlistedFolder,
 } from "../scripts/projects.mjs";
 
 async function tempDir(t) {
@@ -80,11 +81,11 @@ test("sessions are grouped by the repository their folder sits in, newest first"
   assert.equal(result.withoutFolder, 0);
   assert.ok(result.projects.every((project) => /^p-[0-9a-f]{12}$/.test(project.scope)));
   assert.deepEqual(result.projects.map(({ scope, ...project }) => project), [
-    { path: worktree, name: "worktree", sessions: 1, lastAt: "2026-10-04T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: true, git: true, folded: false, folders: 1, temp: false },
-    { path: repo, name: "repo", sessions: 3, lastAt: "2026-10-03T10:00:00.000Z", agents: { claude: 1, codex: 2 }, exists: true, git: true, folded: false, folders: 2, temp: false },
-    { path: home, name: "~", sessions: 1, lastAt: "2026-09-03T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: true, git: false, folded: false, folders: 1, temp: false },
-    { path: gone, name: "deleted-project", sessions: 1, lastAt: "2026-09-02T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: false, git: false, folded: false, folders: 1, temp: false },
-    { path: plain, name: "inner", sessions: 1, lastAt: "2026-09-01T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: true, git: false, folded: false, folders: 1, temp: false },
+    { path: worktree, name: "worktree", sessions: 1, lastAt: "2026-10-04T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: true, git: true, folded: false, folders: 1 },
+    { path: repo, name: "repo", sessions: 3, lastAt: "2026-10-03T10:00:00.000Z", agents: { claude: 1, codex: 2 }, exists: true, git: true, folded: false, folders: 2 },
+    { path: home, name: "~", sessions: 1, lastAt: "2026-09-03T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: true, git: false, folded: false, folders: 1 },
+    { path: gone, name: "deleted-project", sessions: 1, lastAt: "2026-09-02T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: false, git: false, folded: false, folders: 1 },
+    { path: plain, name: "inner", sessions: 1, lastAt: "2026-09-01T10:00:00.000Z", agents: { claude: 1, codex: 0 }, exists: true, git: false, folded: false, folders: 1 },
   ]);
 });
 
@@ -109,17 +110,43 @@ test("one-off folders outside a repository count under the folder that holds the
   await writeTranscript(path.join(claude, "a.jsonl"), claudeLines(codexApp), "2026-09-28T10:00:00Z");
   // Inside a repository the repository is the project, dated folder or not.
   await writeTranscript(path.join(codex, "rollout-d.jsonl"), codexLines(inRepo), "2026-09-29T10:00:00Z");
-  // The temporary folder, under the name it may also be written as.
+  // The temporary folder, under either name it is written as, is nobody's project.
   await writeTranscript(path.join(claude, "b.jsonl"), claudeLines(scratchWork), "2026-09-27T10:00:00Z");
   await writeTranscript(path.join(claude, "c.jsonl"), claudeLines(path.join(home, "tmp-link", "elsewhere")), "2026-09-26T10:00:00Z");
+  await writeTranscript(path.join(claude, "d.jsonl"), claudeLines(path.join(home, "tmp-link")), "2026-09-25T10:00:00Z");
 
   const temp = [[path.join(home, "tmp-link"), scratch], [scratch, scratch]];
   const result = await conversationProjects({ home, temp });
   assert.deepEqual(result.projects.map(({ scope, ...project }) => project), [
-    { path: codexApp, name: "Codex", sessions: 4, lastAt: "2026-10-02T10:00:00.000Z", agents: { claude: 1, codex: 3 }, exists: true, git: false, folded: true, folders: 4, temp: false },
-    { path: repo, name: "repo", sessions: 1, lastAt: "2026-09-29T10:00:00.000Z", agents: { claude: 0, codex: 1 }, exists: true, git: true, folded: false, folders: 1, temp: false },
-    { path: scratch, name: "scratch", sessions: 2, lastAt: "2026-09-27T10:00:00.000Z", agents: { claude: 2, codex: 0 }, exists: true, git: false, folded: true, folders: 2, temp: true },
+    { path: codexApp, name: "Codex", sessions: 4, lastAt: "2026-10-02T10:00:00.000Z", agents: { claude: 1, codex: 3 }, exists: true, git: false, folded: true, folders: 4 },
+    { path: repo, name: "repo", sessions: 1, lastAt: "2026-09-29T10:00:00.000Z", agents: { claude: 0, codex: 1 }, exists: true, git: true, folded: false, folders: 1 },
   ]);
+  assert.equal(await projectFolder(scratchWork, { home, temps: temp }), null);
+  assert.equal(await projectFolder(path.join(home, "tmp-link"), { home, temps: temp }), null);
+});
+
+test("an app's folder inside a hidden folder of home is left out, the hidden folder and a repository in one are not", async (t) => {
+  const home = await tempDir(t);
+  const pencil = path.join(home, ".pencil", "documents", "0f4c2a9e-3b1d-4c55-9a8e-2d7f1b6c3e10");
+  const pluginCache = path.join(home, ".claude", "plugins", "cache", "honcho-agent-bridge", "honcho-agent-bridge", "0.3.10");
+  const settings = path.join(home, ".claude");
+  const nvim = path.join(home, ".config", "nvim");
+  for (const folder of [pencil, pluginCache, path.join(nvim, ".git"), path.join(nvim, "lua")]) await fsp.mkdir(folder, { recursive: true });
+  const claude = path.join(home, ".claude", "projects", "-x");
+  await writeTranscript(path.join(claude, "pencil.jsonl"), claudeLines(pencil), "2026-10-04T10:00:00Z");
+  await writeTranscript(path.join(claude, "cache.jsonl"), claudeLines(pluginCache), "2026-10-03T10:00:00Z");
+  await writeTranscript(path.join(claude, "settings.jsonl"), claudeLines(settings), "2026-10-02T10:00:00Z");
+  await writeTranscript(path.join(claude, "nvim.jsonl"), claudeLines(path.join(nvim, "lua")), "2026-10-01T10:00:00Z");
+  // A worktree an agent app made and has since removed was a repository all the same.
+  const worktree = path.join(home, ".codex", "worktrees", "94cb", "neuromem");
+  await writeTranscript(path.join(claude, "worktree.jsonl"), claudeLines(worktree), "2026-09-30T10:00:00Z");
+
+  const result = await conversationProjects({ home, temp: [] });
+  assert.deepEqual(result.projects.map((project) => project.path), [settings, nvim, worktree]);
+  assert.equal(result.withoutFolder, 0, "left out, not counted as a transcript without a folder");
+  assert.equal(await projectFolder(pencil, { home, temps: [] }), null);
+  assert.equal(await projectFolder(path.join(nvim, "lua"), { home, temps: [] }), nvim);
+  assert.deepEqual([pencil, pluginCache, settings, path.join(nvim, "lua")].map((cwd) => unlistedFolder(cwd, { home, temps: [] })), [true, true, false, false]);
 });
 
 test("the system's temporary folders are the ones that do not hold home", () => {
