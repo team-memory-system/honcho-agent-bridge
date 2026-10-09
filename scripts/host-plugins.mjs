@@ -10,7 +10,9 @@
 //   codex  plugin marketplace add <source> [--ref <ref>]; codex plugin add honcho-agent-bridge@<marketplace>
 //   claude plugin marketplace add <source>[#<ref>];        claude plugin install honcho-agent-bridge@<marketplace> --scope user
 // A marketplace the host already has is not added again: Claude Code would point
-// it at the new source, and Codex refuses a second source under the same name.
+// it at the new source, and Codex refuses a second source under the same name. A
+// clone Codex left behind with no table in config.toml makes Codex refuse the same
+// way; that clone goes, and the marketplace is added again.
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -39,6 +41,8 @@ function hostFiles(home) {
     claudeInstalled: path.join(home, ".claude", "plugins", "installed_plugins.json"),
     claudeMarketplaces: path.join(home, ".claude", "plugins", "known_marketplaces.json"),
     codexConfig: path.join(home, ".codex", "config.toml"),
+    // Where Codex keeps the git clone of each marketplace added from git.
+    codexMarketplaces: path.join(home, ".codex", ".tmp", "marketplaces"),
   };
 }
 
@@ -221,6 +225,30 @@ function failure(result, timeoutMs) {
   return result.timedOut ? `did not finish within ${Math.round(timeoutMs / 1000)} s` : clientFailure(result);
 }
 
+/** Codex saying a marketplace of this name is already there from another source. */
+function otherSource(result) {
+  return /different source/i.test(`${result?.stderr || ""}\n${result?.stdout || ""}`);
+}
+
+/**
+ * Removes the clone of marketplace `name` that Codex left in ~/.codex/.tmp/marketplaces
+ * while config.toml has no table for it (the table was taken out by hand, the clone
+ * not): Codex then refuses to add the marketplace again. Nothing reads that clone, and
+ * the add makes a new one. Only a directory holding a git clone goes; true when it did.
+ */
+async function removeStrayCodexClone(name, home) {
+  if (!MARKETPLACE_NAME.test(name) || await hasMarketplace("codex", name, home)) return false;
+  const clone = path.join(hostFiles(home).codexMarketplaces, name);
+  try {
+    if (!(await fsp.lstat(clone)).isDirectory()) return false;
+    await fsp.access(path.join(clone, ".git"));
+  } catch {
+    return false;
+  }
+  await fsp.rm(clone, { recursive: true, force: true });
+  return true;
+}
+
 function missingCli(host) {
   return { action: "missing-cli", error: `${CLIENT_NAMES[host]} (${host}) was not found on this computer` };
 }
@@ -230,8 +258,14 @@ async function installOne(entry, { ctx, home, timeoutMs }) {
   const options = { binary: entry.cli, timeoutMs };
   try {
     if (!(await hasMarketplace(entry.agent, entry.marketplace, home))) {
-      const added = await runClient(ctx, entry.agent, marketplaceArgs, options);
+      let added = await runClient(ctx, entry.agent, marketplaceArgs, options);
       if (added.missing) return missingCli(entry.agent);
+      if (entry.agent === "codex" && otherSource(added) && await removeStrayCodexClone(entry.marketplace, home)) {
+        added = await runClient(ctx, entry.agent, marketplaceArgs, options);
+        if (added.missing) return missingCli(entry.agent);
+      }
+      // Already there from another source is not this marketplace: the plugin add would fail.
+      if (otherSource(added)) return { action: "failed", error: failure({ ...added, code: added.code || 1 }, timeoutMs) };
       const text = `${added.stderr || ""}\n${added.stdout || ""}`;
       if (added.code !== 0 && !/already (?:added|exists|on disk)/i.test(text)) return { action: "failed", error: failure(added, timeoutMs) };
     }

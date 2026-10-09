@@ -235,6 +235,42 @@ test("a marketplace the host already has is not added again, and 'already added'
   assert.equal(second.calls.length, 2);
 });
 
+test("a Codex clone left with no table in config.toml goes, and the marketplace is added again", async (t) => {
+  const f = await home(t);
+  const bin = path.join(f.root, "bin");
+  await executable(path.join(bin, "codex"));
+  const options = { home: f.home, env: { PATH: bin }, platform: "linux", appClis: [] };
+  const clone = path.join(f.home, ".codex", ".tmp", "marketplaces", "honcho-agent-bridge");
+  await fsp.mkdir(path.join(clone, ".git"), { recursive: true });
+  await fsp.mkdir(path.join(f.home, ".codex", ".tmp", "marketplaces", "other", ".git"), { recursive: true });
+  const refused = { code: 1, stdout: "", stderr: "Error: marketplace 'honcho-agent-bridge' is already added from a different source; remove it before adding this source" };
+  let adds = 0;
+  const { calls, runner } = fakeRunner({ "codex plugin marketplace": () => (adds++ ? { code: 0, stdout: "Added marketplace", stderr: "" } : refused) });
+  const entries = await hostPluginPlan({ codex: true }, { ...options, statuses: { codex: { installed: false } } });
+  assert.deepEqual(await installHostPlugins(entries, { ...options, clientRunner: runner }), [{ agent: "codex", action: "installed" }]);
+  assert.deepEqual(calls.map((call) => call.slice(1, 3)), [["plugin", "marketplace"], ["plugin", "marketplace"], ["plugin", "add"]]);
+  await assert.rejects(fsp.access(clone));
+  await fsp.access(path.join(f.home, ".codex", ".tmp", "marketplaces", "other", ".git"));
+
+  // With a table of that name in config.toml the marketplace is someone's own: not added, its clone kept.
+  await codexRecord(f.home, ['source_type = "git"', 'source = "https://github.com/someone/fork.git"']);
+  await fsp.mkdir(path.join(clone, ".git"), { recursive: true });
+  const own = fakeRunner();
+  assert.deepEqual(await installHostPlugins(entries, { ...options, clientRunner: own.runner }), [{ agent: "codex", action: "installed" }]);
+  assert.deepEqual(own.calls.map((call) => call.slice(1, 3)), [["plugin", "add"]]);
+  await fsp.access(path.join(clone, ".git"));
+
+  // A clone that is not a git clone is not touched, and the refusal is a failure.
+  await fsp.writeFile(path.join(f.home, ".codex", "config.toml"), 'model = "gpt-5"\n');
+  await fsp.rm(path.join(clone, ".git"), { recursive: true });
+  const notGit = fakeRunner({ "codex plugin marketplace": refused });
+  const failed = await installHostPlugins(entries, { ...options, clientRunner: notGit.runner });
+  assert.equal(failed[0].action, "failed");
+  assert.match(failed[0].error, /different source/);
+  assert.deepEqual(notGit.calls.map((call) => call.slice(1, 3)), [["plugin", "marketplace"]]);
+  await fsp.access(clone);
+});
+
 test("a failed install or a missing CLI is reported, never thrown", async (t) => {
   const f = await home(t);
   const bin = path.join(f.root, "bin");
