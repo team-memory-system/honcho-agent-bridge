@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { scopeStatePath, serverProjects, syncScopes } from "../scripts/scope-sync.mjs";
+import { scopeSettled, scopeStatePath, serverProjects, syncScopes } from "../scripts/scope-sync.mjs";
 
 const HONCHO = { id: "p-0123456789ab", name: "honcho" };
 const OTHER = { id: "p-abcdef012345", name: "web-app" };
@@ -190,4 +190,30 @@ test("a server that cannot be read is an error, not an empty list", async (t) =>
   const config = await tempConfig(t);
   const fetchImpl = async () => { throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) }); };
   await assert.rejects(serverProjects({ config, fetchImpl, local: [] }), /fetch failed/);
+});
+
+test("a scope just filled is waited on until Honcho has copied its sessions, or until the time is up", async (t) => {
+  const config = await tempConfig(t);
+  const answers = [
+    { backfill_status: { s1: { state: "pending" }, s2: { state: "completed", docs_copied: 4 } } },
+    { backfill_status: { s1: { state: "pending" }, s2: { state: "completed", docs_copied: 4 } } },
+    { backfill_status: { s1: { state: "completed", docs_copied: 2 }, s2: { state: "completed", docs_copied: 4 } } },
+  ];
+  const asked = [];
+  const fetchImpl = async (url, init = {}) => {
+    asked.push(`${init.method || "GET"} ${new URL(url).pathname}`);
+    return new Response(JSON.stringify(answers[Math.min(asked.length - 1, answers.length - 1)]), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const waits = [];
+  assert.equal(await scopeSettled({ config, id: HONCHO.id, fetchImpl, wait: async (ms) => { waits.push(ms); } }), true);
+  assert.deepEqual(asked, Array(3).fill(`GET /v3/workspaces/memory/scopes/${HONCHO.id}/status`));
+  assert.deepEqual(waits, [1_500, 1_500]);
+
+  // Still copying when the time is up: false, and the trial runs on what is there.
+  const stuck = async () => new Response(JSON.stringify(answers[0]), { status: 200, headers: { "content-type": "application/json" } });
+  assert.equal(await scopeSettled({ config, id: HONCHO.id, fetchImpl: stuck, timeoutMs: 0, wait: async () => {} }), false);
+  // A scope with nothing to copy is settled at once; a name that is no project's is never asked.
+  const empty = async () => new Response(JSON.stringify({ backfill_status: {} }), { status: 200, headers: { "content-type": "application/json" } });
+  assert.equal(await scopeSettled({ config, id: HONCHO.id, fetchImpl: empty }), true);
+  assert.equal(await scopeSettled({ config, id: "memory", fetchImpl: async () => assert.fail("asked") }), false);
 });

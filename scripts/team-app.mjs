@@ -12,7 +12,7 @@
 // changes something is a JSON POST, as every other route of the app.
 import { loadConfig } from "./config.mjs";
 import { gateDevices, gateGrants, gateStatePaths, grantChat, grantCollect, revokeDevice, revokePerson } from "./gate-access.mjs";
-import { serverProjects } from "./scope-sync.mjs";
+import { scopeSettled, serverProjects, syncScopes } from "./scope-sync.mjs";
 import { CALLBACK_PATH, finishLogin, registerDevice, serverWhoami, setTeam, signOut, startLogin, teamAuthPaths, teamHost, teamLoginStatus } from "./team-auth.mjs";
 import { computerName, hubCall, madeTeam, teamWhoami } from "./team-hub.mjs";
 
@@ -164,6 +164,26 @@ const ROUTES = {
     } catch (error) {
       const reason = error?.cause?.code || /^HTTP \d+/.exec(String(error?.message))?.[0] || String(error?.message || error);
       return { ok: false, error: `기억 서버에서 프로젝트를 읽지 못했습니다 (${reason}).` };
+    }
+  },
+
+  /**
+   * Fills one project's scope with its conversations and waits for Honcho to copy
+   * them, for 가드 시험 to answer from it the way a teammate's chat does. A project
+   * not opened to anyone has no scope yet. Filling one opens it to nobody: who may
+   * ask what stays in the gate's access.json.
+   */
+  "/api/team/scope": async (body) => {
+    const { config } = await context();
+    const [project] = projectsFrom([body.project]);
+    if (!project) return { ok: false, error: "프로젝트를 고르세요." };
+    try {
+      const filled = await syncScopes({ config, projects: [project] });
+      const settled = await scopeSettled({ config, id: project.id });
+      return { ok: true, scope: filled.scopes?.[0] || null, settled };
+    } catch (error) {
+      const reason = error?.cause?.code || /^HTTP \d+/.exec(String(error?.message))?.[0] || String(error?.message || error);
+      return { ok: false, error: `프로젝트의 대화를 모으지 못했습니다 (${reason}).` };
     }
   },
 

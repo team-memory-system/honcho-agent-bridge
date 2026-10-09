@@ -202,6 +202,27 @@ export async function syncScopes({ config, projects, fetchImpl, local, home } = 
 }
 
 /**
+ * Waits until Honcho has copied what the sessions added to scope `id` already hold
+ * (GET …/scopes/<id>/status: no session's copy still pending), up to `timeoutMs`.
+ * A scope just filled answers from what is copied so far; this is for the one
+ * question asked right after (가드 시험). Returns whether nothing is pending.
+ */
+export async function scopeSettled({ config, id, timeoutMs = 60_000, intervalMs = 1_500, fetchImpl, wait } = {}) {
+  if (!PROJECT_SCOPE.test(String(id))) return false;
+  const workspace = String(config?.honcho?.workspaceId || "memory");
+  const call = honchoClient(config, fetchImpl);
+  const pause = wait || ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const status = await call("GET", `/v3/workspaces/${encodeURIComponent(workspace)}/scopes/${encodeURIComponent(id)}/status`);
+    const jobs = Object.values(status?.backfill_status || {});
+    if (!jobs.some((job) => job?.state === "pending")) return true;
+    if (Date.now() >= until) return false;
+    await pause(intervalMs);
+  }
+}
+
+/**
  * The projects this server holds sessions of, as `syncScopes` would fill their
  * scopes, newest first: `{ ok: true, workspace, projects: [{ id, name, sessions,
  * lastAt, folder }] }`. A project's sessions are the ones tagged with it and the ones

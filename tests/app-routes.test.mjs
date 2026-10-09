@@ -168,6 +168,53 @@ test("the projects to open to a teammate are the memory server's, and one that c
   assert.match(down.body.error, /^기억 서버에서 프로젝트를 읽지 못했습니다 \(ECONNREFUSED\)\.$/);
 });
 
+test("가드 시험 fills one project's scope first and waits for Honcho to copy it", async () => {
+  const asked = [];
+  let statusCalls = 0;
+  const honcho = http.createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      const url = new URL(request.url, "http://honcho");
+      asked.push(`${request.method} ${url.pathname}`);
+      const json = (value, status = 200) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value)); };
+      if (url.pathname === "/v3/workspaces/memory/scopes") return json({ id: JSON.parse(raw).id }, 201);
+      if (url.pathname === "/v3/workspaces/memory/sessions/list") {
+        const wanted = JSON.parse(raw || "{}").filters?.metadata?.project_id;
+        const items = wanted === "p-0123456789ab" ? [{ id: "a", metadata: { project_id: wanted } }] : [];
+        return json({ items, total: items.length, page: 1, size: 100, pages: 1 });
+      }
+      if (url.pathname === "/v3/workspaces/memory/scopes/p-0123456789ab/sessions") { response.writeHead(204).end(); return undefined; }
+      if (url.pathname === "/v3/workspaces/memory/scopes/p-0123456789ab/status") {
+        statusCalls += 1;
+        return json({ backfill_status: { a: { state: statusCalls > 1 ? "completed" : "pending" } } });
+      }
+      return json({ detail: "not found" }, 404);
+    });
+  });
+  await new Promise((resolve) => honcho.listen(0, "127.0.0.1", resolve));
+  const empty = path.join(workdir, "no-transcripts-scope");
+  await fsp.mkdir(empty, { recursive: true });
+  await fsp.mkdir(process.env.HONCHO_AGENT_BRIDGE_HOME, { recursive: true });
+  await fsp.writeFile(path.join(process.env.HONCHO_AGENT_BRIDGE_HOME, "config.json"), JSON.stringify({
+    version: 1,
+    honcho: { baseUrl: `http://127.0.0.1:${honcho.address().port}`, workspaceId: "memory" },
+    sources: { claude: { root: empty }, codex: { root: empty } },
+    paths: { dataDir: path.join(workdir, "scope-data") },
+  }));
+
+  const none = await send("/api/team/scope", { method: "POST", body: { project: { id: "nope" } } });
+  assert.deepEqual(none.body, { ok: false, error: "프로젝트를 고르세요." });
+  const filled = await send("/api/team/scope", { method: "POST", body: { project: { id: "p-0123456789ab", name: "jev" } } });
+  assert.equal(filled.body.ok, true);
+  assert.equal(filled.body.settled, true);
+  assert.deepEqual(filled.body.scope, { id: "p-0123456789ab", name: "jev", added: 1, sessions: 1 });
+  assert.ok(asked.includes("POST /v3/workspaces/memory/scopes"));
+  assert.ok(asked.includes("POST /v3/workspaces/memory/scopes/p-0123456789ab/sessions"));
+  assert.equal(statusCalls, 2);
+  await new Promise((resolve) => honcho.close(resolve));
+});
+
 test("the flow route counts what waits to go and what went, for the agents that collect", async () => {
   const appHome = process.env.HONCHO_AGENT_BRIDGE_HOME;
   const dataDir = path.join(appHome, "data");

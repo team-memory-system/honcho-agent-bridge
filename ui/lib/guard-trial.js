@@ -103,9 +103,15 @@ export function openGuardTrial() {
       if (!chosen) return warn(projects === null ? "프로젝트를 읽는 중입니다. 잠시 뒤 다시 누르세요." : "답을 만들 프로젝트가 없습니다. 직접 쓰기나 질문만으로 시험하세요.");
       asked.project = { id: chosen.id, name: chosen.name };
     }
-    clear(result, h("div", { class: "trial-wait" }, spinner(),
-      asked.project ? "질문을 판정하고 기억에서 답을 만드는 중입니다. 수십 초 걸릴 수 있습니다." : "판정하는 중입니다."));
+    const waiting = (text) => clear(result, h("div", { class: "trial-wait" }, spinner(), text));
     try {
+      // A teammate's chat answers from the project's scope, which a project not opened
+      // to anyone does not have yet: filled first, the trial answers the same way.
+      if (asked.project) {
+        waiting("프로젝트의 대화를 모으는 중입니다. 처음에는 수십 초 걸릴 수 있습니다.");
+        await teamCall("/api/team/scope", { project: asked.project });
+      }
+      waiting(asked.project ? "질문을 판정하고 기억에서 답을 만드는 중입니다. 수십 초 걸릴 수 있습니다." : "판정하는 중입니다.");
       const trial = await post("/api/dashboard/guard-trial", asked);
       clear(result, trial.enabled === false
         ? notice("warn", h("b", {}, "이 기억 서버는 아직 가드 시험을 보여 주지 않습니다."), " 서버에서 기억 서버를 멈췄다가 다시 시작하면 됩니다.")
