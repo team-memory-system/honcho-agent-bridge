@@ -538,8 +538,12 @@ in the order they started, beside the one in use:
   in use every 10 minutes. When the model refuses for two polls in a row (a
   subscription's limit), it stops the new deriver for 15 minutes (then 30, 60, 120,
   240), gives the refused work back and starts it again; three days without any
-  progress stop the rebuild with the reason. Work still refused at the end is given
-  back three times.
+  progress stop the rebuild with the reason. Refusing means new refusals in the
+  queue's errors (a 429 or usage limit, the gateway or model out of reach, a timeout,
+  a 5xx) while no new observation is made. How far the deriver got is no sign of it:
+  the deriver marks a refused message and goes on to the next. Work that failed at
+  the end is given back three times; if it is still refused after that, it is waited
+  out the same way, and only messages the model cannot take are left out.
 - It opens the new memory to the same projects as the one in use (the scopes and
   their sessions, which Honcho then copies into each scope).
 - Then it switches: the `.env` gets `DB_SCHEMA` and `NAMESPACE` of the new schema, the

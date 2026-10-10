@@ -73,8 +73,12 @@ const DRAIN_TYPES = ["representation", "summary", "scope_backfill"];
 // 60 messages, and about this many seconds a call takes on a subscription model.
 const TOKENS_PER_CALL = 1024;
 const SECONDS_PER_CALL = 8;
-// The model refusing: errors that grow while nothing goes through, this many polls in a row.
+// The model refusing: refusals that grow while it makes nothing, this many polls in a row.
 const REFUSED_POLLS = 2;
+// A refusal, in the error the deriver keeps on a queue item: what passes with time, as a
+// subscription's limit (429 from the gateway's router), the gateway or the model out of
+// reach, a timeout or an overload. Anything else is a message the model cannot take.
+const REFUSAL = "RateLimitError|Error code: (429|5[0-9][0-9])|usage_limit|rate.?limit|APIConnectionError|APITimeoutError|Connection error|timed? ?out|InternalServerError|ServiceUnavailable|overloaded";
 const PAUSE_STEPS_MS = [15, 30, 60, 120, 240].map((minutes) => minutes * 60_000);
 // Without any progress this long, the rebuild gives up and says why.
 const GIVE_UP_MS = 3 * DAY_MS;
@@ -562,6 +566,8 @@ async function syncScopes(server, { from, to, call }) {
  * How far the deriver of `schema` has got. The messages went in in the order their
  * conversations started, so its frontier is the first message still waiting: `before`
  * counts the messages ahead of it, and `at` is when that message's conversation started.
+ * A refused message is no longer waiting either (the deriver marks it and goes on), so
+ * what the model really did shows in `made`, the observations, and in `refused`.
  */
 async function deriveState(server, schema) {
   const s = ident(schema);
@@ -575,6 +581,8 @@ async function deriveState(server, schema) {
       (SELECT min(m.created_at) FROM ${s}.messages m JOIN frontier f ON m.workspace_name = f.workspace_name AND m.session_name = f.session_name) AS at,
       (SELECT count(*) FROM ${s}.queue WHERE NOT processed AND task_type IN (${types}))::bigint AS work,
       (SELECT count(*) FROM ${s}.queue WHERE processed AND error IS NOT NULL AND task_type IN (${types}))::bigint AS errored,
+      (SELECT count(*) FROM ${s}.queue WHERE processed AND error ~* ${literal(REFUSAL)} AND task_type IN (${types}))::bigint AS refused,
+      (SELECT count(*) FROM ${s}.documents)::bigint AS made,
       (SELECT count(*) FROM ${s}.message_embeddings WHERE sync_state = 'pending')::bigint AS embedding`);
   const number = (value) => Number(value || 0);
   return {
@@ -582,6 +590,8 @@ async function deriveState(server, schema) {
     before: number(row?.before),
     work: number(row?.work),
     errored: number(row?.errored),
+    refused: number(row?.refused),
+    made: number(row?.made),
     embedding: number(row?.embedding),
     at: row?.at ? Date.parse(row.at) : null,
   };
@@ -594,8 +604,9 @@ async function giveBack(server, schema) {
 }
 
 /**
- * Whether the model has been refusing: errors grew and nothing went through, this
- * many polls in a row. `history` is the polls so far, newest last.
+ * Whether the model has been refusing: refusals grew and it made nothing, this many
+ * polls in a row. `history` is the polls so far ({made, refused}), newest last. How
+ * far the frontier got is no sign: under a limit it moves on over the refused messages.
  */
 export function refusing(history, polls = REFUSED_POLLS) {
   if (history.length < polls + 1) return false;
@@ -603,7 +614,7 @@ export function refusing(history, polls = REFUSED_POLLS) {
   for (let index = 1; index < recent.length; index += 1) {
     const before = recent[index - 1];
     const now = recent[index];
-    if (now.done > before.done || now.errored <= before.errored) return false;
+    if (now.made > before.made || now.refused <= before.refused) return false;
   }
   return true;
 }
@@ -898,7 +909,8 @@ export async function rederiveRun(config) {
  * Waits for the new deriver to go through every conversation and for the messages'
  * embeddings, catching up with the memory in use every CATCH_UP_MS. A model refusing
  * for REFUSED_POLLS polls stops the new deriver for a while, then gives the refused
- * work back; whatever stayed refused at the end is given back END_RETRIES times.
+ * work back; whatever failed at the end is given back END_RETRIES times, and what is
+ * still refused after that is waited out the same way.
  */
 async function deriveWait(server, paths, job, save, stopped, callNext) {
   const history = [];
@@ -907,6 +919,26 @@ async function deriveWait(server, paths, job, save, stopped, callNext) {
   let lastProgressAt = Date.now();
   let pauseStep = 0;
   let endRetries = 0;
+  let previous = null;
+  // Stops the new deriver for the next of PAUSE_STEPS_MS, then gives it the refused work back.
+  const pause = async () => {
+    const wait = PAUSE_STEPS_MS[Math.min(pauseStep, PAUSE_STEPS_MS.length - 1)];
+    pauseStep += 1;
+    const until = new Date(Date.now() + wait).toISOString();
+    await log(paths, `the model refuses: pausing the new deriver until ${until}`);
+    await compose(server.directory, ["--profile", "rederive", "stop", "deriver-next"], { timeout: 600_000 });
+    await save({ derive: { ...job.derive, paused: { until } } });
+    while (Date.now() < Date.parse(until)) {
+      if (await stopped()) return "stopped";
+      await sleep(10_000);
+    }
+    await giveBack(server, job.schema);
+    await compose(server.directory, ["--profile", "rederive", "up", "-d", "deriver-next"], { timeout: 600_000 });
+    // `previous` stays: a model still refusing makes nothing, so the next pause is longer.
+    history.length = 0;
+    await save({ derive: { ...job.derive, paused: null } });
+    return "resumed";
+  };
   for (;;) {
     if (await stopped()) return "stopped";
     if (Date.now() - lastCatchUp >= CATCH_UP_MS) {
@@ -919,14 +951,16 @@ async function deriveWait(server, paths, job, save, stopped, callNext) {
     const total = Math.max(Number(job.totals?.messages || 0), state.messages);
     const done = state.before;
     const now = Date.now();
-    history.push({ done, errored: state.errored });
+    history.push({ made: state.made, refused: state.refused });
     if (history.length > 20) history.shift();
     samples.push({ t: now, done });
     while (samples.length > 2 && now - samples[0].t > 2 * 60 * 60_000) samples.shift();
-    if (samples.length < 2 || done > samples.at(-2).done) {
+    // Progress is what the model made, or the frontier moving with no new failure.
+    if (!previous || state.made > previous.made || (done > previous.before && state.errored <= previous.errored)) {
       lastProgressAt = now;
       pauseStep = 0;
     }
+    previous = state;
     await save({ derive: { done, total, at: state.at, etaSec: etaFrom(samples, total), errored: state.errored, paused: null } });
 
     if (!state.work && !state.embedding) {
@@ -935,6 +969,12 @@ async function deriveWait(server, paths, job, save, stopped, callNext) {
         await log(paths, `giving back ${state.errored} refused work items (end, ${endRetries})`);
         await giveBack(server, job.schema);
         await sleep(POLL_MS);
+        continue;
+      }
+      // Refused again after END_RETRIES: a limit that lasts, not messages the model cannot take.
+      if (state.refused) {
+        if ((await pause()) === "stopped") return "stopped";
+        endRetries = 0;
         continue;
       }
       // A last catch-up, then the switch copies what comes in during it.
@@ -952,20 +992,7 @@ async function deriveWait(server, paths, job, save, stopped, callNext) {
 
     if (now - lastProgressAt > GIVE_UP_MS) throw new Error("the model has not answered for three days");
     if (refusing(history)) {
-      const wait = PAUSE_STEPS_MS[Math.min(pauseStep, PAUSE_STEPS_MS.length - 1)];
-      pauseStep += 1;
-      const until = new Date(Date.now() + wait).toISOString();
-      await log(paths, `the model refuses: pausing the new deriver until ${until}`);
-      await compose(server.directory, ["--profile", "rederive", "stop", "deriver-next"], { timeout: 600_000 });
-      await save({ derive: { ...job.derive, paused: { until } } });
-      while (Date.now() < Date.parse(until)) {
-        if (await stopped()) return "stopped";
-        await sleep(10_000);
-      }
-      await giveBack(server, job.schema);
-      await compose(server.directory, ["--profile", "rederive", "up", "-d", "deriver-next"], { timeout: 600_000 });
-      history.length = 0;
-      await save({ derive: { ...job.derive, paused: null } });
+      if ((await pause()) === "stopped") return "stopped";
       continue;
     }
     await sleep(POLL_MS);

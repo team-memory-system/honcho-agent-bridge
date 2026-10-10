@@ -43,15 +43,19 @@ test("with auth on, the copy signs an admin token with the server's own secret, 
   assert.equal(signature, crypto.createHmac("sha256", "secret").update(`${head}.${body}`).digest("base64url"));
 });
 
-test("the model counts as refusing only when errors grow and nothing goes through, poll after poll", () => {
-  // Errors growing while the frontier moves: some refused, the rest goes on.
-  assert.equal(refusing([{ done: 10, errored: 0 }, { done: 12, errored: 6 }, { done: 15, errored: 12 }]), false);
-  // Nothing moves and nothing fails: the deriver is just slow.
-  assert.equal(refusing([{ done: 10, errored: 0 }, { done: 10, errored: 0 }, { done: 10, errored: 0 }]), false);
-  // Two polls of only refusals.
-  assert.equal(refusing([{ done: 10, errored: 0 }, { done: 10, errored: 8 }, { done: 10, errored: 20 }]), true);
+test("the model counts as refusing only when refusals grow and it makes nothing, poll after poll", () => {
+  // Refusals growing while observations are made: some refused, the rest goes on.
+  assert.equal(refusing([{ made: 10, refused: 0 }, { made: 14, refused: 6 }, { made: 20, refused: 12 }]), false);
+  // Nothing made and nothing refused: the deriver is just slow.
+  assert.equal(refusing([{ made: 10, refused: 0 }, { made: 10, refused: 0 }, { made: 10, refused: 0 }]), false);
+  // Two polls of only refusals. The frontier is not asked: on the MacBook (run8) a limit
+  // moved it from 34 to 163 of 1,211 in four minutes, over refused messages, while the
+  // observations stayed at 22.
+  assert.equal(refusing([{ made: 22, refused: 8 }, { made: 22, refused: 20 }, { made: 22, refused: 27 }]), true);
   // One is not enough.
-  assert.equal(refusing([{ done: 10, errored: 0 }, { done: 10, errored: 8 }]), false);
+  assert.equal(refusing([{ made: 10, refused: 0 }, { made: 10, refused: 8 }]), false);
+  // A poll with no new refusal in between: not yet.
+  assert.equal(refusing([{ made: 22, refused: 37 }, { made: 22, refused: 37 }, { made: 22, refused: 39 }]), false);
 });
 
 test("the time left goes by the last hour's pace", () => {
