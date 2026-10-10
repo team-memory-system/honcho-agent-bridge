@@ -73,7 +73,7 @@ const TAIL_SPANS = [128 * 1024, 2 * 1024 * 1024];
 // The head is handed to the collector's parser this many lines at a time, until it makes a message of one.
 const HEAD_CHUNK_LINES = 32;
 // Bumped when what a catalog item says of its file changes, so the items read before are read again.
-const ITEM_VERSION = 2;
+const ITEM_VERSION = 3;
 const PARSE_LINES = { claude: claudeLines, codex: codexLines };
 const CONCURRENCY = 16;
 // A turn here this much after the server's last one is a turn the server lacks.
@@ -220,14 +220,13 @@ function turnTimes(provider, lines, file) {
 /**
  * What a transcript's first lines say: its session id, the folder it ran in, whether
  * no person took part in it (providers/automation.mjs), and when it started. It
- * started with its first message as the collector makes it, not its first line: a
- * session opened with /clear, a hook's output or another session's note says
- * something before anyone does, and the server dates the conversation by its
- * first message.
+ * started with its first message as the collector makes it (`start`), not its first
+ * line (`opened`): a session opened with /clear, a hook's output or another
+ * session's note says something before anyone does, and the server dates the
+ * conversation by its first message. `start` is null when no line read is a message.
  */
 async function readHead(provider, file) {
-  const head = { sessionId: null, start: null, cwd: null, auto: false };
-  let opened = null;
+  const head = { sessionId: null, start: null, opened: null, cwd: null, auto: false };
   let named = false;
   let pending = [];
   for await (const line of headLines(file, HEAD_BYTES)) {
@@ -240,14 +239,14 @@ async function readHead(provider, file) {
     if (named) continue;
     const record = parseRecord(line);
     if (!record) continue;
-    opened ??= timeOf(record.timestamp);
+    head.opened ??= timeOf(record.timestamp);
     if (provider === "codex") {
       // session_meta names the session (codex.mjs); a 2025 rollout opens with a bare header instead.
       if (record.type === "session_meta" && record.payload && typeof record.payload === "object") {
         const meta = record.payload;
         head.sessionId = typeof meta.id === "string" && meta.id ? meta.id : null;
         head.cwd = typeof meta.cwd === "string" && meta.cwd ? meta.cwd : null;
-        opened = timeOf(meta.timestamp) ?? timeOf(record.timestamp) ?? opened;
+        head.opened = timeOf(meta.timestamp) ?? timeOf(record.timestamp) ?? head.opened;
         head.auto = Boolean(automationRecord("codex", record));
         named = true;
       }
@@ -261,8 +260,6 @@ async function readHead(provider, file) {
     named = Boolean(head.sessionId && head.cwd);
   }
   if (head.start === null && pending.length) head.start = turnTimes(provider, pending, file).first;
-  // Nothing in the head is a message: when it was opened stands in.
-  head.start ??= opened;
   return head;
 }
 
@@ -317,15 +314,18 @@ async function transcriptItem(provider, file, from, cache) {
   const name = originalName(file);
   const session = sanitizeId(head.sessionId || name, provider);
   const segment = provider === "codex" ? codexSegmentId(name, head.sessionId) : null;
+  // Read to its end without a line the collector makes a message of: nothing to put in.
+  const empty = head.start === null && stat.size <= HEAD_BYTES;
   return {
     v: ITEM_VERSION,
     key: `${provider}:${session}${segment ? `:${segment}` : ""}`,
     provider,
     session,
-    start: head.start ?? last ?? stat.mtimeMs,
-    last: last ?? head.start ?? stat.mtimeMs,
+    start: head.start ?? head.opened ?? last ?? stat.mtimeMs,
+    last: last ?? head.start ?? head.opened ?? stat.mtimeMs,
     cwd: head.cwd,
     auto: head.auto,
+    ...(empty ? { empty: true } : {}),
     file,
     name,
     size: stat.size,
@@ -350,14 +350,14 @@ async function readItems(files, from, cachePath, onProgress, signal = null) {
 
 /** The counts a place shows before it is chosen: conversations, from when, and by which agent. */
 function sourceSummary(items) {
-  const people = items.filter((item) => !item.auto);
+  const people = items.filter((item) => !item.auto && !item.empty);
   const agents = {};
   let first = null;
   for (const item of people) {
     agents[item.provider] = (agents[item.provider] || 0) + 1;
     if (item.start && (first === null || item.start < first)) first = item.start;
   }
-  return { count: new Set(people.map((item) => item.key)).size, automation: items.length - people.length, first, agents };
+  return { count: new Set(people.map((item) => item.key)).size, automation: items.filter((item) => item.auto && !item.empty).length, first, agents };
 }
 
 // ------------------------------------------------------------------ this computer
@@ -854,6 +854,8 @@ async function loadCatalog(paths, sources) {
   }
   const byKey = new Map();
   for (const item of all) {
+    // A transcript with nothing the collector makes a message of has nothing to put in.
+    if (item.empty) continue;
     const copies = byKey.get(item.key);
     if (copies) copies.push(item);
     else byKey.set(item.key, [item]);
@@ -1002,6 +1004,11 @@ async function serverIndex(server, sessions, paths, { fresh = false } = {}) {
  * "check" (there, sent by a collector that did not record its last turn: asked when
  * its turn comes), or "server" (there already).
  */
+/** A run found nothing to put in, and nothing came into the file since. */
+function emptyBefore(item, before) {
+  return before?.o === "empty" && !(item.last !== null && before.last !== undefined && item.last > (before.last ?? 0) + NEWER_SLACK_MS);
+}
+
 function placeOf(item, index) {
   if (!index) return "new";
   if (!index.sessions.has(item.session)) return index.newest !== null && item.start !== null && item.start < index.newest ? "late" : "new";
@@ -1054,7 +1061,9 @@ export async function pastOverview(config, options = {}, env = process.env) {
     if (error instanceof ScanError) return { ok: false, code: error.code, error: error.message };
     throw error;
   }
-  catalog = catalog.filter((item) => item.provider === "chatgpt" || agents.has(item.provider));
+  // One a run found nothing in (the file was too long to tell before) is not offered again.
+  const ledger = await readLedger(paths);
+  catalog = catalog.filter((item) => (item.provider === "chatgpt" || agents.has(item.provider)) && !emptyBefore(item, ledger.get(item.key)));
   const server = options.newServer ? null : draftServer(config, options, env);
   let index = null;
   let serverError = null;

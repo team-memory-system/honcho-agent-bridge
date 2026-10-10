@@ -364,7 +364,11 @@ export function folderSummary(collect, automation = false) {
 function foldersAndRest(collect) {
   const names = (folders) => {
     if (!folders?.length) return "없음";
-    const shown = folders.slice(0, 6).map((folder) => shortPath(folder).split(/[\\/]/).pop() || shortPath(folder));
+    const base = (folder) => shortPath(folder).split(/[\\/]/).pop() || shortPath(folder);
+    const named = new Map();
+    for (const folder of folders) named.set(base(folder), (named.get(base(folder)) || 0) + 1);
+    // Two folders of one name (~/dev/jarvis and another computer's C:\dev\jarvis) show their paths.
+    const shown = folders.slice(0, 6).map((folder) => (named.get(base(folder)) > 1 ? shortPath(folder) : base(folder)));
     return shown.join(" · ") + (folders.length > shown.length ? ` 외 ${folders.length - shown.length}개` : "");
   };
   if (!collect) return ["모든 폴더", "새로 생기는 폴더도 수집"];

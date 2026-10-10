@@ -320,6 +320,8 @@ test("the 프로젝트 폴더 line names the folders collected, never the hundre
   assert.deepEqual(folderSummary(null, true), ["모든 폴더", "새로 생기는 폴더도 수집 · 자동 실행 대화도 수집"]);
   const many = Array.from({ length: 8 }, (_, index) => `/Users/me/dev/p${index}`);
   assert.equal(folderSummary({ take: many, skip: ["/x"], rest: "skip" })[0], "p0 · p1 · p2 · p3 · p4 · p5 외 2개");
+  assert.equal(folderSummary({ take: ["/Users/me/dev/jarvis", "C:\\dev\\jarvis", "/Users/me/dev/jev"], skip: ["/x"], rest: "skip" })[0],
+    "~/dev/jarvis · C:\\dev\\jarvis · jev", "two folders of one name show their paths");
 });
 
 test("files the UI writes are restricted before any bytes reach them", async (t) => {
