@@ -800,7 +800,9 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
 
   function finish() {
     savePrefs({ mode: state.path === "link" ? "join" : state.path });
-    refreshStatus();
+    // The setup just written names this person: the menu behind the window shows them
+    // now, not 이름 미설정 until the window closes.
+    loadContext().catch(() => {}).then(() => refreshStatus());
     const items = state.applied ? agentTodo(state.applied, state.draft.agents) : [];
     if (state.requested.length) items.push(TODO_BELL);
     if (state.path === "make") items.push({ title: "관리자 탭", text: "팀원 더하기로 팀원 이메일을 넣고, 팀 주소를 보내세요." });
