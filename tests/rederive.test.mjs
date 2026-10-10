@@ -124,6 +124,12 @@ test("the dashboard reads the job and the last switch from the status file alone
   assert.equal(rebuildLine(flow.job), "2024년 3월 대화까지 · 31% · 약 16시간 남음");
   assert.equal(rebuildPercent(flow.job), 31);
   assert.equal(rebuildNote(flow.job), "다 만들면 새 기억으로 바꿉니다. 그때까지 지금 기억을 씁니다.");
+  // Switching to the rebuilt memory again: the screens get to know which way it goes.
+  const again = { kind: "undo", phase: "copy", startedAt: "2026-10-12T05:40:00Z", pid: 999_999_999, toRebuilt: true };
+  await fsp.writeFile(paths.status, JSON.stringify({ version: 1, job: again, last: null, previous: null }));
+  const switching = (await rederiveFlow(config)).job;
+  assert.equal(switching.toRebuilt, true);
+  assert.equal(rebuildLine(switching), "다시 정리한 기억으로 바꾸는 중");
 });
 
 test("the switch records what the new memory holds, the turns copied in while it was made included", () => {

@@ -361,7 +361,8 @@ async function syncInto(server, { from, to, call, progress = async () => {}, sto
   const f = ident(from);
   const t = ident(to);
   const key = (w, s) => `${w}\u0000${s}`;
-  const done = { conversations: 0, messages: 0, conclusions: 0, created: 0 };
+  // conversations and messages: in `to` once copied, the ones there before included; sent: the messages this copy posted.
+  const done = { conversations: 0, messages: 0, conclusions: 0, created: 0, sent: 0 };
 
   const workspaces = await rows(server, `SELECT name AS w, metadata AS md, configuration AS cfg FROM ${f}.workspaces ORDER BY created_at`);
   const haveWorkspaces = new Set((await rows(server, `SELECT name AS w FROM ${t}.workspaces`)).map((row) => row.w));
@@ -423,6 +424,7 @@ async function syncInto(server, { from, to, call, progress = async () => {}, sto
         messages: batch.map((message) => ({ content: message.c ?? "", peer_id: message.p, metadata: message.md || {}, created_at: message.at })),
       });
       done.messages += batch.length;
+      done.sent += batch.length;
       await report();
     }
   };
@@ -846,7 +848,7 @@ export async function rederiveRun(config) {
         return { ok: true, stopped: true };
       }
       await save({ phase: "derive", conclusionsAt: result.conclusionsAt || job.conclusionsAt, copied: { conversations: result.conversations, messages: result.messages } });
-      await log(paths, `copied ${result.conversations} conversations, ${result.messages} messages, ${result.conclusions} conclusions`);
+      await log(paths, `copied ${result.sent} messages and ${result.conclusions} conclusions; ${result.conversations} conversations, ${result.messages} messages in place`);
     }
 
     if (job.phase === "derive") {
@@ -1070,6 +1072,7 @@ function jobView(job, stopping) {
     derive: job.derive || null,
     error: job.error || null,
     stopping,
+    ...(job.kind === "undo" ? { toRebuilt: Boolean(job.toRebuilt) } : {}),
   };
 }
 
