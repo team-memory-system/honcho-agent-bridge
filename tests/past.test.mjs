@@ -427,7 +427,7 @@ test("a finished fill counts only the conversations there were to put in", () =>
 test("기억 설정 says how many went in out of order and where to put them back", () => {
   // 더 가져오기 put 13 older ones in after the server's newest (the MacBook, 2026-10-10).
   const line = lateLine(13);
-  assert.match(line, /^어긋난 대화 13개는 서버의 더 새 대화보다 나중에 들어왔습니다\./);
+  assert.match(line, /^어긋난 대화 13개는 시간순보다 하루 넘게 늦게 들어왔습니다\./);
   assert.match(line, /서버 → 기억 서버에서 처음부터 다시 정리를 누르세요\.$/);
   assert.match(lateLine(26_083), /어긋난 대화 26,083개/);
   // In order, or not counted: nothing is said.
@@ -482,6 +482,8 @@ test("a conversation on the server stays out unless a copy here has turns after 
   await writeClaude(claudeFile(install, "fresh"), { sessionId: "fresh", cwd: install.team, turns: turns("fresh", "2025-09-01T10:00:00Z") });
   const store = path.join(install.root, "backup");
   await writeClaude(path.join(store, "대화", "claude", "2025", "03", "01", "lateone.jsonl"), { sessionId: "lateone", cwd: install.team, turns: turns("late", "2025-03-01T10:00:00Z") });
+  // Started three hours before the server's newest turn, as conversations held at the same time do: not late.
+  await writeClaude(path.join(store, "대화", "claude", "2025", "07", "01", "sameday.jsonl"), { sessionId: "sameday", cwd: install.team, turns: turns("sameday", "2025-07-01T07:00:00Z") });
   const spec = { kind: "folder", path: store };
   await scan(install, spec);
 
@@ -498,12 +500,13 @@ test("a conversation on the server stays out unless a copy here has turns after 
   assert.equal(plan.late, 1);
   assert.equal(plan.skippedLate, 1);
   assert.equal(plan.checks, 1);
-  assert.equal(plan.put, 2);
+  assert.equal(plan.put, 3);
   const run = (await cli(["past", "run"], install.env)).body;
   assert.equal(run.ok, true, JSON.stringify(run));
   assert.deepEqual(honcho.texts("claude-known"), ["known 1", "known 2", "known later 1", "known later 2"], "only the turns the server lacked");
   assert.equal(honcho.texts("claude-older").length, 1, "the older collector's session was asked, and left as it was");
   assert.ok(honcho.sessions.has("claude-fresh"));
+  assert.ok(honcho.sessions.has("claude-sameday"));
   assert.ok(!honcho.sessions.has("claude-lateone"));
   const entries = await ledger(install);
   assert.equal(entries.get("claude:claude-lateone").o, "late");

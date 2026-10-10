@@ -12,8 +12,9 @@
 // Before anything goes in, the server is asked which of them it holds already. One
 // it holds is left out, unless a copy here has turns after the server's last one:
 // that one goes in its place, and the collector sends only what the server lacks. A
-// conversation that started before the newest one on the server is late: it can
-// still go in, but the memory then forms out of order (rederive.mjs puts that right).
+// conversation that started more than a day before the newest one on the server is
+// late: it can still go in, but the memory then forms out of order (rederive.mjs puts
+// that right).
 //
 // While they go in, new turns are held (queue.mjs reads the hold file) and go after
 // them. The run keeps a ledger, so a stop or a restart carries on where it left off,
@@ -78,6 +79,10 @@ const PARSE_LINES = { claude: claudeLines, codex: codexLines };
 const CONCURRENCY = 16;
 // A turn here this much after the server's last one is a turn the server lacks.
 const NEWER_SLACK_MS = 1000;
+// Late is more than this before the newest conversation. Conversations held at the same
+// time reach the server as their turns end, minutes or hours apart, and that is not late
+// (rederive.mjs counts with the same slack).
+export const LATE_SLACK_MS = 86_400_000;
 // Network failures in a row after which the run stops and keeps the rest for later.
 const MAX_UNREACHABLE = 3;
 const STATUS_EVERY_MS = 2000;
@@ -1000,7 +1005,7 @@ async function serverIndex(server, sessions, paths, { fresh = false } = {}) {
 
 /**
  * What becomes of one conversation on a server with `index`: "new", "late" (new, and
- * older than the server's newest turn), "newer" (there, with turns here it lacks),
+ * more than LATE_SLACK_MS older than the server's newest turn), "newer" (there, with turns here it lacks),
  * "check" (there, sent by a collector that did not record its last turn: asked when
  * its turn comes), or "server" (there already).
  */
@@ -1011,7 +1016,7 @@ function emptyBefore(item, before) {
 
 function placeOf(item, index) {
   if (!index) return "new";
-  if (!index.sessions.has(item.session)) return index.newest !== null && item.start !== null && item.start < index.newest ? "late" : "new";
+  if (!index.sessions.has(item.session)) return index.newest !== null && item.start !== null && item.start < index.newest - LATE_SLACK_MS ? "late" : "new";
   const last = index.sessions.get(item.session);
   if (last === null || last === undefined) return "check";
   return item.last !== null && item.last > last + NEWER_SLACK_MS ? "newer" : "server";

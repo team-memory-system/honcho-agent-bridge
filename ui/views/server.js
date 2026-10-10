@@ -276,13 +276,13 @@ export default {
         clear(rows,
           !status?.ready ? notice("warn", "이 서버는 다시 정리를 하기 전 설치입니다. 위의 다시 준비를 누른 뒤 시작을 누르면 쓸 수 있습니다.") : null,
           kv("시간순과 어긋난 대화", order?.error ? h("span", { class: "muted" }, "세지 못했습니다.")
-            : late ? [`${number(late)}개 `, h("span", { class: "muted" }, `· 서버의 대화 ${number(order.conversations)}개 중`), h("div", { class: "s" }, "서버의 더 새 대화보다 나중에 들어온 대화입니다.")]
+            : late ? [`${number(late)}개 `, h("span", { class: "muted" }, `· 서버의 대화 ${number(order.conversations)}개 중`), h("div", { class: "s" }, "시간순보다 하루 넘게 늦게 들어온 대화입니다.")]
               : order ? "없음" : spinner()),
           kv("마지막 다시 정리", last ? [lastLine(last), lastDetail(last) ? h("div", { class: "s" }, lastDetail(last)) : null] : "한 적 없음"),
-          previous ? kv(kept, [keepLine(previous), h("div", { class: "s" }, "그 뒤에 지웁니다.")], [
+          previous ? kv(kept, [keepLine(previous), h("div", { class: "s" }, `${keptWhat(previous)} 그 뒤에 지웁니다.`)], [
             previous.rebuilt
-              ? act("다시 정리한 기억으로 바꾸기", "/api/rederive/undo", { confirmText: { title: "다시 정리한 기억으로 바꿀까요?", text: `${moment(previous.swappedAt)}에 되돌리기 전의 기억으로 돌아갑니다. 그 뒤에 들어온 대화도 옮겨 넣습니다. 바꿀 때 1분쯤 기억 검색이 멈춥니다.`, confirm: "바꾸기" } })
-              : act("되돌리기", "/api/rederive/undo", { confirmText: { title: "이전 기억으로 되돌릴까요?", text: `${moment(previous.swappedAt)}에 바꾸기 전의 기억으로 돌아갑니다. 그 뒤에 들어온 대화도 옮겨 넣습니다. 바꿀 때 1분쯤 기억 검색이 멈춥니다.`, confirm: "되돌리기" } }),
+              ? act("새 기억으로 다시 바꾸기", "/api/rederive/undo", { confirmText: { title: "새 기억으로 다시 바꿀까요?", text: `${moment(previous.swappedAt)}에 되돌린 뒤 들어온 대화를 새 기억에 옮겨 정리하고 바꿉니다. 그동안은 지금 기억을 쓰고, 바꿀 때 서버를 다시 켜는 동안 1분쯤 기억 검색이 멈춥니다.`, confirm: "바꾸기" } })
+              : act("되돌리기", "/api/rederive/undo", { confirmText: { title: "이전 기억으로 되돌릴까요?", text: `${moment(previous.swappedAt)}에 바꾼 뒤 들어온 대화를 이전 기억에 옮겨 정리하고 되돌립니다. 그동안은 지금 기억을 쓰고, 바꿀 때 서버를 다시 켜는 동안 1분쯤 기억 검색이 멈춥니다.`, confirm: "되돌리기" } }),
             act(`${kept} 지우기`, "/api/rederive/drop", { kind: "small danger", confirmText: { title: `${kept}을 지울까요?`, text: "지우면 되돌릴 수 없습니다.", confirm: "지우기", danger: true } }),
           ]) : null);
       }

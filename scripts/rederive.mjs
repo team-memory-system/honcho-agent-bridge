@@ -37,6 +37,7 @@ import { promisify } from "node:util";
 
 import { installPaths, loadConfig, readJson } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
+import { LATE_SLACK_MS } from "./past.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
 import {
   compose,
@@ -280,15 +281,17 @@ function countsSql(schema) {
 }
 
 /**
- * How many conversations went in after a newer one: by the order they reached the
- * server (their first message's id), one that started before a conversation that
- * reached it earlier. `conversations` counts those with any message.
+ * How many conversations went in out of time order: by the order they reached the
+ * server (their first message's id), one that started more than LATE_SLACK_MS before
+ * a conversation that reached it earlier. Conversations held at the same time cross
+ * by minutes or hours as their turns end; that is not counted. `conversations` counts
+ * those with any message.
  */
 function lateSql(schema) {
   const s = ident(schema);
   return `WITH firsts AS (SELECT min(id) AS first_id, min(created_at) AS start FROM ${s}.messages GROUP BY workspace_name, session_name),
     ordered AS (SELECT start, max(start) OVER (ORDER BY first_id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS before FROM firsts)
-    SELECT count(*) FILTER (WHERE before IS NOT NULL AND start < before)::bigint AS late, count(*)::bigint AS conversations FROM ordered`;
+    SELECT count(*) FILTER (WHERE before IS NOT NULL AND start < before - interval '${LATE_SLACK_MS / 1000} seconds')::bigint AS late, count(*)::bigint AS conversations FROM ordered`;
 }
 
 /** What the estimate is made of: conversations, messages, tokens and the deriver calls they take. */

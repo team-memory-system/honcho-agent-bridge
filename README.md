@@ -479,8 +479,8 @@ How it goes:
   from the larger copy), what the server holds already, and about how long. One the
   server holds is left out, unless a copy here has turns after the server's last one;
   then the collector sends only what the server lacks.
-- **Late ones.** A conversation that started before the newest one on the server is
-  late: it goes in, but the memory then forms out of order. At first setup the step
+- **Late ones.** A conversation that started more than a day before the newest one on
+  the server is late: it goes in, but the memory then forms out of order. At first setup the step
   asks whether to put them in (그래도 넣기) or leave them out (`--late skip`); in 수정 it
   says so. [기억 다시 정리](#rebuilding-the-memory-in-time-order--기억-다시-정리) puts the
   order right afterwards.
@@ -518,8 +518,9 @@ Honcho forms its memory in the order conversations reach it, so a conversation p
 in after newer ones (a late one from 지난 대화, a computer that joined later) is
 understood against what came after it. On the computer that runs the server,
 서버 → 기억 서버 → 기억 다시 정리 counts those (시간순과 어긋난 대화: by the order they
-reached the server, one that started before a conversation that reached it earlier)
-and 처음부터 다시 정리 makes the memory again from the server's own conversations,
+reached the server, one that started more than a day before a conversation that
+reached it earlier; conversations held at the same time cross by minutes or hours as
+their turns end, and that is not counted) and 처음부터 다시 정리 makes the memory again from the server's own conversations,
 in the order they started, beside the one in use:
 
 - Honcho keeps its tables in one Postgres schema (`DB_SCHEMA` in the server's private

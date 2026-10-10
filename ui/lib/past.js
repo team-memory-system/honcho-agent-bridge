@@ -659,8 +659,8 @@ export function pastSummary(draft, overview, totals, { edit = false, here = fals
   }
   const newest = server.newest ? momentText(server.newest) : "";
   const text = totals.late === totals.put
-    ? `${number(totals.put)}개 모두 서버의 가장 새 대화(${newest})보다 오래됐습니다. 넣으면 시간 순서가 어긋난 채 정리됩니다.`
-    : `${number(totals.put)}개 중 ${number(totals.late)}개는 내 서버의 가장 새 대화(${newest})보다 오래됐습니다. 넣으면 시간 순서가 어긋난 채 정리됩니다.`;
+    ? `${number(totals.put)}개 모두 서버의 가장 새 대화(${newest})보다 하루 넘게 오래됐습니다. 넣으면 시간 순서가 어긋난 채 정리됩니다.`
+    : `${number(totals.put)}개 중 ${number(totals.late)}개는 내 서버의 가장 새 대화(${newest})보다 하루 넘게 오래됐습니다. 넣으면 시간 순서가 어긋난 채 정리됩니다.`;
   if (edit) {
     past.late = "include";
     return [box, notice("warn", text, h("div", { class: "hint" }, "시간순으로 맞추려면 다 넣은 뒤 서버 → 기억 서버에서 처음부터 다시 정리를 누르세요."))];
@@ -724,14 +724,14 @@ export function doneCount(last) {
 }
 
 /**
- * Under 기억 설정's 쌓은 순서: how many of the server's conversations went in after a
- * newer one (a later 더 가져오기, a computer joined late), and where they are put back
- * in order. "" with none.
+ * Under 기억 설정's 쌓은 순서: how many of the server's conversations went in more than
+ * a day out of time order (a later 더 가져오기, a computer joined late), and where they
+ * are put back in order. "" with none.
  */
 export function lateLine(late) {
   const count = Number(late || 0);
   return count > 0
-    ? `어긋난 대화 ${number(count)}개는 서버의 더 새 대화보다 나중에 들어왔습니다. 시간순으로 맞추려면 서버 → 기억 서버에서 처음부터 다시 정리를 누르세요.`
+    ? `어긋난 대화 ${number(count)}개는 시간순보다 하루 넘게 늦게 들어왔습니다. 시간순으로 맞추려면 서버 → 기억 서버에서 처음부터 다시 정리를 누르세요.`
     : "";
 }
 
