@@ -11,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { adminHeaders, etaFrom, nextSchemaName, refusing, rederiveFlow, rederivePaths, rederiveStart, rederiveStatus, serverOf } from "../scripts/rederive.mjs";
+import { adminHeaders, etaFrom, nextSchemaName, refusing, rederiveFlow, rederivePaths, rederiveStart, rederiveStatus, serverOf, switchRecord } from "../scripts/rederive.mjs";
 import { callsText, bytesText, lastDetail, lastLine, rebuildLine, rebuildNote, rebuildPercent } from "../ui/lib/rederive.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -126,9 +126,22 @@ test("the dashboard reads the job and the last switch from the status file alone
   assert.equal(rebuildNote(flow.job), "다 만들면 새 기억으로 바꿉니다. 그때까지 지금 기억을 씁니다.");
 });
 
+test("the switch records what the new memory holds, the turns copied in while it was made included", () => {
+  // The MacBook's run: 130 copied, one more conversation came in during the rebuild.
+  const job = { kind: "build", startedAt: "2026-10-10T05:53:37Z", schema: "mem_202610101453", totals: { conversations: 130, messages: 1242, calls: 323 }, copied: { conversations: 130, messages: 1242 }, derive: { total: 1244 } };
+  const last = switchRecord(job, { conversations: 131, messages: 1244 }, "2026-10-10T06:02:44Z");
+  assert.equal(last.conversations, 131);
+  assert.equal(last.messages, 1244);
+  assert.equal(lastDetail(last), "대화 131개 · 9분 걸림 · 모델 호출 약 300번");
+  // When the count cannot be read: what was copied.
+  assert.equal(switchRecord(job, null, "2026-10-10T06:02:44Z").conversations, 130);
+});
+
 test("the screens' words for a rebuild", () => {
   assert.equal(rebuildLine({ kind: "build", phase: "copy", copied: { conversations: 1200 }, totals: { conversations: 26640 } }), "대화를 옮기는 중 · 1,200 / 26,640");
   assert.equal(rebuildLine({ kind: "build", phase: "swap" }), "새 기억으로 바꾸는 중");
+  // Every message is through and the deriver finishes what it does with them.
+  assert.equal(rebuildLine({ kind: "build", phase: "derive", derive: { done: 1244, total: 1244, at: null, etaSec: 0 } }), "마무리하는 중");
   assert.equal(rebuildLine({ kind: "undo", phase: "copy" }), "이전 기억으로 되돌리는 중");
   assert.match(rebuildNote({ kind: "build", phase: "derive", derive: { paused: { until: new Date(Date.now() + 3_600_000).toISOString() } } }), /^모델 사용 한도에 걸려 쉬는 중입니다\. .+에 이어서 합니다\.$/);
   assert.equal(rebuildNote({ kind: "build", phase: "derive", error: "x" }), "멈췄습니다. 다시 시도를 누르면 멈춘 곳부터 이어서 합니다.");

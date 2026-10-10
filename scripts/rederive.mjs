@@ -965,6 +965,25 @@ async function deriveWait(server, paths, job, save, stopped, callNext) {
 }
 
 /**
+ * What a switch leaves on record: the conversations and messages the new memory holds,
+ * the turns copied in while it was made included, and how long it took.
+ */
+export function switchRecord(job, size, finishedAt) {
+  return {
+    kind: job.kind,
+    startedAt: job.startedAt,
+    finishedAt,
+    swappedAt: finishedAt,
+    schema: job.schema,
+    conversations: Number(size?.conversations) || job.copied?.conversations || job.totals?.conversations || 0,
+    messages: Number(size?.messages) || job.derive?.total || job.totals?.messages || 0,
+    calls: job.totals?.calls || 0,
+    hours: Math.max(0, (Date.parse(finishedAt) - Date.parse(job.startedAt)) / 3_600_000),
+    unrefused: job.unrefused || 0,
+  };
+}
+
+/**
  * The switch, a step at a time so a stop half way carries on: copy what came in,
  * point the .env at the new schema, restart the api and deriver over it, remove the
  * second pair, and copy what came into the old schema until the api left it.
@@ -1009,19 +1028,8 @@ async function swap(server, paths, job, save, callNext) {
     await stepDone(5);
   }
   const finishedAt = new Date().toISOString();
-  const started = Date.parse(job.startedAt);
-  const last = {
-    kind: job.kind,
-    startedAt: job.startedAt,
-    finishedAt,
-    swappedAt: finishedAt,
-    schema: job.schema,
-    conversations: job.copied?.conversations || job.totals?.conversations || 0,
-    messages: job.derive?.total || job.totals?.messages || 0,
-    calls: job.totals?.calls || 0,
-    hours: Math.max(0, (Date.parse(finishedAt) - started) / 3_600_000),
-    unrefused: job.unrefused || 0,
-  };
+  const size = await one(server, `SELECT count(DISTINCT (workspace_name, session_name))::bigint AS conversations, count(*)::bigint AS messages FROM ${ident(job.schema)}.messages`).catch(() => null);
+  const last = switchRecord(job, size, finishedAt);
   await saveStatus(paths, {
     job: null,
     last,

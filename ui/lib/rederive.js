@@ -47,6 +47,8 @@ export function rebuildLine(job) {
   if (job.phase === "copy") return `대화를 옮기는 중 · ${number(job.copied?.conversations || 0)} / ${number(job.totals?.conversations || 0)}`;
   if (job.phase === "derive") {
     const derive = job.derive;
+    // Every message is through; what the deriver still does with them is the end of it.
+    if (derive?.total && Number(derive.done || 0) >= derive.total) return "마무리하는 중";
     const parts = [];
     if (derive?.at) parts.push(`${monthText(derive.at)} 대화까지`);
     if (derive?.total) parts.push(`${rebuildPercent(job)}%`);
