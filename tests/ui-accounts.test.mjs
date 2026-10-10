@@ -14,6 +14,7 @@ import {
   loginSubmission,
   modelGroups,
   pendingLogin,
+  servingState,
   sharedGroups,
   signInLink,
 } from "../ui/lib/accounts.js";
@@ -204,4 +205,24 @@ test("setup's logins count what the gateway already holds: accounts logged in, a
   assert.deepEqual(codex.empty, ["codex-1", "codex-3"]);
   assert.deepEqual(backendAccounts(accounts, "claude").empty, []);
   assert.deepEqual(backendAccounts(null, "codex"), { loggedIn: [], empty: [] });
+});
+
+test("the gateway card tells a limit apart: connected accounts all resting on it answer nothing until the first comes back", () => {
+  const now = Date.parse("2026-10-10T13:20:00Z");
+  const at = (minutes) => new Date(now + minutes * 60_000).toISOString();
+  const report = (cooldowns) => ({
+    servingAccounts: ["codex-1", "codex-2"],
+    accounts: [
+      { id: "codex-1", backend: "codex", routing: { cooldown_until: cooldowns[0] } },
+      { id: "codex-2", backend: "codex", routing: { cooldown_until: cooldowns[1] } },
+      { id: "claude-1", backend: "claude", routing: { cooldown_until: at(5) } },
+    ],
+  });
+  // run8: both accounts refused, and the card still said 계정 2개 쓰는 중.
+  assert.deepEqual(servingState(report([at(10), at(40)]), now), { serving: 2, resting: 2, until: at(10) });
+  assert.deepEqual(servingState(report([at(10), null]), now), { serving: 2, resting: 1, until: null });
+  // A cooldown in the past is over; an account not serving does not count.
+  assert.deepEqual(servingState(report([at(-1), null]), now), { serving: 2, resting: 0, until: null });
+  assert.deepEqual(servingState({ servingAccounts: [], accounts: [] }, now), { serving: 0, resting: 0, until: null });
+  assert.deepEqual(servingState(null, now), { serving: 0, resting: 0, until: null });
 });

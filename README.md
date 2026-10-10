@@ -47,9 +47,11 @@ question and gets an answer, without reading the underlying messages.
    and what is left to do in each agent (할 일). After that, the menus: 대시보드
    shows the servers the conversations go to in one table (up to date or not, what
    waits here, when the last one went, what the server holds), how far Honcho has
-   got putting them in order, and tiles for the gateway, backup and sharing; nothing
-   on it is a link. 기억 reads and searches the memories and asks Honcho or a
-   gateway model. 기억 설정 is three blocks whose buttons open windows: 대화 수집's
+   got putting them in order, and tiles for the gateway, backup and sharing (the
+   gateway's says 사용 한도 and when it ends once every account it answers with
+   rests on its usage limit); nothing on it is a link. 기억 reads and searches the
+   memories and asks Honcho or a gateway model. 기억 설정 is three blocks whose
+   buttons open windows: 대화 수집's
    수정 is first setup's own steps, other servers and per-folder choices included;
    지난 대화, where the past conversations came from and how many went in, whose
    더 가져오기 opens 수정 at that step; MCP 도구. 팀 holds teammates' memories behind

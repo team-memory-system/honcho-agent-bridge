@@ -91,6 +91,14 @@ export function time(value) {
   return value ? timeFormat.format(new Date(value)) : "";
 }
 
+/** "오후 3:40" today, "10월 14일 오후 3:40" on another day. */
+export function dayTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  const day = date.toDateString() === new Date().toDateString() ? "" : `${date.getMonth() + 1}월 ${date.getDate()}일 `;
+  return `${day}${timeFormat.format(date)}`;
+}
+
 export function number(value) {
   return new Intl.NumberFormat("ko-KR").format(value ?? 0);
 }

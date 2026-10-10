@@ -8,7 +8,8 @@
 // login that ended says so on top, with 다시 로그인.
 import { get, honcho, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
-import { ago, number } from "../lib/format.js";
+import { servingState } from "../lib/accounts.js";
+import { ago, dayTime, number } from "../lib/format.js";
 import { sameServer } from "../lib/collect.js";
 import { HELD, doneCount, runLine } from "../lib/past.js";
 import { keptNote, lastLine, rebuildLine, rebuildNote, rebuildPercent, stopCause } from "../lib/rederive.js";
@@ -196,13 +197,15 @@ function tile({ title, state = "idle", value, line }) {
 function gatewayTile() {
   const { gateway } = app.status;
   const report = gateway.report;
-  const serving = (report?.servingAccounts || []).length;
+  // A connected account resting on its usage limit answers nothing until it comes back.
+  const { serving, resting, until } = servingState(report);
   const loggedIn = (report?.accounts || []).filter((account) => account.login?.loggedIn).length;
+  const models = `모델 ${number(report?.models?.models?.length || 0)}개`;
   return tile({
     title: "구독 게이트웨이",
-    state: gateway.pending ? "idle" : serving ? "" : report ? "warn" : "bad",
-    value: gateway.pending ? "확인 중" : !report ? "꺼짐" : serving ? `계정 ${number(serving)}개 쓰는 중` : loggedIn ? "연결 필요" : "로그인 필요",
-    line: report ? `모델 ${number(report.models?.models?.length || 0)}개` : "서버 → 모델에서 켭니다",
+    state: gateway.pending ? "idle" : until ? "warn" : serving ? "" : report ? "warn" : "bad",
+    value: gateway.pending ? "확인 중" : !report ? "꺼짐" : until ? "사용 한도" : serving ? `계정 ${number(serving - resting)}개 쓰는 중` : loggedIn ? "연결 필요" : "로그인 필요",
+    line: !report ? "서버 → 모델에서 켭니다" : until ? `${dayTime(until)}에 풀림` : resting ? `${models} · 계정 ${number(resting)}개는 사용 한도` : models,
   });
 }
 

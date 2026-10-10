@@ -8,7 +8,7 @@
 import { cli, gateway, post } from "../lib/api.js";
 import { accountGroups, modelGroups, sharedGroups } from "../lib/accounts.js";
 import { h, clear, copyText } from "../lib/dom.js";
-import { ago, number } from "../lib/format.js";
+import { ago, dayTime, number } from "../lib/format.js";
 import { block, confirmWindow, kv, list, listItem, modal, opt, opts } from "../lib/kit.js";
 import { gatewayLogin } from "../lib/login.js";
 import { screenTabs } from "../lib/tabs.js";
@@ -149,7 +149,7 @@ export default {
       const coolingUntil = routing.cooldown_until && new Date(routing.cooldown_until) > new Date() ? routing.cooldown_until : null;
       const state = !login.cliAvailable ? `${subscription(account.backend)} 명령 없음`
         : !login.loggedIn ? "로그인 안 됨"
-          : coolingUntil ? `사용 한도 · ${new Date(coolingUntil).toLocaleTimeString("ko-KR", { hour: "numeric", minute: "2-digit" })}에 풀림`
+          : coolingUntil ? `사용 한도 · ${dayTime(coolingUntil)}에 풀림`
             : serving.has(account.id) ? "쓰는 중" : "연결 안 됨";
       const facts = [state, planLabel(login.plan) || null, routing.last_used_at ? `마지막 사용 ${ago(routing.last_used_at)}` : null].filter(Boolean);
       const name = login.account || account.id;

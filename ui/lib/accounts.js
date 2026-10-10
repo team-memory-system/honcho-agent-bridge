@@ -47,6 +47,21 @@ export function accountGroups(accounts) {
   }));
 }
 
+/**
+ * The accounts the gateway answers with, and how many of them rest on a usage limit
+ * (routing.cooldown_until, subscription-gateway router/server.mjs). `until` is when
+ * the first comes back once all of them rest; null while one can still answer.
+ */
+export function servingState(report, now = Date.now()) {
+  const ids = new Set(report?.servingAccounts || []);
+  const rests = (Array.isArray(report?.accounts) ? report.accounts : [])
+    .filter((account) => ids.has(account?.id))
+    .map((account) => Date.parse(account.routing?.cooldown_until || ""))
+    .filter((ms) => ms > now);
+  const until = ids.size && rests.length === ids.size ? new Date(Math.min(...rests)).toISOString() : null;
+  return { serving: ids.size, resting: rests.length, until };
+}
+
 /** The groups where drain or balance changes anything: two or more accounts. */
 export function sharedGroups(groups) {
   return (groups || []).filter((group) => group.ordered);
