@@ -22,10 +22,14 @@ function queuedHumanPrompt(obj) {
 const BARE_COMMAND = /^\/\S+$/;
 
 export async function parseTranscript(transcriptPath) {
+  return parseLines((await fsp.readFile(transcriptPath, "utf8")).split(/\r?\n/), transcriptPath);
+}
+
+/** The same from a transcript's lines: all of them, or the first or last ones 지난 대화 reads (past.mjs). */
+export function parseLines(lines, transcriptPath) {
   const metadata = { source: "claude", file_path: transcriptPath };
   const turns = [];
   const queued = [];
-  const lines = (await fsp.readFile(transcriptPath, "utf8")).split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].trim();
     if (!line) continue;

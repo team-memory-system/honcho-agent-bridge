@@ -56,6 +56,8 @@ import { projectFolder, systemTempFolders, transcriptFiles } from "./projects.mj
 import { automationRecord } from "./providers/automation.mjs";
 import { readConversations, readExportAccount } from "./providers/chatgpt-archive.mjs";
 import { parseConversation } from "./providers/chatgpt.mjs";
+import { parseLines as claudeLines } from "./providers/claude.mjs";
+import { parseLines as codexLines } from "./providers/codex.mjs";
 import { sanitizeId } from "./providers/shared.mjs";
 import { publicUrl, sanitizeUrlsInText } from "./redact.mjs";
 import { countPending, outsideCollectFolders, withoutTargetFilter } from "./targets.mjs";
@@ -68,6 +70,11 @@ const HOLD_PROVIDERS = ["claude", "codex", "agy", "grok"];
 const HEAD_BYTES = 1024 * 1024;
 // The last turn is looked for in the file's last 128 KB, then its last 2 MB.
 const TAIL_SPANS = [128 * 1024, 2 * 1024 * 1024];
+// The head is handed to the collector's parser this many lines at a time, until it makes a message of one.
+const HEAD_CHUNK_LINES = 32;
+// Bumped when what a catalog item says of its file changes, so the items read before are read again.
+const ITEM_VERSION = 2;
+const PARSE_LINES = { claude: claudeLines, codex: codexLines };
 const CONCURRENCY = 16;
 // A turn here this much after the server's last one is a turn the server lacks.
 const NEWER_SLACK_MS = 1000;
@@ -194,59 +201,73 @@ export function originalName(file) {
 }
 
 /**
- * What a transcript's first lines say: its session id, when it started, the folder
- * it ran in, and whether no person took part in it (providers/automation.mjs).
+ * When the turns the collector makes messages of (providers/*.mjs) in `lines` were:
+ * the earliest and the latest, as the server will date the messages. Nulls when
+ * none of the lines is one.
+ */
+function turnTimes(provider, lines, file) {
+  let first = null;
+  let last = null;
+  for (const turn of PARSE_LINES[provider](lines, file).turns) {
+    const at = timeOf(turn.created_at);
+    if (at === null) continue;
+    if (first === null || at < first) first = at;
+    if (last === null || at > last) last = at;
+  }
+  return { first, last };
+}
+
+/**
+ * What a transcript's first lines say: its session id, the folder it ran in, whether
+ * no person took part in it (providers/automation.mjs), and when it started. It
+ * started with its first message as the collector makes it, not its first line: a
+ * session opened with /clear, a hook's output or another session's note says
+ * something before anyone does, and the server dates the conversation by its
+ * first message.
  */
 async function readHead(provider, file) {
   const head = { sessionId: null, start: null, cwd: null, auto: false };
+  let opened = null;
+  let named = false;
+  let pending = [];
   for await (const line of headLines(file, HEAD_BYTES)) {
+    pending.push(line);
+    if (pending.length >= HEAD_CHUNK_LINES) {
+      head.start = turnTimes(provider, pending, file).first;
+      pending = [];
+      if (head.start !== null && named) break;
+    }
+    if (named) continue;
     const record = parseRecord(line);
     if (!record) continue;
+    opened ??= timeOf(record.timestamp);
     if (provider === "codex") {
       // session_meta names the session (codex.mjs); a 2025 rollout opens with a bare header instead.
       if (record.type === "session_meta" && record.payload && typeof record.payload === "object") {
         const meta = record.payload;
         head.sessionId = typeof meta.id === "string" && meta.id ? meta.id : null;
         head.cwd = typeof meta.cwd === "string" && meta.cwd ? meta.cwd : null;
-        head.start = timeOf(meta.timestamp) ?? timeOf(record.timestamp) ?? head.start;
+        opened = timeOf(meta.timestamp) ?? timeOf(record.timestamp) ?? opened;
         head.auto = Boolean(automationRecord("codex", record));
-        break;
+        named = true;
       }
-      head.start ??= timeOf(record.timestamp);
       continue;
     }
-    head.start ??= timeOf(record.timestamp);
     if (!head.sessionId && typeof record.sessionId === "string" && record.sessionId) head.sessionId = record.sessionId;
     if (!head.cwd && typeof record.cwd === "string" && record.cwd) {
       head.cwd = record.cwd;
       head.auto = Boolean(automationRecord("claude", record));
     }
-    if (head.start && head.sessionId && head.cwd) break;
+    named = Boolean(head.sessionId && head.cwd);
   }
+  if (head.start === null && pending.length) head.start = turnTimes(provider, pending, file).first;
+  // Nothing in the head is a message: when it was opened stands in.
+  head.start ??= opened;
   return head;
 }
 
-/** A Claude Code record the collector makes a message of (claude.mjs), as far as one record shows. */
-function claudeTurn(record) {
-  const message = record?.message;
-  if (!message || !["user", "assistant"].includes(message.role)) return false;
-  if (record.isApiErrorMessage || message.model === "<synthetic>" || record.isMeta === true) return false;
-  const content = message.content;
-  if (typeof content === "string") return Boolean(content.trim());
-  if (!Array.isArray(content)) return false;
-  const text = content.some((item) => item?.type === "text" && String(item.text || "").trim());
-  if (message.role === "user") return text && !content.some((item) => item?.type === "tool_result");
-  return text;
-}
-
-function codexTurn(record) {
-  const payload = record?.payload;
-  return record?.type === "response_item" && payload?.type === "message" && ["user", "assistant"].includes(payload.role);
-}
-
-/** When the transcript's last turn was, from its end; the last time it records when no turn is near the end. */
+/** When the transcript's last message was, from its end; the last time it records when no message is near the end. */
 async function readLastTurn(provider, file, size) {
-  const isTurn = provider === "codex" ? codexTurn : claudeTurn;
   const handle = await fsp.open(file, "r");
   try {
     let fallback = null;
@@ -257,12 +278,11 @@ async function readLastTurn(provider, file, size) {
       const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
       // The first line of a span that starts mid-file is cut.
       if (length < size) lines.shift();
-      for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const { last } = turnTimes(provider, lines, file);
+      if (last !== null) return last;
+      for (let index = lines.length - 1; index >= 0 && fallback === null; index -= 1) {
         const record = parseRecord(lines[index]);
-        const at = record ? timeOf(record.timestamp) : null;
-        if (at === null) continue;
-        fallback ??= at;
-        if (isTurn(record)) return at;
+        fallback = record ? timeOf(record.timestamp) : null;
       }
       if (length >= size) break;
     }
@@ -285,7 +305,7 @@ async function transcriptItem(provider, file, from, cache) {
     return null;
   }
   const cached = cache?.get(file);
-  if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs && cached.from === from) return cached;
+  if (cached && cached.v === ITEM_VERSION && cached.size === stat.size && cached.mtime === stat.mtimeMs && cached.from === from) return cached;
   let head;
   let last;
   try {
@@ -298,6 +318,7 @@ async function transcriptItem(provider, file, from, cache) {
   const session = sanitizeId(head.sessionId || name, provider);
   const segment = provider === "codex" ? codexSegmentId(name, head.sessionId) : null;
   return {
+    v: ITEM_VERSION,
     key: `${provider}:${session}${segment ? `:${segment}` : ""}`,
     provider,
     session,
