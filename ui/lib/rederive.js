@@ -58,7 +58,8 @@ export function rebuildLine(job) {
     if (undo) parts.push("옮긴 대화를 정리하는 중");
     else if (derive?.at) parts.push(`${monthText(derive.at)} 대화까지`);
     if (derive?.total) parts.push(`${rebuildPercent(job)}%`);
-    if (derive?.etaSec) parts.push(`${etaText(derive.etaSec)} 남음`);
+    // Resting on a limit, the note under it says when it carries on.
+    if (derive?.etaSec && !derive.paused?.until) parts.push(`${etaText(derive.etaSec)} 남음`);
     return parts.join(" · ") || "새 기억을 만드는 중";
   }
   if (job.phase === "scopes") return "마무리하는 중";

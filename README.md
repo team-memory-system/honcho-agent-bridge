@@ -563,7 +563,10 @@ in the order they started, beside the one in use:
   about 8 seconds a call over `DERIVER_WORKERS`), the disk it takes (the schema in use)
   and the space left in the database's volume. It does not start while 지난 대화 are
   going in or the server does not answer, and a server installed before this needs
-  다시 준비 first (its `compose.yaml` has no `api-next`).
+  다시 준비 first (its `compose.yaml` has no `api-next`). While it goes, the time
+  left is that estimate for the messages left until there are 10 minutes of pace or a
+  tenth of the messages (the first minutes move in bursts), then the pace of the last
+  hour; resting on a limit, the line leaves it out and says when it carries on.
 - The dashboard shows it as a card while it goes and for a day after the switch. Its
   state is `<dataDir>/rederive/status.json`, and `<dataDir>/logs/rederive.log` says
   what it did. A job stopped half way (a restart) carries on when the app next asks;

@@ -11,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { adminHeaders, etaFrom, keptRecord, nextSchemaName, refusing, rederiveFlow, rederivePaths, rederiveStart, rederiveStatus, serverOf, switchRecord } from "../scripts/rederive.mjs";
+import { adminHeaders, etaFor, etaFrom, keptRecord, nextSchemaName, refusing, rederiveFlow, rederivePaths, rederiveStart, rederiveStatus, serverOf, switchRecord } from "../scripts/rederive.mjs";
 import { callsText, bytesText, keptName, keptNote, keptWhat, lastDetail, lastLine, lastTag, rebuildLine, rebuildNote, rebuildPercent } from "../ui/lib/rederive.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -67,6 +67,21 @@ test("the time left goes by the last hour's pace", () => {
   const hour = 60 * 60_000;
   // Samples older than an hour are left out: the pace changed since.
   assert.equal(etaFrom([old, { t: 2 * hour, done: 1000 }, { t: 2 * hour + 60_000, done: 1001 }], 1101), 6000);
+});
+
+test("the time left is the estimate from before the start until the pace says more", () => {
+  // run8: 3 of 1,211 thirty seconds in, estimated at 11 minutes. The pace alone says over three hours.
+  const first = [{ t: 0, done: 0 }, { t: 30_000, done: 3 }];
+  assert.equal(etaFor(first, 1211, 660), 658);
+  assert.ok(etaFrom(first, 1211) > 3 * 3600);
+  // Ten minutes of pace, or a tenth of the messages: the pace.
+  assert.equal(etaFor([{ t: 0, done: 0 }, { t: 600_000, done: 100 }], 1100, 660), 6000);
+  assert.equal(etaFor([{ t: 0, done: 0 }, { t: 60_000, done: 200 }], 1000, 660), 240);
+  // Nearly through by the estimate: still a minute, never less.
+  assert.equal(etaFor([{ t: 0, done: 0 }, { t: 30_000, done: 99 }], 1000, 30), 60);
+  // 되돌리기 has no estimate: the pace from the start, as before.
+  assert.equal(etaFor(first, 1211, null), etaFrom(first, 1211));
+  assert.equal(etaFor([], 1211, 660), null);
 });
 
 test("compose.yaml has the second api and deriver, over their own schema and namespace, on 127.0.0.1 only", async () => {
@@ -183,6 +198,9 @@ test("the screens' words for a rebuild", () => {
   assert.equal(rebuildLine({ kind: "undo", phase: "copy", copied: { conversations: 128 }, totals: { conversations: 130 } }), "그동안 들어온 대화를 옮기는 중");
   assert.equal(rebuildLine({ kind: "undo", phase: "derive", derive: { done: 1190, total: 1244, at: Date.parse("2026-10-10T06:00:00Z"), etaSec: 180 } }), "옮긴 대화를 정리하는 중 · 95% · 약 3분 남음");
   assert.equal(rebuildLine({ kind: "undo", phase: "swap" }), "이전 기억으로 바꾸는 중");
+  // Resting on a limit, the note says when it carries on: no time left in the line.
+  const resting = { kind: "build", phase: "derive", derive: { done: 20, total: 1215, at: Date.parse("2025-10-20T00:00:00Z"), etaSec: 3600, paused: { until: "2026-10-10T13:30:10Z" } } };
+  assert.equal(rebuildLine(resting), "2025년 10월 대화까지 · 1%");
   assert.equal(rebuildNote({ kind: "undo", phase: "derive" }), "다 옮기면 이전 기억으로 되돌립니다. 그때까지 지금 기억을 씁니다.");
   // The minute without memory search is the restart at the end, not the making.
   assert.equal(rebuildNote({ kind: "build", phase: "swap" }), "서버를 다시 켜는 동안 1분쯤 기억 검색이 멈춥니다.");

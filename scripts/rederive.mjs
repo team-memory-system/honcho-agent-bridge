@@ -73,6 +73,10 @@ const DRAIN_TYPES = ["representation", "summary", "scope_backfill"];
 // 60 messages, and about this many seconds a call takes on a subscription model.
 const TOKENS_PER_CALL = 1024;
 const SECONDS_PER_CALL = 8;
+// The frontier moves in bursts at first: 30 seconds into a rebuild estimated, and done, at
+// about 10 minutes, its pace said 약 3시간 (run8). Until this much of a pace, or a tenth
+// of the messages, the time left is that estimate for the messages left.
+const PACE_AFTER_MS = 10 * 60_000;
 // The model refusing: refusals that grow while it makes nothing, this many polls in a row.
 const REFUSED_POLLS = 2;
 // A refusal, in the error the deriver keeps on a queue item: what passes with time, as a
@@ -629,6 +633,15 @@ export function etaFrom(samples, total) {
   return Math.max(0, Math.round((total - last.done) / rate));
 }
 
+/** Seconds left: the estimate shown before the start until the pace says more (PACE_AFTER_MS), then the pace. */
+export function etaFor(samples, total, estimateSec) {
+  const last = samples.at(-1);
+  if (!last || !total) return null;
+  const early = last.t - samples[0].t < PACE_AFTER_MS && last.done < total / 10;
+  if (early && estimateSec) return Math.max(60, Math.round(estimateSec * (1 - last.done / total)));
+  return etaFrom(samples, total);
+}
+
 // ------------------------------------------------------------------ the job
 
 /** The estimate 처음부터 다시 정리 shows before it starts. */
@@ -915,6 +928,8 @@ export async function rederiveRun(config) {
 async function deriveWait(server, paths, job, save, stopped, callNext) {
   const history = [];
   const samples = [];
+  // The estimate the window showed before the start; 되돌리기 shows none, it carries only what came in since.
+  const estimateSec = job.kind === "build" && job.totals?.calls ? Math.round((job.totals.calls * SECONDS_PER_CALL) / server.workers) : null;
   let lastCatchUp = Date.now();
   let lastProgressAt = Date.now();
   let pauseStep = 0;
@@ -936,6 +951,8 @@ async function deriveWait(server, paths, job, save, stopped, callNext) {
     await compose(server.directory, ["--profile", "rederive", "up", "-d", "deriver-next"], { timeout: 600_000 });
     // `previous` stays: a model still refusing makes nothing, so the next pause is longer.
     history.length = 0;
+    // The pace across the pause says nothing of the pace after it.
+    samples.length = 0;
     await save({ derive: { ...job.derive, paused: null } });
     return "resumed";
   };
@@ -961,7 +978,7 @@ async function deriveWait(server, paths, job, save, stopped, callNext) {
       pauseStep = 0;
     }
     previous = state;
-    await save({ derive: { done, total, at: state.at, etaSec: etaFrom(samples, total), errored: state.errored, paused: null } });
+    await save({ derive: { done, total, at: state.at, etaSec: etaFor(samples, total, estimateSec), errored: state.errored, paused: null } });
 
     if (!state.work && !state.embedding) {
       if (state.errored && endRetries < END_RETRIES) {
