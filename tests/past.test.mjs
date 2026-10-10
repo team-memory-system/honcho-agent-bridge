@@ -366,6 +366,32 @@ test("past conversations go in the order they started, and one found in two plac
   assert.equal(files[0].applied, true);
 });
 
+test("a store being read stops, rclone and all, when another is picked, and the one picked is read", { skip: process.platform === "win32" }, async (t) => {
+  const honcho = await fakeHoncho();
+  t.after(() => honcho.server.close());
+  // An rclone that lists as slowly as a whole cloud drive would: it notes its pid and waits a minute.
+  const bin = path.join(os.tmpdir(), `past-slow-rclone-${process.pid}-${Date.now()}`);
+  await fsp.mkdir(bin, { recursive: true });
+  t.after(() => fsp.rm(bin, { recursive: true, force: true }));
+  const pidFile = path.join(bin, "pid");
+  await fsp.writeFile(path.join(bin, "rclone"), `#!/bin/sh\necho $$ > "${pidFile}"\nexec sleep 60\n`, { mode: 0o755 });
+  const install = await makeInstall(t, honcho);
+  install.env.RCLONE_BIN = path.join(bin, "rclone");
+  const store = path.join(install.root, "backup");
+  await writeClaude(path.join(store, "대화", "claude", "2025", "01", "01", "s1.jsonl"), { sessionId: "s1", cwd: install.team, turns: turns("one", "2025-01-01T10:00:00Z") });
+
+  const started = Date.now();
+  assert.equal((await cli(["past", "scan", `--store=${JSON.stringify({ kind: "cloud", remote: "drive", path: "" })}`], install.env)).body?.ok, true);
+  const pid = Number(await until(() => fsp.readFile(pidFile, "utf8").catch(() => ""), 15_000));
+  const folder = { kind: "folder", path: store };
+  const read = await scan(install, folder);
+  assert.ok(Date.now() - started < 30_000, "the picked store did not wait for the slow one");
+  assert.deepEqual(read.store.spec, folder);
+  assert.equal(read.store.state, "done");
+  assert.equal(read.store.count, 1);
+  assert.throws(() => process.kill(pid, 0), /ESRCH/, "the slow rclone was stopped");
+});
+
 test("a conversation on the server stays out unless a copy here has turns after its last, and a late one can be left out", async (t) => {
   const honcho = await fakeHoncho();
   t.after(() => honcho.server.close());

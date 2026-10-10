@@ -151,9 +151,13 @@ export function locateRclone(env = process.env, platform = process.platform) {
   return null;
 }
 
-/** Runs rclone; always resolves {code, stdout, stderr}. */
-export function runRclone(binary, args, { timeoutMs = 600_000, env = process.env } = {}) {
+/** Runs rclone; always resolves {code, stdout, stderr}. `signal` stops it half way (code -1). */
+export function runRclone(binary, args, { timeoutMs = 600_000, env = process.env, signal = null } = {}) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve({ code: -1, stdout: "", stderr: "stopped" });
+      return;
+    }
     let child;
     try {
       child = spawn(binary, args, { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -161,6 +165,8 @@ export function runRclone(binary, args, { timeoutMs = 600_000, env = process.env
       resolve({ code: -1, stdout: "", stderr: String(error?.message || error) });
       return;
     }
+    const stop = () => child.kill("SIGTERM");
+    signal?.addEventListener("abort", stop, { once: true });
     const out = [];
     const err = [];
     let errBytes = 0;
@@ -171,11 +177,13 @@ export function runRclone(binary, args, { timeoutMs = 600_000, env = process.env
     const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
     child.on("error", (error) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
       resolve({ code: -1, stdout: "", stderr: String(error?.message || error) });
     });
-    child.on("close", (code, signal) => {
+    child.on("close", (code, killed) => {
       clearTimeout(timer);
-      resolve({ code: code ?? (signal ? -1 : 0), stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") });
+      signal?.removeEventListener("abort", stop);
+      resolve({ code: code ?? (killed ? -1 : 0), stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") });
     });
   });
 }

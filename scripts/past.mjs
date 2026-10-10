@@ -74,6 +74,8 @@ const NEWER_SLACK_MS = 1000;
 // Network failures in a row after which the run stops and keeps the rest for later.
 const MAX_UNREACHABLE = 3;
 const STATUS_EVERY_MS = 2000;
+// How often a store's read looks whether another store was asked for meanwhile.
+const REQUEST_EVERY_MS = 1000;
 const INDEX_FRESH_MS = 3 * 60_000;
 const ID_BATCH = 100;
 // Seconds one conversation takes to go in, for the estimate shown before a run:
@@ -311,11 +313,12 @@ async function transcriptItem(provider, file, from, cache) {
   };
 }
 
-async function readItems(files, from, cachePath, onProgress) {
+async function readItems(files, from, cachePath, onProgress, signal = null) {
   const previous = await readJson(cachePath, null);
   const cache = new Map((previous?.items || []).map((item) => [item.file, item]));
   let done = 0;
   const items = await mapLimit(files, CONCURRENCY, async ({ provider, file }) => {
+    if (signal?.aborted) return null;
     const item = await transcriptItem(provider, file, from, cache);
     done += 1;
     if (done % 250 === 0) await onProgress?.(done, files.length);
@@ -463,15 +466,24 @@ class ScanError extends Error {
   }
 }
 
+/** Another store was asked for while this one was being read: the read stops there. */
+function stopIfMoved(signal) {
+  if (signal?.aborted) throw new ScanError("moved", "another store was asked for");
+}
+
 /**
  * A cloud store copied down into the cache, agent by agent: the list first, so the
  * screen can show how far the copy has got. rclone copies only what changed since
  * the last time.
  */
-async function copyCloudStore(spec, cacheRoot, onProgress, env = process.env) {
+async function copyCloudStore(spec, cacheRoot, onProgress, { env = process.env, signal = null } = {}) {
   const binary = locateRclone(env);
   if (!binary) throw new ScanError("rclone-missing", "rclone is not installed on this computer");
-  const run = (args, options) => runRclone(binary, args, { ...options, env });
+  const run = async (args, options) => {
+    const result = await runRclone(binary, args, { ...options, env, signal });
+    stopIfMoved(signal);
+    return result;
+  };
   const base = `${spec.remote}:${spec.path ? `${spec.path}/` : ""}${ROOT_FOLDER}`;
   const missing = (result) => /directory not found|not found/i.test(result.stderr || "");
   let total = 0;
@@ -521,7 +533,7 @@ async function copyCloudStore(spec, cacheRoot, onProgress, env = process.env) {
   return { total, devices: [...devices].sort() };
 }
 
-async function scanStore(spec, paths, onProgress) {
+async function scanStore(spec, paths, onProgress, signal = null) {
   let root;
   let devices;
   if (spec.kind === "folder") {
@@ -535,11 +547,13 @@ async function scanStore(spec, paths, onProgress) {
   } else {
     root = path.join(paths.storeCache, digest(storeLabel(spec)));
     await fsp.mkdir(root, { recursive: true });
-    ({ devices } = await copyCloudStore(spec, root, onProgress));
+    ({ devices } = await copyCloudStore(spec, root, onProgress, { signal }));
   }
+  stopIfMoved(signal);
   const files = await storeFiles(root);
   await onProgress({ phase: "read", done: 0, total: files.length });
-  const items = await readItems(files, SOURCE_STORE, paths.scanStore, (done, total) => onProgress({ phase: "read", done, total }));
+  const items = await readItems(files, SOURCE_STORE, paths.scanStore, (done, total) => onProgress({ phase: "read", done, total }), signal);
+  stopIfMoved(signal);
   const scanned = { version: 1, at: new Date().toISOString(), spec, label: storeLabel(spec), complete: true, devices, items };
   await writeJson(paths.scanStore, scanned);
   return scanned;
@@ -550,7 +564,8 @@ async function scanStore(spec, paths, onProgress) {
 /**
  * Starts reading the places setup chose, in the background, and says how far each
  * has got. `store` is the backup store to read (null for none); asked again with
- * another store, the running scan moves on to it. This computer is read every time.
+ * another store, the running scan stops reading the one before (its rclone too) and
+ * moves on to it. This computer is read every time.
  */
 export async function pastScan(config, { store = null } = {}) {
   const paths = pastPaths(config);
@@ -572,7 +587,10 @@ export async function pastScan(config, { store = null } = {}) {
   return pastScanStatus(config);
 }
 
-/** The background scan: this computer, then the store asked for, again while the request changes. */
+/**
+ * The background scan: this computer, then the store asked for, again while the
+ * request changes. A store read while another is asked for stops at once.
+ */
 export async function pastScanRun(config) {
   const paths = pastPaths(config);
   const lock = await acquireFileLock(paths.scanLock, { staleMs: 6 * 3_600_000, reclaimDeadImmediately: true });
@@ -603,12 +621,20 @@ export async function pastScanRun(config) {
       const spec = storeSpec(request.store);
       if (spec) {
         const label = storeLabel(spec);
+        const moved = new AbortController();
+        const watch = setInterval(() => {
+          readJson(paths.scanRequest, { store: null }).then((now) => { if (!sameStore(now.store, request.store)) moved.abort(); }).catch(() => {});
+        }, REQUEST_EVERY_MS);
         try {
           await save({ store: { spec, label, state: "running", phase: "list", done: 0, total: 0 } });
-          const scanned = await scanStore(spec, paths, (fields) => progress("store", { spec, label, ...fields }));
+          const scanned = await scanStore(spec, paths, (fields) => (moved.signal.aborted ? Promise.resolve() : progress("store", { spec, label, ...fields })), moved.signal);
           await save({ store: { spec, label, state: "done", phase: "done", done: scanned.items.length, total: scanned.items.length, devices: scanned.devices, ...sourceSummary(scanned.items), at: scanned.at } });
         } catch (error) {
-          await save({ store: { spec, label, state: "error", code: error?.code || "failed", error: sanitizeUrlsInText(String(error?.message || error)) } });
+          // Left for the store asked for since: nothing to say about this one.
+          if (error?.code === "moved") await save({ store: null });
+          else await save({ store: { spec, label, state: "error", code: error?.code || "failed", error: sanitizeUrlsInText(String(error?.message || error)) } });
+        } finally {
+          clearInterval(watch);
         }
       } else {
         await save({ store: null });

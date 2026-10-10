@@ -364,9 +364,14 @@ export function pastStep(draft, context, { edit = false, newServer = false } = {
       clear(fields, kinds, h("span", { class: "muted" }, past.remotes.installed ? "rclone에 연결된 클라우드가 없습니다. 터미널에서 rclone config로 remote를 만든 뒤 이 창을 다시 여세요." : "이 컴퓨터에 rclone이 없습니다. rclone을 설치하고 rclone config로 클라우드를 연결한 뒤 이 창을 다시 여세요."));
       return;
     }
-    if (!past.remotes.remotes.includes(store.remote)) store.remote = past.remotes.remotes[0];
-    const select = h("select", { class: "select input mono", "aria-label": "rclone remote" }, past.remotes.remotes.map((name) => h("option", { value: name, selected: name === store.remote ? true : null }, `${name}:`)));
-    select.addEventListener("change", () => { store.remote = select.value; past.filled = true; scan.ask(); });
+    // One remote is the store; of several, none is read until the person picks it (a
+    // remote can be a whole cloud drive, and reading it means copying it down).
+    const remotes = past.remotes.remotes;
+    if (!remotes.includes(store.remote)) store.remote = remotes.length === 1 ? remotes[0] : "";
+    const select = h("select", { class: "select input mono", "aria-label": "rclone remote" },
+      store.remote ? null : h("option", { value: "", selected: true, disabled: true }, "remote 고르기"),
+      remotes.map((name) => h("option", { value: name, selected: name === store.remote ? true : null }, `${name}:`)));
+    select.addEventListener("change", () => { store.remote = select.value; past.filled = true; drawFields(); scan.ask(); });
     const folder = h("input", { class: "input mono", value: store.cloudPath, placeholder: "비우면 맨 위", spellcheck: "false", "aria-label": "그 안의 폴더" });
     folder.addEventListener("input", () => { store.cloudPath = folder.value; past.filled = true; scan.ask({ later: true }); });
     clear(fields, kinds, select, folder);
@@ -389,7 +394,7 @@ export function pastStep(draft, context, { edit = false, newServer = false } = {
       return;
     }
     if (!past.scan?.running && part?.state === "waiting") {
-      clear(readline, notice("bad", "백업 저장소를 읽지 못했습니다. ", button("다시 시도", { kind: "small", onClick: () => scan.ask() })));
+      clear(readline, notice("bad", "백업 저장소를 읽다가 멈췄습니다. ", button("다시 시도", { kind: "small", onClick: () => scan.ask() })));
       return;
     }
     // Reading: rclone first copies a cloud down (phase copy), then every file is read.
