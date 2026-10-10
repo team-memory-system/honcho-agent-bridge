@@ -159,7 +159,12 @@ export default {
     let poll = null;
     const stopPolling = () => { if (poll) clearTimeout(poll); poll = null; };
 
-    async function refresh({ check = false } = {}) {
+    /**
+     * `after`: the last run's start before 지금 백업. The run starts in a process of its
+     * own, so the first look can come before it says it is running, and a small backup
+     * can be over by the next: until a run newer than that shows, look again a while.
+     */
+    async function refresh({ check = false, after, tries = 0 } = {}) {
       try {
         status = check ? await cli("/api/backup/status", { check: true }) : await get("/api/backup/status");
       } catch (error) {
@@ -169,7 +174,9 @@ export default {
       if (status.ok === false) { clear(body, notice("bad", status.error || "상태를 읽지 못했습니다.")); return; }
       draw();
       stopPolling();
+      const waiting = after !== undefined && (status.lastRun?.startedAt || null) === after;
       if (status.state === "running") poll = setTimeout(() => refresh(), 4000);
+      else if (waiting && tries < 15) poll = setTimeout(() => refresh({ after, tries: tries + 1 }), 2000);
     }
 
     function draw() {
@@ -183,9 +190,10 @@ export default {
           tag: stateTag(status),
           actions: [
             button("지금 백업", { disabled: !status.destination || status.state === "running", onClick: (event) => busy(event.currentTarget, async () => {
+              const after = status.lastRun?.startedAt || null;
               const result = await cli("/api/backup/start", {});
               toast(result.started ? "백업을 시작했습니다" : "이미 백업하고 있습니다");
-              await refresh();
+              await refresh(result.started ? { after } : {});
             }) }),
             button("수정", { onClick: () => openSettings(status, () => refresh({ check: true })) }),
           ],
