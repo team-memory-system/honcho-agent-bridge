@@ -14,7 +14,7 @@ The Team Memory app is the one screen the user works in. Whenever they have to d
 
 ## Fixed lines
 
-Say these lines exactly as written whenever their moment comes, in Korean for a Korean user (keep the meaning, not a paraphrase, in another language). Fill in only the `<...>` parts. Do not add commentary, recaps or tips around them; between them, say nothing but a CLI error translated into the user's language. Structured questions use the question text and options given here.
+Say these lines exactly as written whenever their moment comes, in Korean for a Korean user (keep the meaning, not a paraphrase, in another language). Fill in only the `<...>` parts. Do not add commentary, recaps or tips around them; between them, say nothing but a CLI error translated into the user's language. That includes what a command showed or what you run next (such as "detect showed configured: false, so open the start screen"): the user reads every line you write, and a line about the commands, above all in English, is one they cannot act on. Structured questions use the question text and options given here.
 
 | When | Say |
 |---|---|

@@ -447,6 +447,7 @@ async function syncInto(server, { from, to, call, progress = async () => {}, sto
       // One conversation, read on from where `to` stops, a part at a time.
       await open(session);
       let offset = session.already || 0;
+      done.messages += offset;
       while (offset < session.total) {
         if (await stopped()) return { stopped: true, ...done, totals };
         const part = await rows(server, `SELECT peer_name AS p, content AS c, metadata AS md, created_at AS at FROM ${f}.messages
