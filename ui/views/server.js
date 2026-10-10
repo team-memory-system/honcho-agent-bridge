@@ -248,6 +248,7 @@ export default {
         draw(status);
         // While a job goes, how far it got; the count of late ones is read again once it ends.
         if (status?.job) timer = setTimeout(() => { if (node.isConnected) refresh({ order: false }); }, 5_000);
+        else if (!order && node.isConnected) await refresh();
       }
       function draw(status) {
         const { job, last, previous, order } = status || {};
