@@ -1507,18 +1507,21 @@ test("personal prepare stops at the gateway login and says where to log in, touc
   let hostCalled = false;
   const hostRuntime = new Proxy({}, { get: () => async () => { hostCalled = true; return { ok: true, ready: true }; } });
 
-  const result = await serverPrepare({
+  const prepare = (configured) => serverPrepare({
     profile: "personal",
     hostRuntime,
     preparedPlan: { ok: true, ready: true, bundle: { directory: source } },
     honchoSourceFetcher: noFetch,
     ...gateway.options,
     serverDirectory: destination,
+    configured,
   });
+  const result = await prepare(true);
   assert.equal(result.ok, true, "a missing login is the user's next step, not a failure");
   assert.equal(result.ready, false);
   assert.equal(result.nextAction.kind, "gateway-login");
   assert.equal(result.nextAction.url, "http://127.0.0.1:11450");
+  assert.equal(result.nextAction.appScreen, "models");
   assert.match(result.nextAction.message, /log in with Codex and\/or Claude in the gateway screen, then run server prepare --profile personal again/);
   assert.equal(result.next, result.nextAction.message);
   assert.equal(result.gateway.reason, "no account is logged in");
@@ -1527,6 +1530,15 @@ test("personal prepare stops at the gateway login and says where to log in, touc
   assert.equal(hostCalled, false);
   assert.equal(await fsp.readFile(path.join(destination, ".env"), "utf8"), "CUSTOM_SETTING=keep-me\n");
   assert.equal((await fsp.readdir(root)).some((item) => item.includes(".candidate-")), false);
+
+  // Before the first setup, the app's setup window does the login with the rest of
+  // setup: the next step names that window, so the agent has no other screen to weigh.
+  const first = await prepare(false);
+  assert.equal(first.nextAction.kind, "gateway-login");
+  assert.equal(first.nextAction.appScreen, "start");
+  assert.equal(first.nextAction.message, "This computer is not set up yet: open the Team Memory app's first setup (ui open --screen start). Its window logs in to the subscriptions and does the rest of setup.");
+  assert.equal(first.next, first.nextAction.message);
+  assert.equal(hostCalled, false);
 });
 
 test("personal prepare writes the gateway's router, key and chosen model into the private .env", async (t) => {
@@ -1672,6 +1684,7 @@ test("a gateway that offers only embedding models stops prepare with the reason 
     honchoSourceFetcher: noFetch,
     ...fakeGateway({ models: ["qwen3-embedding-honcho-8192", "qwen3-embedding:8b"] }).options,
     serverDirectory: destination,
+    configured: true,
   });
   assert.equal(result.ready, false);
   assert.equal(result.nextAction.kind, "gateway-login");

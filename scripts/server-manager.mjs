@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { installPaths } from "./config.mjs";
+import { installPaths, loadConfig } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
 import {
   chooseChatModel,
@@ -1107,7 +1107,7 @@ async function recoverPersonalUpdate({
  *
  * `values` carries the router key; it goes to initializeEnvironment and nowhere else.
  */
-async function connectGateway({ plan, installed, model, sourceFetcher, runner, env }) {
+async function connectGateway({ plan, installed, model, sourceFetcher, runner, env, firstSetup }) {
   const directory = gatewayDirectory(installed);
   const stopped = { ok: false, ready: false, mode: "local-docker", profile: "personal" };
   const prepared = await prepareGateway({ pinDirectory: plan.bundle.directory, directory, sourceFetcher, runner, env });
@@ -1135,7 +1135,7 @@ async function connectGateway({ plan, installed, model, sourceFetcher, runner, e
   }
   report.models = connection.models;
   if (!connection.ready) {
-    const nextAction = gatewayLoginAction(report.uiUrl, "run server prepare --profile personal again");
+    const nextAction = gatewayLoginAction(report.uiUrl, "run server prepare --profile personal again", "", { firstSetup });
     return {
       stop: { ...stopped, ok: true, gateway: { ...report, reason: connection.reason }, nextAction, next: nextAction.message },
     };
@@ -1146,7 +1146,7 @@ async function connectGateway({ plan, installed, model, sourceFetcher, runner, e
   const choice = chooseChatModel(connection.models, { requested: model, installed: installedChatModel(previous) });
   if (choice.noChatModel) {
     // Ready, but with nothing that can chat: the fix is the same login step.
-    const nextAction = gatewayLoginAction(report.uiUrl, "run server prepare --profile personal again", choice.reason);
+    const nextAction = gatewayLoginAction(report.uiUrl, "run server prepare --profile personal again", choice.reason, { firstSetup });
     return {
       stop: { ...stopped, ok: true, gateway: { ...report, reason: choice.reason }, nextAction, next: nextAction.message },
     };
@@ -1195,6 +1195,8 @@ async function serverPrepareUnlocked({
   runtimeInstaller = prepareRuntime,
   runtimeOptions = {},
   shareOptions = {},
+  // Whether this computer is set up (detect's `configured`); read from the config when not given.
+  configured,
 } = {}) {
   requireServerProfile(profile);
   const installedDirectory = path.resolve(serverDirectory || installedServerDir());
@@ -1321,6 +1323,7 @@ async function serverPrepareUnlocked({
     sourceFetcher: gatewaySourceFetcher,
     runner: gatewayRunner,
     env,
+    firstSetup: !(configured ?? Boolean(await loadConfig())),
   });
   if (gateway.stop) return gateway.stop;
 

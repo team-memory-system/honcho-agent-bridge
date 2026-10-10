@@ -485,9 +485,21 @@ export async function prepareGateway({
   };
 }
 
-/** What the user has to do when the gateway has no usable login yet, and where. */
-export function gatewayLoginAction(uiUrl, then, reason = "") {
+/**
+ * What the user has to do when the gateway has no usable login yet, and where. Before
+ * this computer's first setup the app's setup window covers every screen and does the
+ * login itself with the rest of setup, so that window is the place (`firstSetup`).
+ */
+export function gatewayLoginAction(uiUrl, then, reason = "", { firstSetup = false } = {}) {
   const url = loopbackUrl(uiUrl, { keepPath: true }) || DEFAULT_GATEWAY_UI_URL;
+  if (firstSetup) {
+    return {
+      kind: "gateway-login",
+      url,
+      appScreen: "start",
+      message: `${reason ? `${reason}. ` : ""}This computer is not set up yet: open the Team Memory app's first setup (ui open --screen start). Its window logs in to the subscriptions and does the rest of setup.`,
+    };
+  }
   return {
     kind: "gateway-login",
     url,
