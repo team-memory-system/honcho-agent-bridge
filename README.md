@@ -549,6 +549,9 @@ in the order they started, beside the one in use:
   copying what came in since; 이전 기억 지우기 drops it (for `public`, Honcho's tables
   in it), and after 7 days it is dropped on its own. Starting another rebuild drops it
   first. 그만두기 before the switch removes the second pair and drops the new schema.
+- After 되돌리기 the schema kept is the one the rebuild made, shown as 다시 정리한 기억
+  for the same 7 days: 다시 정리한 기억으로 바꾸기 switches to it again the same way,
+  and 다시 정리한 기억 지우기 drops it.
 - Before it starts, the window says how long it takes, how many model calls (one per
   1,024 tokens of a conversation and one per 20 and per 60 messages for summaries, at
   about 8 seconds a call over `DERIVER_WORKERS`), the disk it takes (the schema in use)

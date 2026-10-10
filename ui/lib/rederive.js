@@ -42,7 +42,10 @@ export function rebuildPercent(job) {
 /** The job in one line: what it is doing and how far it has got. */
 export function rebuildLine(job) {
   if (!job) return "";
-  if (job.kind === "undo") return job.phase === "swap" ? "이전 기억으로 바꾸는 중" : "이전 기억으로 되돌리는 중";
+  if (job.kind === "undo") {
+    if (job.toRebuilt) return "다시 정리한 기억으로 바꾸는 중";
+    return job.phase === "swap" ? "이전 기억으로 바꾸는 중" : "이전 기억으로 되돌리는 중";
+  }
   if (job.phase === "start") return "새 기억을 만들 준비하는 중";
   if (job.phase === "copy") return `대화를 옮기는 중 · ${number(job.copied?.conversations || 0)} / ${number(job.totals?.conversations || 0)}`;
   if (job.phase === "derive") {
@@ -74,8 +77,29 @@ export function rebuildNote(job) {
 export function lastLine(last) {
   if (!last) return "";
   if (last.cancelled) return `${moment(last.finishedAt)}에 그만둠`;
-  if (last.kind === "undo") return `${moment(last.swappedAt)}에 이전 기억으로 되돌림`;
-  return `${moment(last.swappedAt)}에 새 기억으로 바꿈`;
+  return `${moment(last.swappedAt)}에 ${lastTag(last)}`;
+}
+
+/** The last switch in a tag: "새 기억으로 바꿈", "이전 기억으로 되돌림". */
+export function lastTag(last) {
+  if (last?.kind !== "undo") return "새 기억으로 바꿈";
+  return last.toRebuilt ? "다시 정리한 기억으로 바꿈" : "이전 기억으로 되돌림";
+}
+
+/**
+ * What the memory kept after a switch is called: the one before the rebuild, or,
+ * after going back from it, the one the rebuild made.
+ */
+export function keptName(previous) {
+  return previous?.rebuilt ? "다시 정리한 기억" : "이전 기억";
+}
+
+/** The dashboard's note under a switch: until when the memory left is kept, and how to switch to it. */
+export function keptNote(previous) {
+  if (!previous) return null;
+  return previous.rebuilt
+    ? `다시 정리한 기억은 ${keepLine(previous)}. 다시 바꾸려면 서버 → 기억 서버에서 다시 정리한 기억으로 바꾸기를 누르세요.`
+    : `이전 기억은 ${keepLine(previous)}. 되돌리려면 서버 → 기억 서버에서 되돌리기를 누르세요.`;
 }
 
 /** "대화 26,640개 · 22시간 걸림 · 모델 호출 약 4만 번". */

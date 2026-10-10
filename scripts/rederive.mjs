@@ -634,7 +634,7 @@ export async function rederiveEstimate(config) {
     model: await installedServerModel(server.directory),
     keepDays: KEEP_DAYS,
     // Starting again drops the memory kept from the last switch first.
-    dropsPrevious: status.previous ? { schema: status.previous.schema, keepUntil: status.previous.keepUntil } : null,
+    dropsPrevious: status.previous ? { schema: status.previous.schema, keepUntil: status.previous.keepUntil, rebuilt: Boolean(status.previous.rebuilt) } : null,
   };
 }
 
@@ -717,6 +717,8 @@ export async function rederiveUndo(config) {
     conclusionsAt: status.previous.swappedAt || null,
     swapStep: 0,
     pid: null,
+    // Going back to the memory a rebuild made, after going back from it.
+    toRebuilt: Boolean(status.previous.rebuilt),
   };
   await fsp.rm(paths.stop, { force: true });
   await saveStatus(paths, { job });
@@ -980,6 +982,21 @@ export function switchRecord(job, size, finishedAt) {
     calls: job.totals?.calls || 0,
     hours: Math.max(0, (Date.parse(finishedAt) - Date.parse(job.startedAt)) / 3_600_000),
     unrefused: job.unrefused || 0,
+    ...(job.kind === "undo" ? { toRebuilt: Boolean(job.toRebuilt) } : {}),
+  };
+}
+
+/**
+ * The memory kept after a switch, for KEEP_DAYS: the one left. `rebuilt` when that is
+ * the memory a rebuild made, left by going back to the one before it.
+ */
+export function keptRecord(job, finishedAt) {
+  return {
+    schema: job.from,
+    namespace: job.fromNamespace,
+    swappedAt: finishedAt,
+    keepUntil: new Date(Date.parse(finishedAt) + KEEP_DAYS * DAY_MS).toISOString(),
+    rebuilt: job.kind === "undo" && !job.toRebuilt,
   };
 }
 
@@ -1033,7 +1050,7 @@ async function swap(server, paths, job, save, callNext) {
   await saveStatus(paths, {
     job: null,
     last,
-    previous: { schema: job.from, namespace: job.fromNamespace, swappedAt: finishedAt, keepUntil: new Date(Date.parse(finishedAt) + KEEP_DAYS * DAY_MS).toISOString() },
+    previous: keptRecord(job, finishedAt),
   });
   await fsp.rm(paths.stop, { force: true });
   await log(paths, `switched to ${job.schema}; ${job.from} kept until ${KEEP_DAYS} days from now`);

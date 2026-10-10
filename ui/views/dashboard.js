@@ -11,7 +11,7 @@ import { h, clear } from "../lib/dom.js";
 import { ago, number } from "../lib/format.js";
 import { sameServer } from "../lib/collect.js";
 import { HELD, doneCount, runLine } from "../lib/past.js";
-import { keepLine, lastLine, rebuildLine, rebuildNote, rebuildPercent } from "../lib/rederive.js";
+import { keptNote, lastLine, rebuildLine, rebuildNote, rebuildPercent } from "../lib/rederive.js";
 import { app, onChange, savePrefs, workspace } from "../lib/state.js";
 import { loginNotice } from "../lib/team.js";
 import { pageHead, spinner, toast } from "../lib/ui.js";
@@ -145,7 +145,8 @@ function pastCard(past) {
 function rederiveCard(rederive) {
   if (!rederive) return null;
   const { job, last, previous } = rederive;
-  const title = job?.kind === "undo" || (!job && last?.kind === "undo") ? "기억 되돌리기" : "기억 다시 정리";
+  const undo = job ? job.kind === "undo" && !job.toRebuilt : last?.kind === "undo" && !last.toRebuilt;
+  const title = undo ? "기억 되돌리기" : "기억 다시 정리";
   const card = (right, percent, note, { run = false, dot = "warn" } = {}) => h("div", { class: "card queue" },
     h("div", { class: "queue-head" }, h("b", {}, title), h("span", {}, right)),
     h("div", { class: run ? "bar run" : "bar", role: "progressbar", "aria-label": `${title} ${percent}%`, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) },
@@ -156,8 +157,7 @@ function rederiveCard(rederive) {
     return card(rebuildLine(job), rebuildPercent(job), note, { run: !job.error, dot: job.error ? "bad" : "warn" });
   }
   if (!last?.swappedAt || last.cancelled || Date.now() - Date.parse(last.swappedAt) > DONE_SHOWN_MS) return null;
-  const kept = previous ? `이전 기억은 ${keepLine(previous)}. 되돌리려면 서버 → 기억 서버에서 되돌리기를 누르세요.` : null;
-  return card(lastLine(last), 100, kept, { dot: "idle" });
+  return card(lastLine(last), 100, keptNote(previous), { dot: "idle" });
 }
 
 /** Once, when a run has just finished: how many went in, and the new ones that waited for them. */

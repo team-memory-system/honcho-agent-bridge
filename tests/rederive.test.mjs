@@ -11,8 +11,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { adminHeaders, etaFrom, nextSchemaName, refusing, rederiveFlow, rederivePaths, rederiveStart, rederiveStatus, serverOf, switchRecord } from "../scripts/rederive.mjs";
-import { callsText, bytesText, lastDetail, lastLine, rebuildLine, rebuildNote, rebuildPercent } from "../ui/lib/rederive.js";
+import { adminHeaders, etaFrom, keptRecord, nextSchemaName, refusing, rederiveFlow, rederivePaths, rederiveStart, rederiveStatus, serverOf, switchRecord } from "../scripts/rederive.mjs";
+import { callsText, bytesText, keptName, keptNote, lastDetail, lastLine, lastTag, rebuildLine, rebuildNote, rebuildPercent } from "../ui/lib/rederive.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -135,6 +135,29 @@ test("the switch records what the new memory holds, the turns copied in while it
   assert.equal(lastDetail(last), "대화 131개 · 9분 걸림 · 모델 호출 약 300번");
   // When the count cannot be read: what was copied.
   assert.equal(switchRecord(job, null, "2026-10-10T06:02:44Z").conversations, 130);
+});
+
+test("after 되돌리기 the memory kept is the one the rebuild made, and the screens call it so", () => {
+  const at = "2026-10-10T06:07:03Z";
+  // The rebuild's switch keeps the memory before it.
+  const built = keptRecord({ kind: "build", from: "public", fromNamespace: "honcho" }, at);
+  assert.equal(built.rebuilt, false);
+  assert.equal(keptName(built), "이전 기억");
+  assert.match(keptNote(built), /^이전 기억은 .+까지 둡니다\. 되돌리려면 서버 → 기억 서버에서 되돌리기를 누르세요\.$/);
+  // 되돌리기 keeps the rebuilt one: it is not "이전 기억" any more.
+  const back = { kind: "undo", from: "mem_202610101453", fromNamespace: "mem_202610101453", toRebuilt: false };
+  const kept = keptRecord(back, at);
+  assert.equal(kept.rebuilt, true);
+  assert.equal(kept.schema, "mem_202610101453");
+  assert.equal(keptName(kept), "다시 정리한 기억");
+  assert.match(keptNote(kept), /^다시 정리한 기억은 .+까지 둡니다\. 다시 바꾸려면 서버 → 기억 서버에서 다시 정리한 기억으로 바꾸기를 누르세요\.$/);
+  assert.equal(lastTag(switchRecord(back, null, at)), "이전 기억으로 되돌림");
+  // Switching to it again keeps the one before the rebuild once more.
+  const again = { kind: "undo", from: "public", fromNamespace: "honcho", toRebuilt: true };
+  assert.equal(keptRecord(again, at).rebuilt, false);
+  assert.equal(lastTag(switchRecord(again, null, at)), "다시 정리한 기억으로 바꿈");
+  assert.equal(rebuildLine({ kind: "undo", phase: "copy", toRebuilt: true }), "다시 정리한 기억으로 바꾸는 중");
+  assert.equal(lastTag({ kind: "build" }), "새 기억으로 바꿈");
 });
 
 test("the screens' words for a rebuild", () => {

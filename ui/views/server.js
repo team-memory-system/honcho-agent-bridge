@@ -8,7 +8,7 @@ import { h, clear } from "../lib/dom.js";
 import { number } from "../lib/format.js";
 import { kv } from "../lib/kit.js";
 import { etaText } from "../lib/past.js";
-import { bytesText, callsText, keepLine, lastDetail, lastLine, moment, rebuildLine, rebuildNote } from "../lib/rederive.js";
+import { bytesText, callsText, keepLine, keptName, lastDetail, lastLine, lastTag, moment, rebuildLine, rebuildNote } from "../lib/rederive.js";
 import { screenTabs } from "../lib/tabs.js";
 import { api, app, go, loadContext, refreshStatus } from "../lib/state.js";
 import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, statusTag, tag } from "../lib/ui.js";
@@ -216,7 +216,7 @@ export default {
             kv("만드는 동안", "지금 기억을 그대로 씁니다."),
             kv("바꿀 때", "1분쯤 기억 검색이 멈춥니다."),
             kv("이전 기억", `${estimate.keepDays || 7}일 동안 두고, 그동안 되돌릴 수 있습니다.`),
-            estimate.dropsPrevious ? kv("지난번 이전 기억", "시작할 때 지웁니다.") : null),
+            estimate.dropsPrevious ? kv(`지난번 ${keptName(estimate.dropsPrevious)}`, "시작할 때 지웁니다.") : null),
           confirm: "시작",
         });
         if (!ok) return;
@@ -255,30 +255,35 @@ export default {
         start.disabled = !status?.ready;
         if (job) {
           const undo = job.kind === "undo";
-          clear(head, job.error ? tag("멈춤", "bad") : tag(job.stopping ? "그만두는 중" : undo ? "되돌리는 중" : "다시 정리하는 중", "warn"));
+          // 되돌리기, or switching back to the memory the rebuild made after going back from it.
+          const doing = !undo ? "다시 정리" : job.toRebuilt ? "바꾸기" : "되돌리기";
+          clear(head, job.error ? tag("멈춤", "bad") : tag(job.stopping ? "그만두는 중" : !undo ? "다시 정리하는 중" : job.toRebuilt ? "바꾸는 중" : "되돌리는 중", "warn"));
           const stop = job.phase === "swap" || job.stopping ? null : act("그만두기", "/api/rederive/stop", {
             kind: "small quiet",
             confirmText: undo
-              ? { title: "되돌리기를 그만둘까요?", text: "지금 기억을 그대로 씁니다.", confirm: "그만두기" }
+              ? { title: `${doing}를 그만둘까요?`, text: "지금 기억을 그대로 씁니다.", confirm: "그만두기" }
               : { title: "다시 정리를 그만둘까요?", text: "만들던 새 기억을 지웁니다. 지금 기억은 그대로입니다.", confirm: "그만두기", danger: true },
           });
           clear(rows,
-            kv(undo ? "되돌리기" : "다시 정리", [rebuildLine(job), h("div", { class: "s" }, rebuildNote(job))],
+            kv(doing, [rebuildLine(job), h("div", { class: "s" }, rebuildNote(job))],
               job.error ? [act("다시 시도", "/api/rederive/resume"), stop] : stop),
             job.error ? kv("멈춘 까닭", h("span", { class: "mono muted" }, job.error)) : null);
           return;
         }
         const late = Number(order?.late || 0);
-        clear(head, late ? tag(`어긋난 대화 ${number(late)}개`, "warn") : previous && last?.swappedAt ? tag(last.kind === "undo" ? "이전 기억으로 되돌림" : "새 기억으로 바꿈", "ok") : null);
+        clear(head, late ? tag(`어긋난 대화 ${number(late)}개`, "warn") : previous && last?.swappedAt ? tag(lastTag(last), "ok") : null);
+        const kept = keptName(previous);
         clear(rows,
           !status?.ready ? notice("warn", "이 서버는 다시 정리를 하기 전 설치입니다. 위의 다시 준비를 누른 뒤 시작을 누르면 쓸 수 있습니다.") : null,
           kv("시간순과 어긋난 대화", order?.error ? h("span", { class: "muted" }, "세지 못했습니다.")
             : late ? [`${number(late)}개 `, h("span", { class: "muted" }, `· 서버의 대화 ${number(order.conversations)}개 중`), h("div", { class: "s" }, "서버의 더 새 대화보다 나중에 들어온 대화입니다.")]
               : order ? "없음" : spinner()),
           kv("마지막 다시 정리", last ? [lastLine(last), lastDetail(last) ? h("div", { class: "s" }, lastDetail(last)) : null] : "한 적 없음"),
-          previous ? kv("이전 기억", [keepLine(previous), h("div", { class: "s" }, "그 뒤에 지웁니다.")], [
-            act("되돌리기", "/api/rederive/undo", { confirmText: { title: "이전 기억으로 되돌릴까요?", text: `${moment(previous.swappedAt)}에 바꾸기 전의 기억으로 돌아갑니다. 그 뒤에 들어온 대화도 옮겨 넣습니다. 바꿀 때 1분쯤 기억 검색이 멈춥니다.`, confirm: "되돌리기" } }),
-            act("이전 기억 지우기", "/api/rederive/drop", { kind: "small danger", confirmText: { title: "이전 기억을 지울까요?", text: "지우면 되돌릴 수 없습니다.", confirm: "지우기", danger: true } }),
+          previous ? kv(kept, [keepLine(previous), h("div", { class: "s" }, "그 뒤에 지웁니다.")], [
+            previous.rebuilt
+              ? act("다시 정리한 기억으로 바꾸기", "/api/rederive/undo", { confirmText: { title: "다시 정리한 기억으로 바꿀까요?", text: `${moment(previous.swappedAt)}에 되돌리기 전의 기억으로 돌아갑니다. 그 뒤에 들어온 대화도 옮겨 넣습니다. 바꿀 때 1분쯤 기억 검색이 멈춥니다.`, confirm: "바꾸기" } })
+              : act("되돌리기", "/api/rederive/undo", { confirmText: { title: "이전 기억으로 되돌릴까요?", text: `${moment(previous.swappedAt)}에 바꾸기 전의 기억으로 돌아갑니다. 그 뒤에 들어온 대화도 옮겨 넣습니다. 바꿀 때 1분쯤 기억 검색이 멈춥니다.`, confirm: "되돌리기" } }),
+            act(`${kept} 지우기`, "/api/rederive/drop", { kind: "small danger", confirmText: { title: `${kept}을 지울까요?`, text: "지우면 되돌릴 수 없습니다.", confirm: "지우기", danger: true } }),
           ]) : null);
       }
       refresh();
