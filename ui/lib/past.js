@@ -73,17 +73,16 @@ function fileSize(bytes) {
 
 // ── The draft ────────────────────────────────────────────
 
-/** Where the step starts: this computer only, the backup ticked for a store once one is chosen. */
+/** Where the step starts: this computer only. */
 export function pastDraft() {
   return {
     storeOn: false,
     store: { kind: "folder", path: "", remote: "", cloudPath: "" },
     // The store's fields came from the backup's place, the last run's, or the person.
     filled: false,
-    backup: true,
     chatgptOn: true,
     late: "include",
-    // The last answers: how far the reading got, what earlier runs took (수정), the backup.
+    // The last answers: how far the reading got, what earlier runs took (수정), where this computer backs up.
     scan: null,
     applied: undefined,
     backupStatus: undefined,
@@ -237,8 +236,8 @@ function scanError(part, spec) {
   if (part.code === "rclone-failed") return "클라우드에 닿지 않습니다. 인터넷 연결과 rclone 로그인을 확인한 뒤 다시 시도를 누르세요.";
   if (part.code === "no-store") {
     return spec?.kind === "cloud"
-      ? `${storeName(spec)}에 대화가 없습니다. 백업할 곳으로 고른 remote와 폴더가 맞는지 확인하세요.`
-      : `${storeName(spec)} 폴더가 없습니다. 백업할 곳으로 고른 폴더(그 안에 ${ROOT} 폴더가 있는 곳)를 고르세요.`;
+      ? `${storeName(spec)}에 대화가 없습니다. 내 컴퓨터들이 백업하는 remote와 폴더가 맞는지 확인하세요.`
+      : `${storeName(spec)} 폴더가 없습니다. 내 컴퓨터들이 백업하는 폴더(그 안에 ${ROOT} 폴더가 있는 곳)를 고르세요.`;
   }
   return "백업 저장소를 읽지 못했습니다. 다시 시도를 누르세요.";
 }
@@ -271,8 +270,7 @@ export function pastStep(draft, context, { edit = false, newServer = false } = {
   // ── 백업 저장소 ──
   const fields = h("div", { class: "store-where" });
   const readline = h("div", { class: "readline" });
-  const backupLine = h("div", {});
-  const storeExtra = h("div", { class: "subfields", hidden: true }, fields, h("div", { class: "hint" }, `백업할 곳으로 고른 폴더입니다. 그 안의 ${ROOT} 폴더를 읽습니다.`), readline, backupLine);
+  const storeExtra = h("div", { class: "subfields", hidden: true }, fields, h("div", { class: "hint" }, `내 컴퓨터들이 백업하는 폴더를 고르세요. 그 안의 ${ROOT} 폴더를 읽습니다.`), readline);
   const changeButton = button("바꾸기", { kind: "quiet small", onClick: () => { past.changing = true; drawStore(); } });
   const storeRow = opt({
     type: "checkbox",
@@ -408,22 +406,6 @@ export function pastStep(draft, context, { edit = false, newServer = false } = {
       part?.etaSec ? h("span", { class: "muted" }, etaText(part.etaSec)) : null);
   }
 
-  // Drawn again only when the store or the backup changes, so a press on the box is never lost to a redraw.
-  let backupShown = null;
-  function drawBackupLine() {
-    const spec = storeOf(past);
-    const destination = past.backupStatus?.destination || null;
-    // This computer backs up there already: nothing to turn on.
-    const already = Boolean(spec && destination && sameSpec({ kind: destination.kind, path: destination.path || "", remote: destination.remote }, spec) && past.backupStatus?.schedule?.registered);
-    const shown = JSON.stringify([past.storeOn && spec, already]);
-    if (shown === backupShown) return;
-    backupShown = shown;
-    if (!past.storeOn || !spec) { clear(backupLine); return; }
-    const box = h("input", { type: "checkbox", checked: already || past.backup, disabled: already ? true : null });
-    box.addEventListener("change", () => { past.backup = box.checked; });
-    clear(backupLine, h("label", { class: "row2" }, box, already ? "이 컴퓨터의 대화도 매일 여기에 백업하는 중" : "이 컴퓨터의 대화도 매일 여기에 백업"));
-  }
-
   function drawStore() {
     storeRow.input.checked = past.storeOn;
     const applied = edit ? past.applied?.chosen?.store || null : null;
@@ -442,7 +424,6 @@ export function pastStep(draft, context, { edit = false, newServer = false } = {
     storeExtra.querySelector(".hint").hidden = Boolean(kept);
     if (past.storeOn && !kept) drawFields();
     drawReadline();
-    drawBackupLine();
   }
 
   async function upload(chosen) {
@@ -531,7 +512,6 @@ export function pastStep(draft, context, { edit = false, newServer = false } = {
     shown = true;
     drawHere();
     drawReadline();
-    drawBackupLine();
     if (!past.uploading) drawChatgpt();
     tell();
   }
@@ -703,38 +683,6 @@ export function pastSummary(draft, overview, totals, { edit = false, here = fals
 export function pastToPut(draft) {
   const totals = draft.past?.totals;
   return !totals || totals.put > 0;
-}
-
-/** Turns this computer's daily backup to the store, when that was ticked and it is not so already. */
-export async function backupToStore(draft) {
-  const past = draft.past;
-  const spec = storeOf(past);
-  if (!spec || !past.backup) return null;
-  const status = await get("/api/backup/status").catch(() => null);
-  const destination = status?.destination || null;
-  const same = destination && sameSpec({ kind: destination.kind, path: destination.path || "", remote: destination.remote }, spec);
-  if (!same) {
-    const set = await post("/api/backup/set", spec);
-    if (set?.ok === false) throw new Error(backupProblem(set));
-  }
-  if (!status?.schedule?.registered || !same) {
-    const scheduled = await post("/api/backup/schedule", { on: true });
-    if (scheduled?.ok === false) throw new Error(backupProblem(scheduled));
-  }
-  const after = await get("/api/backup/status").catch(() => null);
-  const schedule = after?.schedule || {};
-  return [h("span", { class: "mono" }, after?.destination?.label || storeName(spec)),
-    schedule.registered ? ` · 매일 ${String(schedule.hour ?? 3).padStart(2, "0")}:${String(schedule.minute ?? 0).padStart(2, "0")}` : ""];
-}
-
-function backupProblem(result) {
-  const reasons = {
-    missing: "백업 저장소 폴더를 찾을 수 없습니다. 드라이브가 연결돼 있는지 확인한 뒤 다시 시도를 누르세요.",
-    "not-writable": "백업 저장소 폴더에 쓸 수 없습니다. 권한을 확인하거나, 설정으로 돌아가 매일 백업을 끄세요.",
-    "rclone-missing": "이 컴퓨터에 rclone이 없습니다.",
-    "unauthorized-or-offline": "클라우드에 닿지 않습니다. 인터넷 연결과 rclone 로그인을 확인한 뒤 다시 시도를 누르세요.",
-  };
-  return reasons[result?.reason] || result?.error || "백업을 켜지 못했습니다. 다시 시도를 누르세요.";
 }
 
 /** Lines up what goes in (`past plan`). Resolves its counts; throws what it could not. */

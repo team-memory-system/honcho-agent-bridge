@@ -64,12 +64,17 @@ function alertBanner(alert) {
     h("div", {}, `${alert.since ? `${fullDate(alert.since)}부터 이어지고 있어요. ` : ""}원인을 해결하고 지금 백업을 누르세요. 백업이 한 번 성공하면 알림이 멈춰요.`));
 }
 
-/** 백업 설정: where to copy, and whether and when to every day. */
+/**
+ * 백업 설정: where to copy, and whether and when to every day. With no place yet it
+ * starts at the backup store 지난 대화 read (where this person's other computers back
+ * up), every day.
+ */
 async function openSettings(status, onApplied) {
   const win = modal({ title: "백업 설정", big: true, small: true });
   const destination = status.destination || null;
   const schedule = status.schedule || {};
-  const chosen = { kind: destination?.kind || "folder", path: destination?.kind === "folder" ? destination.path : "", remote: destination?.remote || "", cloudPath: destination?.kind === "cloud" ? destination.path || "" : "", on: Boolean(schedule.registered), hour: schedule.hour ?? 3 };
+  const start = destination || (await get("/api/past/status").catch(() => null))?.chosen?.store || null;
+  const chosen = { kind: start?.kind || "folder", path: start?.kind === "folder" ? start.path || "" : "", remote: start?.remote || "", cloudPath: start?.kind === "cloud" ? start.path || "" : "", on: destination ? Boolean(schedule.registered) : true, hour: schedule.hour ?? 3 };
   const folderInput = h("input", { class: "input mono", value: chosen.path, placeholder: "/Volumes/백업드라이브 또는 E:\\백업", spellcheck: "false", oninput: (event) => { chosen.path = event.target.value; } });
   const folderFields = h("div", { class: "subfields", style: { marginLeft: "0" }, hidden: chosen.kind !== "folder" },
     field("폴더", h("div", { class: "input-row" }, folderInput, button("폴더 고르기", { kind: "small", iconName: "folder", onClick: async () => {

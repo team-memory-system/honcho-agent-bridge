@@ -463,8 +463,8 @@ started, so the memory forms the way it happened:
   copied down first into `<dataDir>/past/store/`, only what changed since the last
   copy. It reads `대화/claude` and `대화/codex` and leaves out every `_` folder
   (`_아카이브`, `_부속자료`, `_원본버전`); the computers backing up there are named from
-  `_부속자료/<device>`. When this computer does not back up there yet, the step offers
-  to (이 컴퓨터의 대화도 매일 여기에 백업).
+  `_부속자료/<device>`. Whether this computer backs up there too is set apart from
+  setup, on the 백업 page; its 백업 설정 starts at the store read here.
 - **ChatGPT 내보내기 파일**: one export per account, up to 4 GiB each, read as in
   [Importing a ChatGPT export](#importing-a-chatgpt-export--chatgpt-기록-가져오기). Each
   conversation is kept as its own file under `<dataDir>/past/chatgpt/<id>/` and goes in

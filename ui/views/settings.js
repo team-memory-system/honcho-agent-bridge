@@ -26,7 +26,7 @@ import {
   serverStep,
   setupBody,
 } from "../lib/collect.js";
-import { backupToStore, lateLine, monthText, pastStep, periodText, planPast, shortDay, startPast } from "../lib/past.js";
+import { lateLine, monthText, pastStep, periodText, planPast, shortDay, startPast } from "../lib/past.js";
 import { sendRequest, teamDirectory } from "../lib/team.js";
 import { TOOL_GROUPS, TOOL_INFO } from "../lib/tools.js";
 import { app, loadContext, refreshStatus } from "../lib/state.js";
@@ -112,7 +112,6 @@ function openCollectWindow(onApplied, { at: startAt = 0 } = {}) {
     // The past conversations the new choice adds, in the order they were started:
     // what the server holds already is left out.
     try {
-      await backupToStore(draft);
       const plan = await planPast(draft);
       if (plan.total) await startPast();
     } catch (error) {

@@ -31,7 +31,7 @@ import {
   serverStep,
   setupBody,
 } from "../lib/collect.js";
-import { backupToStore, dayText, HELD, holdNewTurns, pastStep, pastToPut, periodText, planPast, releaseNewTurns, runLine, startPast, storeOf } from "../lib/past.js";
+import { dayText, HELD, holdNewTurns, pastStep, pastToPut, periodText, planPast, releaseNewTurns, runLine, startPast } from "../lib/past.js";
 import { gatewayLogin } from "../lib/login.js";
 import { GOOGLE_ADD_ACCOUNT, loginTab, registerWith, sameAccountAgain, sendRequest, switchAccount, teamDirectory, teamHostOf, teamLogin, teamMe } from "../lib/team.js";
 import { app, loadContext, refreshStatus, savePrefs } from "../lib/state.js";
@@ -582,7 +582,6 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
       const held = pastToPut(draft) ? HELD : null;
       agents.forEach((name, index) => tasks.push({ title: `${AGENTS[name]}에 플러그인 설치`, sub: held, run: index ? afterApply : applyNow }));
       tasks.push({ label: "지난 대화" });
-      if (storeOf(draft.past) && draft.past.backup) tasks.push({ title: "백업 켜기", run: backupOn });
       tasks.push({ title: "시작한 시각순으로 줄 세우기", run: linePast });
       if (draft.past.totals?.dupes) tasks.push({ title: "겹치는 대화 빼기", run: dupesOut });
       if (!install) tasks.push({ title: "서버에 있는 대화 빼기", run: serverOut });
@@ -703,11 +702,7 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
     if (!state.applied) throw new Error("앞 단계를 먼저 마쳐야 합니다.");
   }
 
-  // ── 지난 대화: the backup, the order, what is left out, and the start ──
-
-  async function backupOn(task) {
-    task.sub = await backupToStore(state.draft);
-  }
+  // ── 지난 대화: the order, what is left out, and the start ──
 
   async function linePast(task) {
     state.plan = await planPast(state.draft);
