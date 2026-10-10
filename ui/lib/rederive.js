@@ -58,8 +58,8 @@ export function rebuildLine(job) {
     if (undo) parts.push("옮긴 대화를 정리하는 중");
     else if (derive?.at) parts.push(`${monthText(derive.at)} 대화까지`);
     if (derive?.total) parts.push(`${rebuildPercent(job)}%`);
-    // Resting on a limit, the note under it says when it carries on.
-    if (derive?.etaSec && !derive.paused?.until) parts.push(`${etaText(derive.etaSec)} 남음`);
+    // Resting on a limit, the note under it says when it carries on; stopped, nothing is left to count down.
+    if (derive?.etaSec && !derive.paused?.until && !job.error) parts.push(`${etaText(derive.etaSec)} 남음`);
     return parts.join(" · ") || "새 기억을 만드는 중";
   }
   if (job.phase === "scopes") return "마무리하는 중";
@@ -67,10 +67,35 @@ export function rebuildLine(job) {
   return job.toRebuilt ? "새 기억으로 다시 바꾸는 중" : "이전 기억으로 바꾸는 중";
 }
 
+// The words a job can stop on (rederive.mjs's own, Node's fetch, Docker), first match
+// wins: what happened, and what to do before 다시 시도 when pressing it alone would
+// stop the same way.
+const STOP_CAUSES = [
+  [/ENOSPC|no space left/i, "디스크 공간이 모자랍니다.", "공간을 비운 뒤"],
+  [/Cannot connect to the Docker daemon|Is the docker daemon running/i, "Docker가 꺼져 있습니다.", "Docker Desktop을 켠 뒤"],
+  [/has not answered for three days/, "모델이 사흘 동안 답하지 않았습니다.", "서버 → 모델에서 계정을 확인한 뒤"],
+  [/the second api did not start/, "새 기억을 만들 서버(api-next)가 15분 안에 켜지지 않았습니다."],
+  [/no free port for the second api/, "새 기억을 만들 서버(api-next)에 줄 빈 포트가 없습니다."],
+  [/did not answer after the switch/, "바꾼 뒤 기억 서버가 15분 안에 켜지지 않았습니다."],
+  [/^HTTP 5\d\d/, "기억 서버가 오류로 답했습니다."],
+  [/^HTTP 4\d\d/, "기억 서버가 요청을 거절했습니다."],
+  [/fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|other side closed/i, "기억 서버가 응답하지 않았습니다."],
+  [/timeout|timed out/i, "기억 서버가 제때 답하지 않았습니다."],
+];
+
+/** The error a job stopped on, as `text` (empty for words it does not know) and `first`. */
+export function stopCause(error) {
+  const found = STOP_CAUSES.find(([pattern]) => pattern.test(String(error || "")));
+  return { text: found?.[1] || "", first: found?.[2] || "" };
+}
+
 /** What the job's line says under it. */
 export function rebuildNote(job) {
   if (!job) return "";
-  if (job.error) return "멈췄습니다. 다시 시도를 누르면 멈춘 곳부터 이어서 합니다.";
+  if (job.error) {
+    const { first } = stopCause(job.error);
+    return `멈췄습니다. ${first ? `${first} ` : ""}다시 시도를 누르면 멈춘 곳부터 이어서 합니다.`;
+  }
   if (job.stopping) return "그만두는 중입니다. 하던 일까지 하고 멈춥니다.";
   if (job.derive?.paused?.until) return `모델 사용 한도에 걸려 쉬는 중입니다. ${clock(job.derive.paused.until)}에 이어서 합니다.`;
   if (job.phase === "swap") return "서버를 다시 켜는 동안 1분쯤 기억 검색이 멈춥니다.";

@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { adminHeaders, etaFor, etaFrom, keptRecord, nextSchemaName, refusing, rederiveFlow, rederivePaths, rederiveStart, rederiveStatus, serverOf, switchRecord } from "../scripts/rederive.mjs";
-import { callsText, bytesText, keptName, keptNote, keptWhat, lastDetail, lastLine, lastTag, rebuildLine, rebuildNote, rebuildPercent } from "../ui/lib/rederive.js";
+import { callsText, bytesText, keptName, keptNote, keptWhat, lastDetail, lastLine, lastTag, rebuildLine, rebuildNote, rebuildPercent, stopCause } from "../ui/lib/rederive.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -201,11 +201,15 @@ test("the screens' words for a rebuild", () => {
   // Resting on a limit, the note says when it carries on: no time left in the line.
   const resting = { kind: "build", phase: "derive", derive: { done: 20, total: 1215, at: Date.parse("2025-10-20T00:00:00Z"), etaSec: 3600, paused: { until: "2026-10-10T13:30:10Z" } } };
   assert.equal(rebuildLine(resting), "2025년 10월 대화까지 · 1%");
+  assert.equal(rebuildLine({ kind: "build", phase: "derive", error: "fetch failed", derive: { done: 412, total: 1191, at: Date.parse("2025-03-02T00:00:00Z"), etaSec: 420 } }), "2025년 3월 대화까지 · 34%");
   assert.equal(rebuildNote({ kind: "undo", phase: "derive" }), "다 옮기면 이전 기억으로 되돌립니다. 그때까지 지금 기억을 씁니다.");
   // The minute without memory search is the restart at the end, not the making.
   assert.equal(rebuildNote({ kind: "build", phase: "swap" }), "서버를 다시 켜는 동안 1분쯤 기억 검색이 멈춥니다.");
   assert.match(rebuildNote({ kind: "build", phase: "derive", derive: { paused: { until: new Date(Date.now() + 3_600_000).toISOString() } } }), /^모델 사용 한도에 걸려 쉬는 중입니다\. .+에 이어서 합니다\.$/);
   assert.equal(rebuildNote({ kind: "build", phase: "derive", error: "x" }), "멈췄습니다. 다시 시도를 누르면 멈춘 곳부터 이어서 합니다.");
+  // Stopped on Docker being off, 다시 시도 alone would stop the same way: the note says what comes first.
+  assert.equal(rebuildNote({ kind: "build", phase: "start", error: "Command failed: docker compose up -d\nCannot connect to the Docker daemon at unix:///Users/me/.docker/run/docker.sock. Is the docker daemon running?" }),
+    "멈췄습니다. Docker Desktop을 켠 뒤 다시 시도를 누르면 멈춘 곳부터 이어서 합니다.");
   assert.equal(callsText(41_200), "약 4만 번");
   assert.equal(callsText(3_240), "약 3,200번");
   assert.equal(bytesText(12.4 * 1024 ** 3), "약 12GB");
@@ -214,4 +218,22 @@ test("the screens' words for a rebuild", () => {
   const last = { kind: "build", swappedAt: new Date(2026, 9, 13, 3, 40).toISOString(), conversations: 26640, hours: 22.2, calls: 41200 };
   assert.match(lastLine(last), /^10월 13일 03:40에 새 기억으로 바꿈$|^2026년 10월 13일 03:40에 새 기억으로 바꿈$/);
   assert.equal(lastDetail(last), "대화 26,640개 · 22시간 걸림 · 모델 호출 약 4만 번");
+});
+
+test("a stopped job says why in a sentence, and keeps the words it stopped on for 오류 내용", () => {
+  // run8: the second api was stopped under a copy, and the screen showed fetch failed as it came.
+  assert.deepEqual(stopCause("fetch failed"), { text: "기억 서버가 응답하지 않았습니다.", first: "" });
+  assert.equal(stopCause("connect ECONNREFUSED 127.0.0.1:18102").text, "기억 서버가 응답하지 않았습니다.");
+  assert.equal(stopCause("The operation was aborted due to timeout").text, "기억 서버가 제때 답하지 않았습니다.");
+  // The api's own answer goes by its status, whatever words come with it.
+  assert.equal(stopCause("HTTP 500 POST /v3/workspaces/w/sessions/s/messages: Internal Server Error (timeout)").text, "기억 서버가 오류로 답했습니다.");
+  assert.equal(stopCause("HTTP 422 POST /v3/workspaces/w/sessions/s/messages: {\"detail\":\"bad\"}").text, "기억 서버가 요청을 거절했습니다.");
+  assert.equal(stopCause("the second api did not start").text, "새 기억을 만들 서버(api-next)가 15분 안에 켜지지 않았습니다.");
+  assert.equal(stopCause("no free port for the second api").text, "새 기억을 만들 서버(api-next)에 줄 빈 포트가 없습니다.");
+  assert.equal(stopCause("the memory server did not answer after the switch").text, "바꾼 뒤 기억 서버가 15분 안에 켜지지 않았습니다.");
+  assert.deepEqual(stopCause("the model has not answered for three days"), { text: "모델이 사흘 동안 답하지 않았습니다.", first: "서버 → 모델에서 계정을 확인한 뒤" });
+  assert.deepEqual(stopCause("ENOSPC: no space left on device, write"), { text: "디스크 공간이 모자랍니다.", first: "공간을 비운 뒤" });
+  // Words it does not know have no sentence: the screen says so and shows them under 오류 내용.
+  assert.deepEqual(stopCause("ERROR:  relation \"mem_x.queue\" does not exist"), { text: "", first: "" });
+  assert.deepEqual(stopCause(null), { text: "", first: "" });
 });

@@ -8,7 +8,7 @@ import { h, clear } from "../lib/dom.js";
 import { number } from "../lib/format.js";
 import { kv } from "../lib/kit.js";
 import { etaText } from "../lib/past.js";
-import { bytesText, callsText, keepLine, keptName, keptWhat, lastDetail, lastLine, lastTag, moment, rebuildLine, rebuildNote } from "../lib/rederive.js";
+import { bytesText, callsText, keepLine, keptName, keptWhat, lastDetail, lastLine, lastTag, moment, rebuildLine, rebuildNote, stopCause } from "../lib/rederive.js";
 import { screenTabs } from "../lib/tabs.js";
 import { api, app, go, loadContext, refreshStatus } from "../lib/state.js";
 import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, statusTag, tag } from "../lib/ui.js";
@@ -268,7 +268,7 @@ export default {
           clear(rows,
             kv(doing, [rebuildLine(job), h("div", { class: "s" }, rebuildNote(job))],
               job.error ? [act("다시 시도", "/api/rederive/resume"), stop] : stop),
-            job.error ? kv("멈춘 까닭", h("span", { class: "mono muted" }, job.error)) : null);
+            job.error ? kv("멈춘 까닭", [stopCause(job.error).text || "알 수 없는 오류입니다.", details("오류 내용", job.error)]) : null);
           return;
         }
         const late = Number(order?.late || 0);

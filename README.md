@@ -566,11 +566,15 @@ in the order they started, beside the one in use:
   다시 준비 first (its `compose.yaml` has no `api-next`). While it goes, the time
   left is that estimate for the messages left until there are 10 minutes of pace or a
   tenth of the messages (the first minutes move in bursts), then the pace of the last
-  hour; resting on a limit, the line leaves it out and says when it carries on.
+  hour. Resting on a limit, the line leaves it out and says when it carries on;
+  stopped on an error, it leaves it out too.
 - The dashboard shows it as a card while it goes and for a day after the switch. Its
   state is `<dataDir>/rederive/status.json`, and `<dataDir>/logs/rederive.log` says
   what it did. A job stopped half way (a restart) carries on when the app next asks;
-  one stopped on an error carries on with 다시 시도.
+  one stopped on an error carries on with 다시 시도. Its 멈춘 까닭 says the error in
+  a sentence (the server did not answer, Docker is off, the disk is full, …), and
+  what to do before 다시 시도 when pressing it alone would stop the same way; the
+  error itself is under 오류 내용.
 
 ```bash
 node scripts/cli.mjs rederive status --order   # the job, the last one, the schema before, and the late count

@@ -11,7 +11,7 @@ import { h, clear } from "../lib/dom.js";
 import { ago, number } from "../lib/format.js";
 import { sameServer } from "../lib/collect.js";
 import { HELD, doneCount, runLine } from "../lib/past.js";
-import { keptNote, lastLine, rebuildLine, rebuildNote, rebuildPercent } from "../lib/rederive.js";
+import { keptNote, lastLine, rebuildLine, rebuildNote, rebuildPercent, stopCause } from "../lib/rederive.js";
 import { app, onChange, savePrefs, workspace } from "../lib/state.js";
 import { loginNotice } from "../lib/team.js";
 import { pageHead, spinner, toast } from "../lib/ui.js";
@@ -153,7 +153,8 @@ function rederiveCard(rederive) {
       h("span", { style: { width: `${percent}%` } })),
     note ? h("div", { class: "qnote" }, h("span", { class: `dot ${dot}` }), note) : null);
   if (job) {
-    const note = job.error ? "멈췄습니다. 서버 → 기억 서버에서 다시 시도를 누르세요." : rebuildNote(job);
+    const { text, first } = stopCause(job.error);
+    const note = job.error ? `${text || "멈췄습니다."} ${first ? `${first} ` : ""}서버 → 기억 서버에서 다시 시도를 누르세요.` : rebuildNote(job);
     return card(rebuildLine(job), rebuildPercent(job), note, { run: !job.error, dot: job.error ? "bad" : "warn" });
   }
   if (!last?.swappedAt || last.cancelled || Date.now() - Date.parse(last.swappedAt) > DONE_SHOWN_MS) return null;
