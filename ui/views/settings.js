@@ -26,7 +26,7 @@ import {
   serverStep,
   setupBody,
 } from "../lib/collect.js";
-import { backupToStore, monthText, pastStep, periodText, planPast, shortDay, startPast } from "../lib/past.js";
+import { backupToStore, lateLine, monthText, pastStep, periodText, planPast, shortDay, startPast } from "../lib/past.js";
 import { sendRequest, teamDirectory } from "../lib/team.js";
 import { TOOL_GROUPS, TOOL_INFO } from "../lib/tools.js";
 import { app, loadContext, refreshStatus } from "../lib/state.js";
@@ -286,6 +286,10 @@ function pastBlock(openMore) {
     if (result?.ok === false) throw new Error(result.error || "하지 못했습니다.");
     await refresh();
   }) });
+  // How many of the server's conversations are out of time order, as 서버 → 기억 서버
+  // counts them (only a server on this computer can): asked once, when nothing runs.
+  let late = null;
+  let shown = null;
   async function refresh() {
     let status;
     try {
@@ -298,8 +302,17 @@ function pastBlock(openMore) {
     section.dataset.shown = "1";
     draw(status);
     if (status?.running) setTimeout(() => { if (section.isConnected) refresh(); }, 3000);
+    else if (late === null) readLate();
+  }
+  async function readLate() {
+    late = 0;
+    const order = (await post("/api/rederive/status", { order: true }).catch(() => null))?.order;
+    if (!order?.late) return;
+    late = order.late;
+    draw(shown);
   }
   function draw(status) {
+    shown = status;
     const { running, last, failures = {}, order = {}, held = {} } = status || {};
     const sources = (status?.sources || []).filter((row) => row.conversations);
     clear(head, running ? tag(status.stopping ? "멈추는 중" : "쌓는 중", "warn")
@@ -332,6 +345,7 @@ function pastBlock(openMore) {
       !running && last?.stopped === "unreachable" ? kv("멈춤", ["서버에 닿지 않아 멈췄습니다.",
         h("div", { class: "s" }, "새 대화는 기다리게 해 두었습니다. 서버가 다시 답하면 저절로 이어서 쌓습니다.")]) : null,
       order.first ? kv("쌓은 순서", [`시작한 시각순 · ${periodText(order.first, order.last)}`,
+        late && !running ? h("div", { class: "s warn" }, lateLine(late)) : null,
         !running && last?.finishedAt && !last.cancelled && !last.stopped ? h("div", { class: "s" }, `${moment(last.finishedAt)}에 다 쌓음`) : null]) : null,
       failures.total ? kv("실패", [`${number(failures.total)}개 `,
         h("span", { class: "muted" }, FAILURES.filter(([key]) => failures[key]).map(([key, label]) => `· ${label} ${number(failures[key])}`).join(" "))],

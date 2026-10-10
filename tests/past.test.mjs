@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { originalName, outcomeOf, storeSpec } from "../scripts/past.mjs";
-import { doneCount } from "../ui/lib/past.js";
+import { doneCount, lateLine } from "../ui/lib/past.js";
 import { fixtureEntries, makeZip } from "./chatgpt-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -422,6 +422,16 @@ test("a finished fill counts only the conversations there were to put in", () =>
   assert.equal(doneCount({ total: 26_083, done: 26_083, sent: 26_080, failed: 3, skipped: 0 }), "26,080 / 26,083");
   // Stopped part way: the ones not reached are still to put in.
   assert.equal(doneCount({ total: 100, done: 30, sent: 27, failed: 1, skipped: 2, cancelled: true }), "27 / 98");
+});
+
+test("기억 설정 says how many went in out of order and where to put them back", () => {
+  // 더 가져오기 put 13 older ones in after the server's newest (the MacBook, 2026-10-10).
+  const line = lateLine(13);
+  assert.match(line, /^어긋난 대화 13개는 서버의 더 새 대화보다 나중에 들어왔습니다\./);
+  assert.match(line, /서버 → 기억 서버에서 처음부터 다시 정리를 누르세요\.$/);
+  assert.match(lateLine(26_083), /어긋난 대화 26,083개/);
+  // In order, or not counted: nothing is said.
+  for (const none of [0, null, undefined, "0"]) assert.equal(lateLine(none), "");
 });
 
 test("a store being read stops, rclone and all, when another is picked, and the one picked is read", { skip: process.platform === "win32" }, async (t) => {

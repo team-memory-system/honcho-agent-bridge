@@ -775,6 +775,18 @@ export function doneCount(last) {
   return `${number(last.sent || 0)} / ${number(Math.max(0, Number(last.total || 0) - skipped))}`;
 }
 
+/**
+ * Under 기억 설정's 쌓은 순서: how many of the server's conversations went in after a
+ * newer one (a later 더 가져오기, a computer joined late), and where they are put back
+ * in order. "" with none.
+ */
+export function lateLine(late) {
+  const count = Number(late || 0);
+  return count > 0
+    ? `어긋난 대화 ${number(count)}개는 서버의 더 새 대화보다 나중에 들어왔습니다. 시간순으로 맞추려면 서버 → 기억 서버에서 처음부터 다시 정리를 누르세요.`
+    : "";
+}
+
 /** The run's line while it goes: "2024년 3월 대화까지 쌓음" and how far. */
 export function runLine(running) {
   if (!running) return "";

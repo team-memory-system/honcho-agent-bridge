@@ -1076,6 +1076,7 @@ details.group[open] > summary::before { content: "▾"; }
 .kv .k { width: 136px; flex: none; padding-top: 1px; color: var(--ink-3); font-size: 13px; }
 .kv .v { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .kv .v .s { margin-top: 2px; color: var(--ink-3); font-size: 13px; }
+.kv .v .s.warn { color: color-mix(in srgb, var(--warn) 70%, var(--ink)); }
 .kv .end { margin-left: auto; }
 .sp { flex: 1; }
 
