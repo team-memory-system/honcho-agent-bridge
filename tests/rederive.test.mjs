@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { adminHeaders, etaFrom, keptRecord, nextSchemaName, refusing, rederiveFlow, rederivePaths, rederiveStart, rederiveStatus, serverOf, switchRecord } from "../scripts/rederive.mjs";
-import { callsText, bytesText, keptName, keptNote, lastDetail, lastLine, lastTag, rebuildLine, rebuildNote, rebuildPercent } from "../ui/lib/rederive.js";
+import { callsText, bytesText, keptName, keptNote, keptWhat, lastDetail, lastLine, lastTag, rebuildLine, rebuildNote, rebuildPercent } from "../ui/lib/rederive.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -129,7 +129,8 @@ test("the dashboard reads the job and the last switch from the status file alone
   await fsp.writeFile(paths.status, JSON.stringify({ version: 1, job: again, last: null, previous: null }));
   const switching = (await rederiveFlow(config)).job;
   assert.equal(switching.toRebuilt, true);
-  assert.equal(rebuildLine(switching), "다시 정리한 기억으로 바꾸는 중");
+  assert.equal(rebuildLine(switching), "그동안 들어온 대화를 옮기는 중");
+  assert.equal(rebuildNote(switching), "다 옮기면 새 기억으로 다시 바꿉니다. 그때까지 지금 기억을 씁니다.");
 });
 
 test("the switch records what the new memory holds, the turns copied in while it was made included", () => {
@@ -149,20 +150,22 @@ test("after 되돌리기 the memory kept is the one the rebuild made, and the sc
   const built = keptRecord({ kind: "build", from: "public", fromNamespace: "honcho" }, at);
   assert.equal(built.rebuilt, false);
   assert.equal(keptName(built), "이전 기억");
+  assert.equal(keptWhat(built), "다시 정리하기 전의 기억입니다.");
   assert.match(keptNote(built), /^이전 기억은 .+까지 둡니다\. 되돌리려면 서버 → 기억 서버에서 되돌리기를 누르세요\.$/);
-  // 되돌리기 keeps the rebuilt one: it is not "이전 기억" any more.
+  // 되돌리기 keeps the rebuilt one: it is not "이전 기억" any more, but the 새 기억 the rebuild's window named.
   const back = { kind: "undo", from: "mem_202610101453", fromNamespace: "mem_202610101453", toRebuilt: false };
   const kept = keptRecord(back, at);
   assert.equal(kept.rebuilt, true);
   assert.equal(kept.schema, "mem_202610101453");
-  assert.equal(keptName(kept), "다시 정리한 기억");
-  assert.match(keptNote(kept), /^다시 정리한 기억은 .+까지 둡니다\. 다시 바꾸려면 서버 → 기억 서버에서 다시 정리한 기억으로 바꾸기를 누르세요\.$/);
+  assert.equal(keptName(kept), "새 기억");
+  assert.equal(keptWhat(kept), "다시 정리해 만든 기억입니다.");
+  assert.match(keptNote(kept), /^새 기억은 .+까지 둡니다\. 다시 바꾸려면 서버 → 기억 서버에서 새 기억으로 다시 바꾸기를 누르세요\.$/);
   assert.equal(lastTag(switchRecord(back, null, at)), "이전 기억으로 되돌림");
   // Switching to it again keeps the one before the rebuild once more.
   const again = { kind: "undo", from: "public", fromNamespace: "honcho", toRebuilt: true };
   assert.equal(keptRecord(again, at).rebuilt, false);
-  assert.equal(lastTag(switchRecord(again, null, at)), "다시 정리한 기억으로 바꿈");
-  assert.equal(rebuildLine({ kind: "undo", phase: "copy", toRebuilt: true }), "다시 정리한 기억으로 바꾸는 중");
+  assert.equal(lastTag(switchRecord(again, null, at)), "새 기억으로 다시 바꿈");
+  assert.equal(rebuildLine({ kind: "undo", phase: "swap", toRebuilt: true }), "새 기억으로 다시 바꾸는 중");
   assert.equal(lastTag({ kind: "build" }), "새 기억으로 바꿈");
 });
 
@@ -171,7 +174,14 @@ test("the screens' words for a rebuild", () => {
   assert.equal(rebuildLine({ kind: "build", phase: "swap" }), "새 기억으로 바꾸는 중");
   // Every message is through and the deriver finishes what it does with them.
   assert.equal(rebuildLine({ kind: "build", phase: "derive", derive: { done: 1244, total: 1244, at: null, etaSec: 0 } }), "마무리하는 중");
-  assert.equal(rebuildLine({ kind: "undo", phase: "copy" }), "이전 기억으로 되돌리는 중");
+  // 되돌리기 and 다시 바꾸기: what came in since is copied and gone through first, then the switch.
+  assert.equal(rebuildLine({ kind: "undo", phase: "start" }), "바꿀 준비하는 중");
+  assert.equal(rebuildLine({ kind: "undo", phase: "copy", copied: { conversations: 128 }, totals: { conversations: 130 } }), "그동안 들어온 대화를 옮기는 중");
+  assert.equal(rebuildLine({ kind: "undo", phase: "derive", derive: { done: 1190, total: 1244, at: Date.parse("2026-10-10T06:00:00Z"), etaSec: 180 } }), "옮긴 대화를 정리하는 중 · 95% · 약 3분 남음");
+  assert.equal(rebuildLine({ kind: "undo", phase: "swap" }), "이전 기억으로 바꾸는 중");
+  assert.equal(rebuildNote({ kind: "undo", phase: "derive" }), "다 옮기면 이전 기억으로 되돌립니다. 그때까지 지금 기억을 씁니다.");
+  // The minute without memory search is the restart at the end, not the making.
+  assert.equal(rebuildNote({ kind: "build", phase: "swap" }), "서버를 다시 켜는 동안 1분쯤 기억 검색이 멈춥니다.");
   assert.match(rebuildNote({ kind: "build", phase: "derive", derive: { paused: { until: new Date(Date.now() + 3_600_000).toISOString() } } }), /^모델 사용 한도에 걸려 쉬는 중입니다\. .+에 이어서 합니다\.$/);
   assert.equal(rebuildNote({ kind: "build", phase: "derive", error: "x" }), "멈췄습니다. 다시 시도를 누르면 멈춘 곳부터 이어서 합니다.");
   assert.equal(callsText(41_200), "약 4만 번");

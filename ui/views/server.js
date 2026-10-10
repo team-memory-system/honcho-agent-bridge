@@ -8,7 +8,7 @@ import { h, clear } from "../lib/dom.js";
 import { number } from "../lib/format.js";
 import { kv } from "../lib/kit.js";
 import { etaText } from "../lib/past.js";
-import { bytesText, callsText, keepLine, keptName, lastDetail, lastLine, lastTag, moment, rebuildLine, rebuildNote } from "../lib/rederive.js";
+import { bytesText, callsText, keepLine, keptName, keptWhat, lastDetail, lastLine, lastTag, moment, rebuildLine, rebuildNote } from "../lib/rederive.js";
 import { screenTabs } from "../lib/tabs.js";
 import { api, app, go, loadContext, refreshStatus } from "../lib/state.js";
 import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, statusTag, tag } from "../lib/ui.js";
@@ -214,9 +214,9 @@ export default {
             kv("모델 호출", [callsText(estimate.calls), estimate.model ? [" · ", h("span", { class: "mono" }, estimate.model)] : null]),
             kv("디스크", `${bytesText(estimate.diskBytes)} 더 씀${estimate.freeBytes ? ` · 남은 공간 ${bytesText(estimate.freeBytes, { about: false })}` : ""}`),
             kv("만드는 동안", "지금 기억을 그대로 씁니다."),
-            kv("바꿀 때", "1분쯤 기억 검색이 멈춥니다."),
+            kv("바꿀 때", "다 만든 뒤 서버를 다시 켜는 동안 1분쯤 기억 검색이 멈춥니다."),
             kv("이전 기억", `${estimate.keepDays || 7}일 동안 두고, 그동안 되돌릴 수 있습니다.`),
-            estimate.dropsPrevious ? kv(`지난번 ${keptName(estimate.dropsPrevious)}`, "시작할 때 지웁니다.") : null),
+            estimate.dropsPrevious ? kv(`남겨 둔 ${keptName(estimate.dropsPrevious)}`, "시작할 때 지웁니다.") : null),
           confirm: "시작",
         });
         if (!ok) return;

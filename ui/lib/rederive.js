@@ -39,27 +39,31 @@ export function rebuildPercent(job) {
   return Math.min(100, Math.floor((Number(derive.done || 0) / derive.total) * 100));
 }
 
-/** The job in one line: what it is doing and how far it has got. */
+/**
+ * The job in one line: what it is doing and how far it has got. 되돌리기 and 다시
+ * 바꾸기 go the same way as a rebuild, over what came in since the last switch: they
+ * copy it into the memory they switch to, wait for its deriver, then switch.
+ */
 export function rebuildLine(job) {
   if (!job) return "";
-  if (job.kind === "undo") {
-    if (job.toRebuilt) return "다시 정리한 기억으로 바꾸는 중";
-    return job.phase === "swap" ? "이전 기억으로 바꾸는 중" : "이전 기억으로 되돌리는 중";
-  }
-  if (job.phase === "start") return "새 기억을 만들 준비하는 중";
-  if (job.phase === "copy") return `대화를 옮기는 중 · ${number(job.copied?.conversations || 0)} / ${number(job.totals?.conversations || 0)}`;
+  const undo = job.kind === "undo";
+  if (job.phase === "start") return undo ? "바꿀 준비하는 중" : "새 기억을 만들 준비하는 중";
+  // A switch back copies only what the other memory lacks: its count would read as all of them.
+  if (job.phase === "copy") return undo ? "그동안 들어온 대화를 옮기는 중" : `대화를 옮기는 중 · ${number(job.copied?.conversations || 0)} / ${number(job.totals?.conversations || 0)}`;
   if (job.phase === "derive") {
     const derive = job.derive;
     // Every message is through; what the deriver still does with them is the end of it.
     if (derive?.total && Number(derive.done || 0) >= derive.total) return "마무리하는 중";
     const parts = [];
-    if (derive?.at) parts.push(`${monthText(derive.at)} 대화까지`);
+    if (undo) parts.push("옮긴 대화를 정리하는 중");
+    else if (derive?.at) parts.push(`${monthText(derive.at)} 대화까지`);
     if (derive?.total) parts.push(`${rebuildPercent(job)}%`);
     if (derive?.etaSec) parts.push(`${etaText(derive.etaSec)} 남음`);
     return parts.join(" · ") || "새 기억을 만드는 중";
   }
   if (job.phase === "scopes") return "마무리하는 중";
-  return "새 기억으로 바꾸는 중";
+  if (!undo) return "새 기억으로 바꾸는 중";
+  return job.toRebuilt ? "새 기억으로 다시 바꾸는 중" : "이전 기억으로 바꾸는 중";
 }
 
 /** What the job's line says under it. */
@@ -68,8 +72,8 @@ export function rebuildNote(job) {
   if (job.error) return "멈췄습니다. 다시 시도를 누르면 멈춘 곳부터 이어서 합니다.";
   if (job.stopping) return "그만두는 중입니다. 하던 일까지 하고 멈춥니다.";
   if (job.derive?.paused?.until) return `모델 사용 한도에 걸려 쉬는 중입니다. ${clock(job.derive.paused.until)}에 이어서 합니다.`;
-  if (job.phase === "swap") return "1분쯤 기억 검색이 멈춥니다.";
-  if (job.kind === "undo") return "바꿀 때 1분쯤 기억 검색이 멈춥니다. 그때까지 지금 기억을 씁니다.";
+  if (job.phase === "swap") return "서버를 다시 켜는 동안 1분쯤 기억 검색이 멈춥니다.";
+  if (job.kind === "undo") return `다 옮기면 ${job.toRebuilt ? "새 기억으로 다시 바꿉니다" : "이전 기억으로 되돌립니다"}. 그때까지 지금 기억을 씁니다.`;
   return "다 만들면 새 기억으로 바꿉니다. 그때까지 지금 기억을 씁니다.";
 }
 
@@ -80,25 +84,31 @@ export function lastLine(last) {
   return `${moment(last.swappedAt)}에 ${lastTag(last)}`;
 }
 
-/** The last switch in a tag: "새 기억으로 바꿈", "이전 기억으로 되돌림". */
+/** The last switch in a tag: "새 기억으로 바꿈", "이전 기억으로 되돌림", "새 기억으로 다시 바꿈". */
 export function lastTag(last) {
   if (last?.kind !== "undo") return "새 기억으로 바꿈";
-  return last.toRebuilt ? "다시 정리한 기억으로 바꿈" : "이전 기억으로 되돌림";
+  return last.toRebuilt ? "새 기억으로 다시 바꿈" : "이전 기억으로 되돌림";
 }
 
 /**
- * What the memory kept after a switch is called: the one before the rebuild, or,
- * after going back from it, the one the rebuild made.
+ * What the memory kept after a switch is called: the one before the rebuild (이전
+ * 기억), or, after going back from it, the one the rebuild made (새 기억), as the
+ * rebuild's own window calls them.
  */
 export function keptName(previous) {
-  return previous?.rebuilt ? "다시 정리한 기억" : "이전 기억";
+  return previous?.rebuilt ? "새 기억" : "이전 기억";
+}
+
+/** What the memory kept is, under its name. */
+export function keptWhat(previous) {
+  return previous?.rebuilt ? "다시 정리해 만든 기억입니다." : "다시 정리하기 전의 기억입니다.";
 }
 
 /** The dashboard's note under a switch: until when the memory left is kept, and how to switch to it. */
 export function keptNote(previous) {
   if (!previous) return null;
   return previous.rebuilt
-    ? `다시 정리한 기억은 ${keepLine(previous)}. 다시 바꾸려면 서버 → 기억 서버에서 다시 정리한 기억으로 바꾸기를 누르세요.`
+    ? `새 기억은 ${keepLine(previous)}. 다시 바꾸려면 서버 → 기억 서버에서 새 기억으로 다시 바꾸기를 누르세요.`
     : `이전 기억은 ${keepLine(previous)}. 되돌리려면 서버 → 기억 서버에서 되돌리기를 누르세요.`;
 }
 
