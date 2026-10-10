@@ -1232,6 +1232,14 @@ button.tw:hover { background: var(--sunk); color: var(--ink); }
 .pr .tl .th { margin-left: 8px; color: var(--ink-3); font-size: 12.5px; }
 .pr .tl .own { color: var(--ink-2); }
 .pr .tl .tag { margin-left: 8px; }
+/* 서버 → 기억 다시 정리: label and value rows in the page's flat list, and in its confirm sheet. */
+.section > header h2 .tag { margin-left: 8px; vertical-align: 2px; }
+.rows > .kv { padding: 12px 2px; border-bottom: 1px solid var(--line); }
+.rows > .kv:last-child { border-bottom: 1px solid var(--line); }
+.rows > .kv .end { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.rows > .notice { margin: 12px 0; }
+.sheet-kv { margin-top: 12px; border-top: 1px solid var(--line-soft); }
+.sheet-kv .kv .k { width: 104px; }
 .row2 { display: flex; align-items: center; gap: 12px; margin-top: 12px; font-size: 13.5px; }
 .row2 input[type="checkbox"] { margin: 0; }
 .row2.note { color: var(--ink-2); }

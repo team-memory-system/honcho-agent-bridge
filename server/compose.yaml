@@ -55,6 +55,51 @@ services:
       retries: 3
       start_period: 10s
 
+  # 기억 다시 정리 (scripts/rederive.mjs): a second api and deriver over a schema of
+  # their own (HONCHO_NEXT_SCHEMA, with a cache namespace of its own), where the memory
+  # is made again from the server's conversations in the order they started, beside
+  # the one in use. Only the rebuild starts them, on 127.0.0.1 only. When the new
+  # memory is ready it points the api and deriver above at that schema (DB_SCHEMA and
+  # NAMESPACE in the private .env) and removes these two.
+  api-next:
+    <<: *honcho-service
+    profiles: ["rederive"]
+    entrypoint: ["sh", "docker/entrypoint.sh"]
+    environment:
+      <<: *honcho-environment
+      DB_SCHEMA: ${HONCHO_NEXT_SCHEMA:-honcho_next}
+      NAMESPACE: ${HONCHO_NEXT_NAMESPACE:-honcho_next}
+    ports:
+      - "127.0.0.1:${HONCHO_NEXT_API_PORT:-8011}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)\""]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 15s
+
+  deriver-next:
+    <<: *honcho-service
+    profiles: ["rederive"]
+    entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
+    environment:
+      <<: *honcho-environment
+      DB_SCHEMA: ${HONCHO_NEXT_SCHEMA:-honcho_next}
+      NAMESPACE: ${HONCHO_NEXT_NAMESPACE:-honcho_next}
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api-next:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; os.kill(1, 0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
   database:
     image: pgvector/pgvector:pg15
     environment:

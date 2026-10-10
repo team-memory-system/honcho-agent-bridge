@@ -86,6 +86,7 @@ import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs
 import { checkPrereqs, FEATURES, parseFeatures } from "./prereqs.mjs";
 import { backupCommand } from "./backup.mjs";
 import { pastCommand } from "./past.mjs";
+import { rederiveCommand } from "./rederive.mjs";
 import { transcriptFiles } from "./projects.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -1732,6 +1733,7 @@ function usage() {
       "gateway open",
       "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--take-folders <dir,dir>] [--skip-folders <dir,dir>] [--rest-folders take|skip] [--all-folders] [--automation take|skip] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN; its Cloudflare Access service token in HONCHO_CF_ACCESS_CLIENT_ID, HONCHO_CF_ACCESS_CLIENT_SECRET)",
       "past scan [--store <json>] | scan-status | overview [--honcho-url <url>] [--agents claude,codex] [--store <json>] [--chatgpt <id,id>] [--new-server] | plan [--store <json>] [--chatgpt <id,id>] [--late include|skip] | hold | start | retry | status | stop | chatgpt-add --file <export> | chatgpt-drop --id <id> (past conversations from this computer, the backup store and ChatGPT exports, into the own server in the order they started; new turns wait until they are in)",
+      "rederive status [--order] | estimate | start | stop | resume | undo | drop (the server here: its memory made again from its conversations in the order they started, beside the one in use, then switched in; the one before is kept 7 days)",
       "bridge disconnect (removes the shared-bridge settings 0.3.28 and before saved)",
       "target list",
       "target add <id> --url <https://host> --folders <dir,dir> [--label <text>] [--workspace <id>] [--user-peer <id>] [--agents claude,codex] (its API token in HONCHO_TARGET_API_TOKEN; its Cloudflare Access service token in HONCHO_TARGET_CF_ACCESS_CLIENT_ID, HONCHO_TARGET_CF_ACCESS_CLIENT_SECRET)",
@@ -1993,6 +1995,10 @@ async function main() {
   if (command === "past") {
     const action = args.shift() || "status";
     return pastCommand(action, parseOptions(args));
+  }
+  if (command === "rederive") {
+    const action = args.shift() || "status";
+    return rederiveCommand(action, parseOptions(args));
   }
   if (command === "teammates") return teammatesCommand(args);
   if (command === "team") return teamCommand(args);

@@ -237,7 +237,7 @@ test("the flow route counts what waits to go and what went, for the agents that 
 
   const response = await send("/api/app/flow");
   assert.equal(response.status, 200);
-  assert.deepEqual(response.body, { ok: true, collect: { pending: 2, sessions: 2, lastSentAt: "2026-10-07T01:30:00.000Z" }, targets: [], past: null });
+  assert.deepEqual(response.body, { ok: true, collect: { pending: 2, sessions: 2, lastSentAt: "2026-10-07T01:30:00.000Z" }, targets: [], past: null, rederive: null });
 
   // A state caught mid-write counts as nothing sent until it is whole again.
   await write(path.join(dataDir, "state", "claude.json"), "{\"version\":1,\"sess");

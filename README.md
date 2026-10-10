@@ -43,7 +43,7 @@ question and gets an answer, without reading the underlying messages.
    set up, its page stays empty under one first setup window: 팀에 들어가기 (from
    the 팀 주소 the admin copied), 새 팀 만들기 (from a Cloudflare API token) or 혼자
    쓰기, then the steps 서버 → 모델 (only when a server is made here) → 에이전트 →
-   프로젝트 → 팀원 (only for a team), 적용, a row for each thing it does (적용 중),
+   지난 대화 → 프로젝트 → 팀원 (only for a team), 적용, a row for each thing it does (적용 중),
    and what is left to do in each agent (할 일). After that, the menus: 대시보드
    shows the servers the conversations go to in one table (up to date or not, what
    waits here, when the last one went, what the server holds), how far Honcho has
@@ -51,7 +51,9 @@ question and gets an answer, without reading the underlying messages.
    on it is a link. 기억 reads and searches the memories and asks Honcho or a
    gateway model. 기억 설정 is three blocks whose buttons open windows: 대화 수집's
    수정 is first setup's own steps, other servers and per-folder choices included;
-   MCP 도구; ChatGPT 기록. 팀 holds teammates' memories behind a switch each.
+   지난 대화, where the past conversations came from and how many went in, whose
+   더 가져오기 opens 수정 at that step; MCP 도구. 팀 holds teammates' memories behind
+   a switch each.
    조회 기록 lists who asked this computer's memory what, and its 가드 시험 tries a
    question as a teammate's. 서버 runs the server
    (기억 서버); on 모델, the subscription accounts, the model the server uses and
@@ -242,8 +244,7 @@ question and gets an answer, without reading the underlying messages.
   turns as sent before the hook goes on. No command does this; that PC's state was
   written by a one-off script over the collector's own parsers and
   `turnHashCandidates`. A session never opened again is never sent by the hook;
-  `backfill` sends those (see [Which folders, and past
-  conversations](#which-folders-and-past-conversations--프로젝트-폴더와-지난-대화)).
+  지난 대화 sends those (see [Past conversations](#past-conversations--지난-대화)).
 - **Grok CLI also runs Claude Code's hooks.** It loads `~/.claude/settings.json`
   too, and hands those hooks its own `updates.jsonl` as `transcript_path`; `main.mjs`
   drops such a payload for claude and codex. Hooks there that need environment
@@ -312,7 +313,7 @@ The repository bundles the conversation collectors, setup/diagnostic workflow, a
 
 ## Current scope
 
-- Capture Codex, Claude Code, agy and Grok CLI conversations from their Stop hooks into one personal Honcho workspace, and import a ChatGPT export once.
+- Capture Codex, Claude Code, agy and Grok CLI conversations from their Stop hooks into one personal Honcho workspace, and put the conversations from before (this computer's, a backup store's, ChatGPT exports) in once, in the order they started.
 - Recall memory through the Honcho tools exposed by the bundled MCP server: 19 recall tools by default, and 12 memory-changing tools once enabled.
 - Detect installed agents, preview setup changes, preserve unrelated settings, and create backups.
 - Run on macOS, Windows, and Linux wherever a recent Node.js runtime is available.
@@ -414,8 +415,9 @@ Setup can choose which project folders' conversations this computer's own server
 takes, and the app's 프로젝트 step does: the folders that held this computer's
 Claude Code and Codex conversations (`GET /api/app/projects`), ticked or not,
 새로 생기는 프로젝트 폴더도 수집 for every folder they do not name, and 자동 실행 대화도
-수집 for conversations no person took part in. A first setup ticks none and asks for
-at least one, since every ticked folder's past conversations go in at 적용.
+수집 for conversations no person took part in. A first setup ticks every folder, the
+backup store's folders included (tagged 백업 저장소에만), and every ticked folder's
+past conversations go in at 적용 (see [Past conversations](#past-conversations--지난-대화)).
 
 ```bash
 node scripts/cli.mjs setup apply --skip-folders ~/private            # every folder but that one
@@ -445,15 +447,124 @@ node scripts/cli.mjs setup apply --automation take                     # program
   from `HONCHO_AGENT_COLLECT_AUTOMATION=1`, which `configEnvironment` sets for the own
   server's runs only; a target keeps its own folders. A ChatGPT import has no folder
   and is never held back by it.
-- `backfill run` sends the past sessions of the chosen folders, oldest first, through
-  the same importer, deduped against what the hook already sent; `backfill start`
-  runs it in the background (first setup does, and so does 대화 수집's 적용) and
-  `backfill status` says how far it got; turning 자동 실행 대화도 수집 on makes the next
-  run look again at what it left out. `backfill stop` ends a run after the
-  conversation it is sending (기억 설정 → 지난 대화 → 멈추기; 이어서 보내기 starts
-  again). Its progress is in `<dataDir>/state/backfill.json`, so a run carries on where
-  the last one stopped, and `/api/app/flow` reads `backfill-status.json` for the
-  대시보드's 남은 대화.
+- A Windows folder (`C:\...`) is matched on any system, case and separators aside,
+  so a Windows PC's conversations from the backup store can be taken or skipped here.
+
+### Past conversations / 지난 대화
+
+The hooks send what is said from now on. What was said before goes in once, at
+적용, from the places the 지난 대화 step names, in the order the conversations
+started, so the memory forms the way it happened:
+
+- **이 컴퓨터**: the Claude Code and Codex transcripts on this disk, always read.
+- **백업 저장소**: what the conversation backup (see [Backing up the conversation
+  originals](#backing-up-the-conversation-originals--대화-원본-백업)) copied there from
+  each of the person's computers. A folder is read in place; an rclone remote is
+  copied down first into `<dataDir>/past/store/`, only what changed since the last
+  copy. It reads `대화/claude` and `대화/codex` and leaves out every `_` folder
+  (`_아카이브`, `_부속자료`, `_원본버전`); the computers backing up there are named from
+  `_부속자료/<device>`. When this computer does not back up there yet, the step offers
+  to (이 컴퓨터의 대화도 매일 여기에 백업).
+- **ChatGPT 내보내기 파일**: one export per account, up to 4 GiB each, read as in
+  [Importing a ChatGPT export](#importing-a-chatgpt-export--chatgpt-기록-가져오기). Each
+  conversation is kept as its own file under `<dataDir>/past/chatgpt/<id>/` and goes in
+  at its own start.
+
+How it goes:
+
+- **Reading.** The step reads the places in the background (`past scan`), each file
+  cached by size and time, and 다음 waits until they are read.
+- **What goes in.** The 프로젝트 step adds the choice up (`past overview`): how many
+  go in and from when, the same conversation found in two places (it goes in once,
+  from the larger copy), what the server holds already, and about how long. One the
+  server holds is left out, unless a copy here has turns after the server's last one;
+  then the collector sends only what the server lacks.
+- **Late ones.** A conversation that started before the newest one on the server is
+  late: it goes in, but the memory then forms out of order. At first setup the step
+  asks whether to put them in (그래도 넣기) or leave them out (`--late skip`); in 수정 it
+  says so. [기억 다시 정리](#rebuilding-the-memory-in-time-order--기억-다시-정리) puts the
+  order right afterwards.
+- **The run.** 적용 holds new turns first (`past hold`, `<dataDir>/spool/hold.json`),
+  then `past plan` writes the conversations to put in, in start order
+  (`<dataDir>/past/plan.json`), and `past start` runs `past run` in the background:
+  one conversation at a time through `collector.mjs --serve`, each outcome a line of
+  `<dataDir>/past/ledger.jsonl`. When it ends, the held turns go, as a hook would send
+  them. A hold no run took over lapses after 30 minutes.
+- **Stopping and failing.** `past stop` (멈추기) ends the run after the conversation it
+  is sending, and `past start` (이어서 쌓기) carries on from the ledger. Three network
+  failures in a row stop the run with new turns still held, and it starts again by
+  itself (the next turn, or the app asking how it goes) once the server answers. What
+  failed (파일을 읽지 못함, 서버가 거절, 서버에 닿지 않음) is tried again with `past retry`
+  (다시 시도).
+- **Where it shows.** 기억 설정 → 지난 대화 lists each place with 대화, 쌓음, 겹쳐서 뺌 and
+  실패, and the run while it goes; the dashboard shows a 지난 대화 쌓기 card while it
+  runs and for a day after (as long as some failed).
+
+```bash
+node scripts/cli.mjs past scan --store '{"kind":"folder","path":"/Volumes/NAS/backup"}'   # the folder holding 대화
+node scripts/cli.mjs past scan --store '{"kind":"cloud","remote":"gdrive","path":"backup"}'
+node scripts/cli.mjs past chatgpt-add --file ~/Downloads/<export>.zip                     # prints its id
+node scripts/cli.mjs past overview --store '<same json>' --chatgpt <id>
+node scripts/cli.mjs past plan --store '<same json>' --chatgpt <id> [--late skip]
+node scripts/cli.mjs past start          # status, stop, retry; run in the foreground
+```
+
+Everything else it keeps is in `<dataDir>/past/` (`scan-*.json`, `sources.json`,
+`server-index.json`, `status.json`).
+
+### Rebuilding the memory in time order / 기억 다시 정리
+
+Honcho forms its memory in the order conversations reach it, so a conversation put
+in after newer ones (a late one from 지난 대화, a computer that joined later) is
+understood against what came after it. On the computer that runs the server,
+서버 → 기억 서버 → 기억 다시 정리 counts those (시간순과 어긋난 대화: by the order they
+reached the server, one that started before a conversation that reached it earlier)
+and 처음부터 다시 정리 makes the memory again from the server's own conversations,
+in the order they started, beside the one in use:
+
+- Honcho keeps its tables in one Postgres schema (`DB_SCHEMA` in the server's private
+  `.env`, `public` until the first rebuild) and its cache under `NAMESPACE`. The rebuild
+  starts a second api and deriver (`api-next`, `deriver-next` in `server/compose.yaml`,
+  profile `rederive`) over a new schema `mem_<yyyymmddhhmm>` with a namespace of its
+  own, on `127.0.0.1:${HONCHO_NEXT_API_PORT}` (8011 or the next free port).
+- It copies the workspaces, peers and webhooks, then each conversation's messages, in
+  the order the conversations started, with their own times and metadata, through
+  that api, so the new deriver forms the memory in that order and the messages get
+  their embeddings again. Conclusions a person or an agent wrote directly come along;
+  the ones the deriver drew from messages are drawn again.
+- It waits until the new deriver has gone through every conversation (summaries
+  included) and every message has its embedding, copying what came into the memory
+  in use every 10 minutes. When the model refuses for two polls in a row (a
+  subscription's limit), it stops the new deriver for 15 minutes (then 30, 60, 120,
+  240), gives the refused work back and starts it again; three days without any
+  progress stop the rebuild with the reason. Work still refused at the end is given
+  back three times.
+- It opens the new memory to the same projects as the one in use (the scopes and
+  their sessions, which Honcho then copies into each scope).
+- Then it switches: the `.env` gets `DB_SCHEMA` and `NAMESPACE` of the new schema, the
+  api and deriver restart over it (about a minute without memory search; the hooks
+  keep their turns and send them after), the second pair is removed, and what reached
+  the old schema meanwhile is copied last.
+- The schema before stays 7 days (이전 기억). 되돌리기 switches back the same way,
+  copying what came in since; 이전 기억 지우기 drops it (for `public`, Honcho's tables
+  in it), and after 7 days it is dropped on its own. Starting another rebuild drops it
+  first. 그만두기 before the switch removes the second pair and drops the new schema.
+- Before it starts, the window says how long it takes, how many model calls (one per
+  1,024 tokens of a conversation and one per 20 and per 60 messages for summaries, at
+  about 8 seconds a call over `DERIVER_WORKERS`), the disk it takes (the schema in use)
+  and the space left in the database's volume. It does not start while 지난 대화 are
+  going in or the server does not answer, and a server installed before this needs
+  다시 준비 first (its `compose.yaml` has no `api-next`).
+- The dashboard shows it as a card while it goes and for a day after the switch. Its
+  state is `<dataDir>/rederive/status.json`, and `<dataDir>/logs/rederive.log` says
+  what it did. A job stopped half way (a restart) carries on when the app next asks;
+  one stopped on an error carries on with 다시 시도.
+
+```bash
+node scripts/cli.mjs rederive status --order   # the job, the last one, the schema before, and the late count
+node scripts/cli.mjs rederive estimate
+node scripts/cli.mjs rederive start            # stop, resume, undo, drop
+```
 
 ### Collecting from another computer
 
@@ -1022,7 +1133,7 @@ HONCHO_USER_NAME=<your peer> node scripts/collector.mjs --provider chatgpt \
   - Running the same export again sends nothing, and a newer export sends only new messages.
   - The dedupe state is kept per server and workspace, so a different workspace gets everything.
 - **`--dry-run`** sends nothing. It prints a `summary`: the files read, turns by role, the first and last time, and what was skipped and why.
-- **In the app**, 기억 설정 → ChatGPT 기록 → 가져오기 runs the same import, and first setup's 에이전트 step takes an export file to bring in before the past conversations (파일로 가져오는 대화). It takes uploads up to 256 MB and always uses the configured workspace and peer. Use the command for anything bigger or for another workspace.
+- **In the app**, the 지난 대화 step (first setup, or 기억 설정 → 지난 대화 → 더 가져오기) takes export files up to 4 GiB each and puts their conversations in with the other past ones, in the order they started (see [Past conversations](#past-conversations--지난-대화)), always with the configured workspace and peer. Use the command for another workspace.
 
 ## Backing up the conversation originals / 대화 원본 백업
 

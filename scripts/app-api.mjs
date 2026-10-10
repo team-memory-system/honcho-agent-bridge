@@ -19,6 +19,7 @@ import {
 } from "./honcho-access.mjs";
 import { ALL_TOOLS, WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
 import { pastFlow } from "./past.mjs";
+import { rederiveFlow } from "./rederive.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { publicUrl } from "./redact.mjs";
 import { installedServerModel, installedServerPorts } from "./server-manager.mjs";
@@ -192,10 +193,13 @@ export async function collectFlow(config) {
   return { pending, sessions, lastSentAt: lastSentAt || null };
 }
 
-/** The dashboard's flow: the own server's side (collectFlow) and each other server's. */
+/**
+ * The dashboard's flow: the own server's side (collectFlow), each other server's,
+ * the past conversations going in, and a rebuild of this computer's server.
+ */
 export async function appFlow(config) {
-  if (!config) return { collect: null, targets: [], past: null };
-  return { collect: await collectFlow(config), targets: await targetsContext(config), past: await pastFlow(config) };
+  if (!config) return { collect: null, targets: [], past: null, rederive: null };
+  return { collect: await collectFlow(config), targets: await targetsContext(config), past: await pastFlow(config), rederive: await rederiveFlow(config) };
 }
 
 async function targetsContext(config) {

@@ -512,6 +512,20 @@ const PAST_ROUTES = {
 };
 
 /**
+ * 서버 → 기억 다시 정리 (rederive.mjs). Starting can drop the memory kept from the
+ * last switch first, and dropping a schema takes a while on a large memory.
+ */
+const REDERIVE_ROUTES = {
+  "/api/rederive/status": async (body) => runCli(["rederive", "status", ...(body?.order === true ? ["--order"] : [])], { timeout: 300_000 }),
+  "/api/rederive/estimate": async () => runCli(["rederive", "estimate"], { timeout: 600_000 }),
+  "/api/rederive/start": async () => runCli(["rederive", "start"], { timeout: 1_800_000 }),
+  "/api/rederive/stop": async () => runCli(["rederive", "stop"], { timeout: 1_800_000 }),
+  "/api/rederive/resume": async () => runCli(["rederive", "resume"], { timeout: 60_000 }),
+  "/api/rederive/undo": async () => runCli(["rederive", "undo"], { timeout: 600_000 }),
+  "/api/rederive/drop": async () => runCli(["rederive", "drop"], { timeout: 1_800_000 }),
+};
+
+/**
  * The CLI routes that only read. Every other one changes this computer, so it answers
  * a JSON POST only: a page on another site can make a browser send a GET here (an
  * image sends no Origin), but it cannot send a JSON POST without being refused.
@@ -542,6 +556,7 @@ const ROUTES = {
   "/api/backup/remotes": async () => runCli(["backup", "remotes"], { timeout: 60_000 }),
   ...BACKUP_ROUTES,
   ...PAST_ROUTES,
+  ...REDERIVE_ROUTES,
 };
 
 /**

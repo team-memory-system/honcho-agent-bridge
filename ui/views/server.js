@@ -1,10 +1,14 @@
 // 서버 → 기억 서버: the memory server on this computer. Install it, start and stop
-// it, and check it end to end. The models it uses, the subscription gateway and the
+// it, make its memory again in time order (기억 다시 정리), and check it end to end. The models it uses, the subscription gateway and the
 // Ollama embedding model, are the 모델 tab (models.js). Building or restarting it
 // is a deployment, so every button that does that says so first. Sharing it is the
 // 공유 tab (share.js), and the team it opens to is 관리자 (admin.js).
 import { cli, gateway, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
+import { number } from "../lib/format.js";
+import { kv } from "../lib/kit.js";
+import { etaText } from "../lib/past.js";
+import { bytesText, callsText, keepLine, lastDetail, lastLine, moment, rebuildLine, rebuildNote } from "../lib/rederive.js";
 import { screenTabs } from "../lib/tabs.js";
 import { api, app, go, loadContext, refreshStatus } from "../lib/state.js";
 import { button, busy, confirmSheet, details, errorNotice, notice, pageHead, section, spinner, statusTag, tag } from "../lib/ui.js";
@@ -16,6 +20,15 @@ const CHECK_NAMES = {
   honcho: "기억 서버 응답",
   completion: "모델 응답",
 };
+
+/** Why 처음부터 다시 정리 could not start, in the words of this screen. */
+function startError(result) {
+  if (result.code === "past-running") return "지난 대화를 쌓는 중입니다. 다 쌓은 뒤 다시 정리를 누르세요.";
+  if (result.code === "server-down") return "기억 서버가 답하지 않습니다. 시작을 누른 뒤 다시 누르세요.";
+  if (result.code === "not-ready") return "이 서버는 다시 정리를 하기 전 설치입니다. 다시 준비를 누른 뒤 시작을 누르세요.";
+  if (result.code === "busy") return "다시 정리가 이미 진행 중입니다.";
+  return result.error || "시작하지 못했습니다.";
+}
 
 // What `server plan` lists, in the words of this screen. The CLI's notes are English.
 function planStep(op) {
@@ -123,7 +136,7 @@ export default {
       if (!server) {
         nodes.push(errorNotice(status.reason));
       } else if (server.installed) {
-        nodes.push(serverSection(server), verifySection());
+        nodes.push(serverSection(server), rebuildSection(server), verifySection());
       } else {
         nodes.push(section({ title: "기억 서버" },
           external
@@ -180,6 +193,96 @@ export default {
       ),
       h("p", { class: "muted", style: { fontSize: "12.5px", marginTop: "10px" } }, `설치 위치 ${server.directory}`),
       );
+    }
+
+    /**
+     * 기억 다시 정리: how many conversations went in after a newer one, the rebuild
+     * going and how far it got, and after a switch the memory kept from before, with
+     * 되돌리기 and 이전 기억 지우기.
+     */
+    function rebuildSection(server) {
+      const head = h("span", {});
+      const rows = h("div", { class: "rows" }, kv("시간순과 어긋난 대화", spinner()));
+      const start = button("처음부터 다시 정리", { kind: "small", onClick: (event) => busy(event.currentTarget, async () => {
+        const estimate = await post("/api/rederive/estimate", {});
+        if (estimate?.ok === false) throw new Error(estimate.error || "어림하지 못했습니다.");
+        const ok = await confirmSheet({
+          title: "처음부터 다시 정리할까요?",
+          text: `서버의 대화 ${number(estimate.conversations)}개를 시작한 시각순으로 다시 정리해 새 기억을 만듭니다. 다 만들면 지금 기억과 바꿉니다.`,
+          detail: h("div", { class: "sheet-kv" },
+            kv("걸리는 시간", [etaText(estimate.seconds) || "1분쯤", h("div", { class: "s" }, "구독 사용 한도에 걸리면 풀릴 때까지 쉬었다가 이어서 합니다.")]),
+            kv("모델 호출", [callsText(estimate.calls), estimate.model ? [" · ", h("span", { class: "mono" }, estimate.model)] : null]),
+            kv("디스크", `${bytesText(estimate.diskBytes)} 더 씀${estimate.freeBytes ? ` · 남은 공간 ${bytesText(estimate.freeBytes, { about: false })}` : ""}`),
+            kv("만드는 동안", "지금 기억을 그대로 씁니다."),
+            kv("바꿀 때", "1분쯤 기억 검색이 멈춥니다."),
+            kv("이전 기억", `${estimate.keepDays || 7}일 동안 두고, 그동안 되돌릴 수 있습니다.`),
+            estimate.dropsPrevious ? kv("지난번 이전 기억", "시작할 때 지웁니다.") : null),
+          confirm: "시작",
+        });
+        if (!ok) return;
+        const result = await post("/api/rederive/start", {});
+        if (result?.ok === false) throw new Error(startError(result));
+        await refresh();
+      }) });
+      const act = (label, path, { kind = "small", confirmText } = {}) => button(label, { kind, onClick: async (event) => {
+        if (confirmText && !(await confirmSheet(confirmText))) return;
+        await busy(event.currentTarget, async () => {
+          const result = await post(path, {});
+          if (result?.ok === false) throw new Error(result.error || "하지 못했습니다.");
+          await refresh();
+        });
+      } });
+      const node = section({ title: ["기억 다시 정리", head], actions: [start] }, rows);
+      let timer = null;
+      async function refresh({ order = true } = {}) {
+        clearTimeout(timer);
+        let status;
+        try {
+          status = await post("/api/rederive/status", { order });
+        } catch (error) {
+          clear(rows, errorNotice(error));
+          return;
+        }
+        if (!node.isConnected && node.dataset.shown) return;
+        node.dataset.shown = "1";
+        draw(status);
+        // While a job goes, how far it got; the count of late ones is read again once it ends.
+        if (status?.job) timer = setTimeout(() => { if (node.isConnected) refresh({ order: false }); }, 5_000);
+      }
+      function draw(status) {
+        const { job, last, previous, order } = status || {};
+        start.hidden = Boolean(job);
+        start.disabled = !status?.ready;
+        if (job) {
+          const undo = job.kind === "undo";
+          clear(head, job.error ? tag("멈춤", "bad") : tag(job.stopping ? "그만두는 중" : undo ? "되돌리는 중" : "다시 정리하는 중", "warn"));
+          const stop = job.phase === "swap" || job.stopping ? null : act("그만두기", "/api/rederive/stop", {
+            kind: "small quiet",
+            confirmText: undo
+              ? { title: "되돌리기를 그만둘까요?", text: "지금 기억을 그대로 씁니다.", confirm: "그만두기" }
+              : { title: "다시 정리를 그만둘까요?", text: "만들던 새 기억을 지웁니다. 지금 기억은 그대로입니다.", confirm: "그만두기", danger: true },
+          });
+          clear(rows,
+            kv(undo ? "되돌리기" : "다시 정리", [rebuildLine(job), h("div", { class: "s" }, rebuildNote(job))],
+              job.error ? [act("다시 시도", "/api/rederive/resume"), stop] : stop),
+            job.error ? kv("멈춘 까닭", h("span", { class: "mono muted" }, job.error)) : null);
+          return;
+        }
+        const late = Number(order?.late || 0);
+        clear(head, late ? tag(`어긋난 대화 ${number(late)}개`, "warn") : previous && last?.swappedAt ? tag(last.kind === "undo" ? "이전 기억으로 되돌림" : "새 기억으로 바꿈", "ok") : null);
+        clear(rows,
+          !status?.ready ? notice("warn", "이 서버는 다시 정리를 하기 전 설치입니다. 위의 다시 준비를 누른 뒤 시작을 누르면 쓸 수 있습니다.") : null,
+          kv("시간순과 어긋난 대화", order?.error ? h("span", { class: "muted" }, "세지 못했습니다.")
+            : late ? [`${number(late)}개 `, h("span", { class: "muted" }, `· 서버의 대화 ${number(order.conversations)}개 중`), h("div", { class: "s" }, "서버의 더 새 대화보다 나중에 들어온 대화입니다.")]
+              : order ? "없음" : spinner()),
+          kv("마지막 다시 정리", last ? [lastLine(last), lastDetail(last) ? h("div", { class: "s" }, lastDetail(last)) : null] : "한 적 없음"),
+          previous ? kv("이전 기억", [keepLine(previous), h("div", { class: "s" }, "그 뒤에 지웁니다.")], [
+            act("되돌리기", "/api/rederive/undo", { confirmText: { title: "이전 기억으로 되돌릴까요?", text: `${moment(previous.swappedAt)}에 바꾸기 전의 기억으로 돌아갑니다. 그 뒤에 들어온 대화도 옮겨 넣습니다. 바꿀 때 1분쯤 기억 검색이 멈춥니다.`, confirm: "되돌리기" } }),
+            act("이전 기억 지우기", "/api/rederive/drop", { kind: "small danger", confirmText: { title: "이전 기억을 지울까요?", text: "지우면 되돌릴 수 없습니다.", confirm: "지우기", danger: true } }),
+          ]) : null);
+      }
+      refresh();
+      return node;
     }
 
     function verifySection() {

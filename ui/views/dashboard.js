@@ -11,6 +11,7 @@ import { h, clear } from "../lib/dom.js";
 import { ago, number } from "../lib/format.js";
 import { sameServer } from "../lib/collect.js";
 import { HELD, runLine } from "../lib/past.js";
+import { keepLine, lastLine, rebuildLine, rebuildNote, rebuildPercent } from "../lib/rederive.js";
 import { app, onChange, savePrefs, workspace } from "../lib/state.js";
 import { loginNotice } from "../lib/team.js";
 import { pageHead, spinner, toast } from "../lib/ui.js";
@@ -136,6 +137,29 @@ function pastCard(past) {
   return card(`다 쌓음 · ${counted}`, 100, failed ? `실패 ${number(failed)}개 · 기억 설정 → 지난 대화에서 다시 시도를 누르세요.` : null, { dot: "bad" });
 }
 
+/**
+ * 기억 다시 정리 on the server here: while it goes, which month it reached, how far
+ * and how long is left; for a day after the switch, when it switched and until when
+ * the memory before is kept.
+ */
+function rederiveCard(rederive) {
+  if (!rederive) return null;
+  const { job, last, previous } = rederive;
+  const title = job?.kind === "undo" || (!job && last?.kind === "undo") ? "기억 되돌리기" : "기억 다시 정리";
+  const card = (right, percent, note, { run = false, dot = "warn" } = {}) => h("div", { class: "card queue" },
+    h("div", { class: "queue-head" }, h("b", {}, title), h("span", {}, right)),
+    h("div", { class: run ? "bar run" : "bar", role: "progressbar", "aria-label": `${title} ${percent}%`, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) },
+      h("span", { style: { width: `${percent}%` } })),
+    note ? h("div", { class: "qnote" }, h("span", { class: `dot ${dot}` }), note) : null);
+  if (job) {
+    const note = job.error ? "멈췄습니다. 서버 → 기억 서버에서 다시 시도를 누르세요." : rebuildNote(job);
+    return card(rebuildLine(job), rebuildPercent(job), note, { run: !job.error, dot: job.error ? "bad" : "warn" });
+  }
+  if (!last?.swappedAt || last.cancelled || Date.now() - Date.parse(last.swappedAt) > DONE_SHOWN_MS) return null;
+  const kept = previous ? `이전 기억은 ${keepLine(previous)}. 되돌리려면 서버 → 기억 서버에서 되돌리기를 누르세요.` : null;
+  return card(lastLine(last), 100, kept, { dot: "idle" });
+}
+
 /** Once, when a run has just finished: how many went in, and the new ones that waited for them. */
 function pastToast(past) {
   const last = past?.running ? null : past?.last;
@@ -237,6 +261,7 @@ export default {
             h("thead", {}, h("tr", {}, ["서버", "상태", "남은 대화", "마지막 동기화", "서버의 대화"].map((label, index) => h("th", { scope: "col", class: index === 2 || index === 4 ? "num" : null }, label)))),
             h("tbody", {}, ownRow(live), targetRows(live)))),
           pastCard(live.flow?.past),
+          rederiveCard(live.flow?.rederive),
           queueCard(live.queue)) : null,
         h("section", { "aria-label": "모델 · 백업 · 공유" },
           h("h2", { class: "sec" }, serverHere() ? "모델 · 백업 · 공유" : "백업 · 팀원 기억"),
