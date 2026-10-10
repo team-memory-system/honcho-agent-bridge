@@ -1543,7 +1543,7 @@ export async function pastRun(config, { retry = false } = {}) {
     await rereadAfterRun(paths, todo);
     const server = configuredServer(config);
     const total = todo.length;
-    const run = { pid: process.pid, startedAt, total, done: 0, sent: 0, failed: 0, month: null, from: null, etaSec: null, retry };
+    const run = { pid: process.pid, startedAt, total, done: 0, sent: 0, failed: 0, skipped: 0, month: null, from: null, etaSec: null, retry };
     await save({ running: run });
     collector = new Collector(runEnvironment(config, paths));
     const began = Date.now();
@@ -1586,6 +1586,8 @@ export async function pastRun(config, { retry = false } = {}) {
         run.failed += 1;
         failures[outcome.r] = (failures[outcome.r] || 0) + 1;
       }
+      // Nothing in it to remember, or left out by the configuration: not one to put in.
+      if (outcome.o === "empty" || outcome.o === "left") run.skipped += 1;
       unreachable = outcome.r === "unreachable" ? unreachable + 1 : 0;
       if (unreachable >= MAX_UNREACHABLE) {
         stopped = "unreachable";
@@ -1610,6 +1612,7 @@ export async function pastRun(config, { retry = false } = {}) {
       done: run.done,
       sent: run.sent,
       failed: run.failed,
+      skipped: run.skipped,
       failures,
       held,
       retry,

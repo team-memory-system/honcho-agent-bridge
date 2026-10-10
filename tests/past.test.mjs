@@ -17,6 +17,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { originalName, outcomeOf, storeSpec } from "../scripts/past.mjs";
+import { doneCount } from "../ui/lib/past.js";
 import { fixtureEntries, makeZip } from "./chatgpt-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -408,9 +409,19 @@ test("a conversation starts with its first message, not its first line: one open
   const run = (await cli(["past", "run"], install.env)).body;
   assert.equal(run.failed, 0);
   assert.equal(run.done, 4);
+  assert.equal(run.skipped, 0, "the one with no message is not even tried");
+  assert.equal(doneCount(run), "4 / 4");
   assert.deepEqual(honcho.created, ["codex-c2", "codex-c1", "claude-b", "claude-a"]);
   const starts = honcho.starts();
   assert.deepEqual(starts, [...starts].sort(), "by the first message, each went in after every one that started before it");
+});
+
+test("a finished fill counts only the conversations there were to put in", () => {
+  // Written before the run counted them: one had nothing in it to remember.
+  assert.equal(doneCount({ total: 117, done: 117, sent: 116, failed: 0 }), "116 / 116");
+  assert.equal(doneCount({ total: 26_083, done: 26_083, sent: 26_080, failed: 3, skipped: 0 }), "26,080 / 26,083");
+  // Stopped part way: the ones not reached are still to put in.
+  assert.equal(doneCount({ total: 100, done: 30, sent: 27, failed: 1, skipped: 2, cancelled: true }), "27 / 98");
 });
 
 test("a store being read stops, rclone and all, when another is picked, and the one picked is read", { skip: process.platform === "win32" }, async (t) => {

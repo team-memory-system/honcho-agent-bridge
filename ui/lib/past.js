@@ -766,6 +766,15 @@ export function releaseNewTurns() {
   return post("/api/past/stop", {}).catch(() => null);
 }
 
+/**
+ * "116 / 116": of the conversations there were to put in, how many went in. One with
+ * nothing in it to remember, or left out by the configuration, is not one of them.
+ */
+export function doneCount(last) {
+  const skipped = last.skipped ?? Math.max(0, Number(last.done || 0) - Number(last.sent || 0) - Number(last.failed || 0));
+  return `${number(last.sent || 0)} / ${number(Math.max(0, Number(last.total || 0) - skipped))}`;
+}
+
 /** The run's line while it goes: "2024년 3월 대화까지 쌓음" and how far. */
 export function runLine(running) {
   if (!running) return "";

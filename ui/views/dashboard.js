@@ -10,7 +10,7 @@ import { get, honcho, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { ago, number } from "../lib/format.js";
 import { sameServer } from "../lib/collect.js";
-import { HELD, runLine } from "../lib/past.js";
+import { HELD, doneCount, runLine } from "../lib/past.js";
 import { keepLine, lastLine, rebuildLine, rebuildNote, rebuildPercent } from "../lib/rederive.js";
 import { app, onChange, savePrefs, workspace } from "../lib/state.js";
 import { loginNotice } from "../lib/team.js";
@@ -129,7 +129,7 @@ function pastCard(past) {
     return card(runLine(running) || "줄 세우는 중", percent, past.stopping ? "멈추는 중입니다. 지금 쌓는 대화까지 쌓고 멈춥니다." : held ? `새 대화 ${number(held)}개는 지난 대화 다음에 쌓입니다.` : HELD, { run: true });
   }
   if (!last?.finishedAt) return null;
-  const counted = `${number(last.sent || 0)} / ${number(last.total || 0)}`;
+  const counted = doneCount(last);
   if (last.stopped === "unreachable") return card(`멈춤 · ${counted}`, last.total ? Math.floor((last.done / last.total) * 100) : 0, "서버에 닿지 않아 멈췄습니다. 서버가 다시 답하면 저절로 이어서 쌓습니다.");
   if (last.cancelled) return card(`멈춤 · ${counted}`, last.total ? Math.floor((last.done / last.total) * 100) : 0, "이어서 쌓으려면 기억 설정 → 지난 대화에서 이어서 쌓기를 누르세요.", { dot: "idle" });
   const failed = Number(past.failed || 0);
