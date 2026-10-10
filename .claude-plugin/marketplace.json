@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Self-hosted personal memory for coding agents",
-    "version": "0.6.1"
+    "version": "0.6.2"
   },
   "plugins": [
     {
