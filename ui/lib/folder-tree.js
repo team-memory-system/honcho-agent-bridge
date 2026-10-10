@@ -2,7 +2,8 @@
 // hold hundreds of conversation folders: a folder that holds others opens and
 // closes, and its box ticks or clears every folder inside it. When conversations
 // were held both in a folder and in folders inside it, the folder's own are a row
-// of their own (이 폴더), so each can be picked apart.
+// of their own (이 폴더), so each can be picked apart. A folder's `tag` (백업
+// 저장소에만) shows after its name, and on a folder all of whose folders have it.
 import { h, clear } from "./dom.js";
 import { number } from "./format.js";
 import { icon } from "./icons.js";
@@ -95,11 +96,13 @@ export function treeRows(items, columns, { open = openAtFirst(items), onChange, 
   };
   const cells = (list, label) => (inline ? null : columns.map((column) => h("span", { class: "pr-c" }, box(list, column, label))));
   const count = (list) => h("span", { class: "c" }, `${number(list.reduce((sum, item) => sum + Number(item.count || 0), 0))}개`);
+  // The tag every one of `list` has, if they share one.
+  const tagOf = (list) => (list.length && list[0].tag && list.every((item) => item.tag === list[0].tag) ? h("span", { class: "tag new" }, list[0].tag) : null);
 
   // A folder no other sits in, or a folder's own conversations (`own`).
   const leaf = (item, label, depth, own = false) => {
     const name = own ? h("span", { class: "tl" }, h("span", { class: "own" }, "이 폴더"))
-      : h("span", { class: "tl" }, h("b", {}, label), item.temp ? h("span", { class: "th" }, "임시 폴더") : null);
+      : h("span", { class: "tl" }, h("b", {}, label), item.temp ? h("span", { class: "th" }, "임시 폴더") : null, tagOf([item]));
     const title = own ? `${item.display || item.path} (이 폴더)` : item.display || item.path;
     return h(inline ? "label" : "div", { class: inline ? "pr t" : "pr m t", style: template, title },
       h("span", { class: "tn", style: { paddingLeft: `${depth * 20}px` } }, h("span", { class: "tw" }), inline ? box([item], columns[0], title) : null, name),
@@ -114,7 +117,7 @@ export function treeRows(items, columns, { open = openAtFirst(items), onChange, 
     const name = h("span", { class: "tn", style: { paddingLeft: `${depth * 20}px` } },
       toggle,
       inline ? box(node.items, columns[0], label) : null,
-      h("span", { class: "tl" }, h("b", {}, node.label), h("span", { class: "th" }, `폴더 ${number(node.items.length)}개`)));
+      h("span", { class: "tl" }, h("b", {}, node.label), h("span", { class: "th" }, `폴더 ${number(node.items.length)}개`), tagOf(node.items)));
     name.addEventListener("click", (event) => {
       if (event.target.closest("input")) return;
       const focused = document.activeElement === toggle;
@@ -147,8 +150,8 @@ export function treeRows(items, columns, { open = openAtFirst(items), onChange, 
 }
 
 /**
- * Folders to tick as a tree: `{ path, display, count, temp }` each, `checked` the
- * paths ticked. The box in the header ticks or clears them all.
+ * Folders to tick as a tree: `{ path, display, count, temp, tag }` each, `checked`
+ * the paths ticked. The box in the header ticks or clears them all.
  */
 export function folderTreeTable(items, checked, { open, onChange } = {}) {
   const all = h("input", { type: "checkbox", "aria-label": "모두 고르기" });

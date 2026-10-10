@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import readline from "node:readline";
 import { getProvider } from "./providers/index.mjs";
 import { codexSegmentId, segmentHashesFromStoredMessages, turnHashCandidates } from "./turn-identity.mjs";
 import { classifyAutomation as classifyCodexAutomation } from "./providers/codex.mjs";
@@ -174,9 +175,12 @@ function statePath(provider) {
   return expandHome(`~/.hermes/state/${provider}-honcho-turn-ended.json`);
 }
 
+// A run that takes several agents' conversations (--serve) names the folder each
+// agent's log is in, since one HONCHO_AGENT_HOOK_LOG cannot be all of them.
 function logPath(provider) {
   const explicit = process.env.HONCHO_AGENT_HOOK_LOG;
   if (explicit) return expandHome(explicit);
+  if (process.env.HONCHO_AGENT_LOG_DIR) return path.join(expandHome(process.env.HONCHO_AGENT_LOG_DIR), `${provider}.log`);
   return expandHome(`~/.hermes/logs/${provider}-honcho-turn-ended.log`);
 }
 
@@ -229,7 +233,15 @@ function splitContent(text) {
   return chunks;
 }
 
+// A run of many conversations (--serve) keeps no state file: the whole file is
+// written again for every conversation, which thousands of them would make the
+// longest part of the run. Each conversation's sent turns are read back from the
+// server instead (syncStateFromHoncho), as for a conversation the file never held,
+// and past.mjs has the hooks read theirs back too.
+let stateInMemory = false;
+
 async function loadState(provider) {
+  if (stateInMemory) return { version: 2, sessions: {} };
   try {
     const data = JSON.parse(await fsp.readFile(statePath(provider), "utf8"));
     if (data && typeof data === "object") {
@@ -242,6 +254,7 @@ async function loadState(provider) {
 }
 
 async function saveState(provider, state) {
+  if (stateInMemory) return;
   const target = statePath(provider);
   await fsp.mkdir(path.dirname(target), { recursive: true });
   const tmp = `${target}.tmp`;
@@ -390,7 +403,14 @@ async function projectMetadata(cwd) {
   return projectMemo.get(cwd);
 }
 
-async function ensureSession(workspace, provider, sessionId, parsed, peers) {
+/**
+ * Makes the session, or sets its metadata and peers again. `last_turn_at` says when
+ * the conversation's last turn was, so a later run can tell whether a copy elsewhere
+ * has turns this server lacks without reading its messages (past.mjs). It is set
+ * only once every turn is on the server (`complete`); until then the session goes
+ * without it, and a run that finds it so reads its messages instead.
+ */
+async function ensureSession(workspace, provider, sessionId, parsed, peers, extra = {}, { complete = false } = {}) {
   const peerConfig = {};
   for (const peer of peers) {
     // 에이전트·자동화 피어는 학습(파생) 대상에서 제외 — 셀프 표상 노이즈 방지
@@ -400,10 +420,12 @@ async function ensureSession(workspace, provider, sessionId, parsed, peers) {
   const metadata = {
     ...parsed.metadata,
     ...(await projectMetadata(parsed.metadata?.cwd)),
+    ...extra,
     source: provider,
     agent_provider: provider,
     memory_importer: provider === "codex" ? "codex_turn_ended" : "agent_turn_ended",
     last_imported_at: utcNow(),
+    last_turn_at: complete ? parsed.turns?.at(-1)?.created_at || null : null,
   };
   for (const key of Object.keys(metadata)) if (metadata[key] == null) delete metadata[key];
   await jsonRequest("POST", `/v3/workspaces/${quote(workspace)}/sessions`, {
@@ -539,6 +561,7 @@ async function reconcileCodexSegment(workspace, sessionId, segmentId, sessionSta
 }
 
 async function withStateLock(provider, fn) {
+  if (stateInMemory) return fn();
   const lockPath = `${statePath(provider)}.lock`;
   const lock = await acquireFileLock(lockPath, { attempts: 50, delayMs: 100, staleMs: STATE_LOCK_STALE_MS });
   if (!lock) throw new Error(`state lock is busy for provider: ${provider}`);
@@ -571,7 +594,7 @@ async function importCodex(args, hookInput) {
     const sessionState = (sessions[sessionId] ||= { imported_hashes: [] });
     sessionState.rollout_path = rolloutPath;
     const basePeers = new Set([DEFAULT_USER_PEER, assistantPeer("codex")]);
-    if (!args.dryRun) await ensureSession(args.workspace, "codex", sessionId, parsed, basePeers);
+    if (!args.dryRun) await ensureSession(args.workspace, "codex", sessionId, parsed, basePeers, args.sessionMetadata);
     const [syncedTurns, honchoMessageTotal, stateReconciled] = args.dryRun
       ? [0, 0, false]
       : await syncStateFromHoncho("codex", args.workspace, sessionId, sessionState);
@@ -594,6 +617,7 @@ async function importCodex(args, hookInput) {
       honcho_message_total: honchoMessageTotal,
     };
     if (args.dryRun || messages.length === 0) {
+      if (!args.dryRun) await ensureSession(args.workspace, "codex", sessionId, parsed, basePeers, args.sessionMetadata, { complete: true });
       if ((stateReconciled || segmentReconciled) && !args.dryRun) {
         state.version = 2;
         await saveState("codex", state);
@@ -601,12 +625,13 @@ async function importCodex(args, hookInput) {
       return result;
     }
     if ([...peers].some((peer) => !basePeers.has(peer))) {
-      await ensureSession(args.workspace, "codex", sessionId, parsed, peers);
+      await ensureSession(args.workspace, "codex", sessionId, parsed, peers, args.sessionMetadata);
     }
     sessionState.write_in_progress = { started_at: utcNow(), message_count: messages.length };
     state.version = 2;
     await saveState("codex", state);
     await addMessages(args.workspace, sessionId, messages);
+    await ensureSession(args.workspace, "codex", sessionId, parsed, peers, args.sessionMetadata, { complete: true });
     sessionState.imported_hashes = mergeStateHashes(sessionState.imported_hashes || [], pendingHashes);
     sessionState.last_imported_at = utcNow();
     delete sessionState.write_in_progress;
@@ -644,7 +669,7 @@ async function importParsedSession(args, parsed, transcriptPath, options = {}) {
     }
     sessionState.transcript_path = transcriptPath;
     const basePeers = new Set([DEFAULT_USER_PEER, assistantPeer(args.provider)]);
-    if (!args.dryRun) await ensureSession(args.workspace, args.provider, sessionId, parsed, basePeers);
+    if (!args.dryRun) await ensureSession(args.workspace, args.provider, sessionId, parsed, basePeers, args.sessionMetadata);
     const [syncedTurns, honchoMessageTotal, stateReconciled] = args.dryRun
       ? [0, 0, false]
       : await syncStateFromHoncho(args.provider, args.workspace, sessionId, sessionState);
@@ -666,6 +691,7 @@ async function importParsedSession(args, parsed, transcriptPath, options = {}) {
     };
 
     if (args.dryRun || messages.length === 0) {
+      if (!args.dryRun) await ensureSession(args.workspace, args.provider, sessionId, parsed, basePeers, args.sessionMetadata, { complete: true });
       if (stateReconciled && !args.dryRun) {
         state.version = 2;
         await saveState(args.provider, state);
@@ -673,12 +699,13 @@ async function importParsedSession(args, parsed, transcriptPath, options = {}) {
       return result;
     }
     if ([...peers].some((peer) => !basePeers.has(peer))) {
-      await ensureSession(args.workspace, args.provider, sessionId, parsed, peers);
+      await ensureSession(args.workspace, args.provider, sessionId, parsed, peers, args.sessionMetadata);
     }
     sessionState.write_in_progress = { started_at: utcNow(), message_count: messages.length };
     state.version = 2;
     await saveState(args.provider, state);
     await addMessages(args.workspace, sessionId, messages);
+    await ensureSession(args.workspace, args.provider, sessionId, parsed, peers, args.sessionMetadata, { complete: true });
     sessionState.imported_hashes = mergeStateHashes(sessionState.imported_hashes || [], pendingHashes);
     sessionState.last_imported_at = utcNow();
     delete sessionState.write_in_progress;
@@ -769,15 +796,67 @@ async function main() {
   return importGenericProvider(args, hookInput);
 }
 
+/**
+ * One conversation as `--serve` is handed it: `{ provider, transcript }`, or
+ * `{ provider: "chatgpt", export }`, with `metadata` to add to its session. The
+ * same import a single run does.
+ */
+async function importItem(item) {
+  const metadata = item?.metadata;
+  const args = {
+    provider: String(item?.provider || "").trim().toLowerCase(),
+    transcript: typeof item?.transcript === "string" ? item.transcript : "",
+    workspace: DEFAULT_WORKSPACE,
+    dryRun: false,
+    hookInputFile: "",
+    exportPath: typeof item?.export === "string" ? item.export : "",
+    sessionMetadata: metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata : {},
+  };
+  if (!SUPPORTED_PROVIDERS.has(args.provider)) return { ok: false, error: `unsupported provider: ${args.provider}` };
+  if (args.provider === "chatgpt") {
+    if (TARGET_FOLDERS !== null) {
+      return { ok: true, provider: "chatgpt", new_messages: 0, skipped: "ChatGPT imports never go to another server" };
+    }
+    return importChatGptExport(args);
+  }
+  if (args.provider === "codex") return importCodex(args, {});
+  return importGenericProvider(args, {});
+}
+
+/**
+ * Many conversations in one process (past.mjs sends thousands, and starting a
+ * process for each would take longer than sending them): one JSON item per line on
+ * stdin, answered by one JSON line on stdout, in order, until stdin ends.
+ */
+async function serve() {
+  stateInMemory = true;
+  const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  for await (const line of lines) {
+    if (!line.trim()) continue;
+    let result;
+    try {
+      result = await importItem(JSON.parse(line));
+    } catch (error) {
+      result = { ok: false, error: String(error?.message || error) };
+    }
+    await logLine(result.provider || provider, JSON.stringify(result)).catch(() => {});
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  }
+}
+
 const provider = (process.env.HONCHO_AGENT_PROVIDER || "agent").trim().toLowerCase();
-try {
-  const result = await main();
-  await logLine(result.provider || provider, JSON.stringify(result)).catch(() => {});
-  console.log(JSON.stringify(result));
-  process.exitCode = result.ok ? 0 : 1;
-} catch (error) {
-  const result = { ok: false, provider, error: String(error?.message || error) };
-  await logLine(provider, JSON.stringify(result)).catch(() => {});
-  console.error(JSON.stringify(result));
-  process.exitCode = 1;
+if (process.argv.slice(2).includes("--serve")) {
+  await serve();
+} else {
+  try {
+    const result = await main();
+    await logLine(result.provider || provider, JSON.stringify(result)).catch(() => {});
+    console.log(JSON.stringify(result));
+    process.exitCode = result.ok ? 0 : 1;
+  } catch (error) {
+    const result = { ok: false, provider, error: String(error?.message || error) };
+    await logLine(provider, JSON.stringify(result)).catch(() => {});
+    console.error(JSON.stringify(result));
+    process.exitCode = 1;
+  }
 }

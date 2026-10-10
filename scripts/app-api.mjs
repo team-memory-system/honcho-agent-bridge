@@ -18,6 +18,7 @@ import {
   isCloudflareAccessBlock,
 } from "./honcho-access.mjs";
 import { ALL_TOOLS, WRITE_TOOLS } from "./mcp-tool-defaults.mjs";
+import { pastFlow } from "./past.mjs";
 import { writePrivateFileAtomic } from "./private-file-permissions.mjs";
 import { publicUrl } from "./redact.mjs";
 import { installedServerModel, installedServerPorts } from "./server-manager.mjs";
@@ -193,24 +194,8 @@ export async function collectFlow(config) {
 
 /** The dashboard's flow: the own server's side (collectFlow) and each other server's. */
 export async function appFlow(config) {
-  if (!config) return { collect: null, targets: [], backfill: null };
-  return { collect: await collectFlow(config), targets: await targetsContext(config), backfill: await backfillFlow(config) };
-}
-
-/**
- * Past conversations on their way to the own server (`backfill`, cli.mjs): how far a
- * running one has got, or how the last one ended. Read from its status file only.
- */
-async function backfillFlow(config) {
-  const status = await readJson(path.join(installPaths(config).dataDir, "state", "backfill-status.json"), null);
-  if (!status || typeof status !== "object") return null;
-  const pid = Number(status.running?.pid);
-  let alive = false;
-  if (Number.isInteger(pid) && pid > 0) {
-    try { process.kill(pid, 0); alive = true; } catch (error) { alive = error?.code === "EPERM"; }
-  }
-  const pick = (run) => (run ? { considered: run.considered ?? 0, examined: run.examined ?? 0, remaining: run.remaining ?? 0, sent: run.sent_sessions ?? 0, failed: run.failed ?? 0, at: run.finishedAt || run.startedAt || null } : null);
-  return { running: alive ? pick(status.running) : null, lastRun: pick(status.lastRun) };
+  if (!config) return { collect: null, targets: [], past: null };
+  return { collect: await collectFlow(config), targets: await targetsContext(config), past: await pastFlow(config) };
 }
 
 async function targetsContext(config) {

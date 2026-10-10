@@ -2,19 +2,23 @@
 // link. The servers its conversations go to are one table: whether each is up to
 // date, how many conversations wait here to go, when the last one went, and how
 // many the server holds (/api/app/flow, the memory server's own count), asked again
-// every 10 seconds; under it, how far Honcho has got putting them in order. Then
+// every 10 seconds; under it, how far the past conversations have gone in (지난
+// 대화 쌓기, lib/past.js) and how far Honcho has got putting them in order. Then
 // the parts around it, asked every minute: the gateway, backup, and sharing. A team
 // login that ended says so on top, with 다시 로그인.
 import { get, honcho, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
 import { ago, number } from "../lib/format.js";
 import { sameServer } from "../lib/collect.js";
-import { app, onChange, workspace } from "../lib/state.js";
+import { HELD, runLine } from "../lib/past.js";
+import { app, onChange, savePrefs, workspace } from "../lib/state.js";
 import { loginNotice } from "../lib/team.js";
-import { pageHead, spinner } from "../lib/ui.js";
+import { pageHead, spinner, toast } from "../lib/ui.js";
 
 const FAST = 10_000;
 const SLOW = 60_000;
+// A finished run's card stays a day, or until its failures are tried again.
+const DONE_SHOWN_MS = 24 * 3_600_000;
 const pad = (value) => String(value).padStart(2, "0");
 
 function settled(result) {
@@ -73,13 +77,15 @@ function ownRow(live) {
   if (!context.configured) return row({ state: "idle", name, addr, status: "수집 꺼짐", pending: "-", last: "-", total: live.sessions ? `${number(live.sessions.total || 0)}개` : "-" });
   const answers = Boolean(live.queue || live.sessions);
   const collect = live.flow?.collect || {};
-  const backfill = live.flow?.backfill?.running;
-  const waiting = Number(collect.pending || 0) + Number(backfill?.remaining || 0);
+  const filling = live.flow?.past?.running;
+  // The past conversations not in yet wait like the new ones held behind them.
+  const left = filling?.total ? Math.max(0, filling.total - Number(filling.done || 0)) : 0;
+  const waiting = Number(collect.pending || 0) + left;
   const status = !answers ? "답하지 않음"
-    : backfill ? `지난 대화 보내는 중 ${number(backfill.examined)}/${number(backfill.considered)}`
+    : filling ? "지난 대화 쌓는 중"
       : waiting ? "동기화 중" : "최신";
   return row({
-    state: !answers ? "bad" : waiting || backfill ? "warn" : "",
+    state: !answers ? "bad" : waiting || filling ? "warn" : "",
     name,
     addr,
     status,
@@ -101,6 +107,43 @@ function targetRows(live) {
     last: target.lastSentAt ? ago(target.lastSentAt) : "아직 없음",
     total: "-",
   }));
+}
+
+/**
+ * 지난 대화 쌓기: while the run goes, which month it reached, how many of how many
+ * and how long is left, and that new turns wait behind it; once done, for a day,
+ * how many went in, and for as long as some failed, where to try them again.
+ */
+function pastCard(past) {
+  if (!past) return null;
+  const { running, last } = past;
+  const card = (right, percent, note, { run = false, dot = "warn" } = {}) => h("div", { class: "card queue" },
+    h("div", { class: "queue-head" }, h("b", {}, "지난 대화 쌓기"), h("span", {}, right)),
+    h("div", { class: run ? "bar run" : "bar", role: "progressbar", "aria-label": `지난 대화 쌓기 ${percent}%`, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) },
+      h("span", { style: { width: `${percent}%` } })),
+    note ? h("div", { class: "qnote" }, h("span", { class: `dot ${dot}` }), note) : null);
+  if (running) {
+    const percent = running.total ? Math.floor((Number(running.done || 0) / running.total) * 100) : 0;
+    const held = Number(past.held?.conversations || 0);
+    return card(runLine(running) || "줄 세우는 중", percent, past.stopping ? "멈추는 중입니다. 지금 쌓는 대화까지 쌓고 멈춥니다." : held ? `새 대화 ${number(held)}개는 지난 대화 다음에 쌓입니다.` : HELD, { run: true });
+  }
+  if (!last?.finishedAt) return null;
+  const counted = `${number(last.sent || 0)} / ${number(last.total || 0)}`;
+  if (last.stopped === "unreachable") return card(`멈춤 · ${counted}`, last.total ? Math.floor((last.done / last.total) * 100) : 0, "서버에 닿지 않아 멈췄습니다. 서버가 다시 답하면 저절로 이어서 쌓습니다.");
+  if (last.cancelled) return card(`멈춤 · ${counted}`, last.total ? Math.floor((last.done / last.total) * 100) : 0, "이어서 쌓으려면 기억 설정 → 지난 대화에서 이어서 쌓기를 누르세요.", { dot: "idle" });
+  const failed = Number(past.failed || 0);
+  if (!failed && Date.now() - Date.parse(last.finishedAt) > DONE_SHOWN_MS) return null;
+  return card(`다 쌓음 · ${counted}`, 100, failed ? `실패 ${number(failed)}개 · 기억 설정 → 지난 대화에서 다시 시도를 누르세요.` : null, { dot: "bad" });
+}
+
+/** Once, when a run has just finished: how many went in, and the new ones that waited for them. */
+function pastToast(past) {
+  const last = past?.running ? null : past?.last;
+  if (!last?.finishedAt || last.cancelled || last.stopped || app.prefs.pastToast === last.finishedAt) return;
+  savePrefs({ pastToast: last.finishedAt });
+  if (Date.now() - Date.parse(last.finishedAt) > DONE_SHOWN_MS || !last.sent) return;
+  const held = Number(last.held?.conversations || 0);
+  toast(held ? `지난 대화 ${number(last.sent)}개와 그동안 생긴 새 대화 ${number(held)}개를 쌓았습니다.` : `지난 대화 ${number(last.sent)}개를 쌓았습니다.`, "ok");
 }
 
 function queueCard(queue) {
@@ -193,6 +236,7 @@ export default {
           h("div", { class: "card" }, h("table", { class: "sync" },
             h("thead", {}, h("tr", {}, ["서버", "상태", "남은 대화", "마지막 동기화", "서버의 대화"].map((label, index) => h("th", { scope: "col", class: index === 2 || index === 4 ? "num" : null }, label)))),
             h("tbody", {}, ownRow(live), targetRows(live)))),
+          pastCard(live.flow?.past),
           queueCard(live.queue)) : null,
         h("section", { "aria-label": "모델 · 백업 · 공유" },
           h("h2", { class: "sec" }, serverHere() ? "모델 · 백업 · 공유" : "백업 · 팀원 기억"),
@@ -202,6 +246,7 @@ export default {
     async function loadFlow() {
       live = await fetchFlow();
       draw();
+      pastToast(live.flow?.past);
     }
     async function loadAround() {
       around = await fetchAround();

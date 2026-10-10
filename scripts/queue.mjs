@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { readJson } from "./config.mjs";
 import { acquireFileLock, releaseFileLock } from "./file-lock.mjs";
@@ -20,6 +20,14 @@ const LOCK_STALE_MS = numberEnv("HONCHO_CODEX_GATE_LOCK_STALE_MS", 120_000);
 const MAX_DELAY_SECONDS = numberEnv("HONCHO_CODEX_GATE_MAX_DELAY_SECONDS", 300);
 const DEFAULT_HONCHO_BASE_URL = "http://127.0.0.1:8001";
 const PROVIDER = String(process.env.HONCHO_AGENT_PROVIDER || "codex").trim().toLowerCase();
+// While past conversations go into the memory server in the order they started
+// (past.mjs), new turns are queued as usual but the primary is not drained, so they
+// reach it after the past ones. The run keeps this file; see holding().
+const HOLD_PATH = process.env.HONCHO_AGENT_HOLD ? expandHome(process.env.HONCHO_AGENT_HOLD) : "";
+// A hold setup places before the past run starts is dropped if no run took it over by then.
+const SETUP_HOLD_MS = 30 * 60_000;
+// A run that stopped (a restart, a crash) is started again at most this often.
+const RESUME_EVERY_MS = 5 * 60_000;
 
 // Other servers that also take this provider's conversations from chosen folders
 // (targets.mjs). Read only from the configuration the hook named: a queue run by
@@ -351,6 +359,58 @@ async function drainTargets() {
   return summaries;
 }
 
+function alive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+/**
+ * Whether new turns wait for the past conversations still going in. The run that
+ * holds them keeps its pid in the hold file. One that is gone left the command that
+ * carries it on from where it stopped, and the first turn after that starts it
+ * again. A hold setup placed for a run that never started lapses after 30 minutes.
+ */
+async function holding() {
+  if (!HOLD_PATH) return false;
+  let hold;
+  try {
+    hold = JSON.parse(await fsp.readFile(HOLD_PATH, "utf8"));
+  } catch {
+    return false;
+  }
+  if (!hold || typeof hold !== "object") return false;
+  if (alive(Number(hold.pid))) return true;
+  if (Array.isArray(hold.resume) && hold.resume.length && hold.resume.every((part) => typeof part === "string")) {
+    // The app that held them is gone (removed, or moved by an update): nothing would carry the run on.
+    if (hold.resume[1] && !fs.existsSync(hold.resume[1])) {
+      await fsp.rm(HOLD_PATH, { force: true }).catch(() => {});
+      return false;
+    }
+    const resumed = Date.parse(hold.resumedAt || "");
+    if (!(Number.isFinite(resumed) && Date.now() - resumed < RESUME_EVERY_MS)) {
+      await fsp.writeFile(HOLD_PATH, JSON.stringify({ ...hold, resumedAt: utcNow() }, null, 2), "utf8").catch(() => {});
+      try {
+        const child = spawn(hold.resume[0], hold.resume.slice(1), { detached: true, stdio: "ignore", windowsHide: true, env: process.env });
+        child.on("error", () => {});
+        child.unref();
+        await logLine(`PAST_RESUMED ${hold.resume.slice(1).join(" ")}`).catch(() => {});
+      } catch (error) {
+        await logLine(`PAST_RESUME_FAILED ${error?.message || error}`).catch(() => {});
+      }
+    }
+    return true;
+  }
+  const at = Date.parse(hold.at || "");
+  if (Number.isFinite(at) && Date.now() - at < SETUP_HOLD_MS) return true;
+  await fsp.rm(HOLD_PATH, { force: true }).catch(() => {});
+  return false;
+}
+
 function pendingAgeSeconds(entry) {
   const createdMs = Date.parse(entry.createdAt || "");
   if (!Number.isFinite(createdMs)) return 0;
@@ -377,6 +437,18 @@ async function main() {
   }
 
   const mode = detectMode(args.mode);
+  // Held for the past conversations: the turn waits in the spool, and only the other
+  // servers, which the past conversations never go to, are drained.
+  if (!args.dryRun && (await holding())) {
+    const targets = TARGETS.length ? await withDrainLock(async () => ({ ok: true, targets: await drainTargets() })) : null;
+    return {
+      ok: true,
+      mode,
+      held: true,
+      queued: (await readPendingEntries()).length,
+      ...(targets?.targets?.length ? { targets_ok: targets.targets.every((item) => item.ok), targets: targets.targets } : {}),
+    };
+  }
   if (args.drainIfDue && mode !== "external") {
     return {
       ok: true,

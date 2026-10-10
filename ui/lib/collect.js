@@ -1,14 +1,16 @@
 // The steps that decide what this computer collects, shared by both windows that
 // ask: first setup (views/setup.js) walks them in a row, and 기억 설정 → 대화 수집 →
 // 수정 (views/settings.js) opens the same steps again. Where the conversations go
-// (the server), from which agents, and from which project folders are gathered in
-// one draft and sent whole to `setup plan|apply` at the end, so a token typed here
-// reaches those two routes and nothing else.
+// (the server), from which agents, from where the past ones come (lib/past.js) and
+// from which project folders are gathered in one draft and sent whole to `setup
+// plan|apply` at the end, so a token typed here reaches those routes, and the count
+// of what the server already holds (`past overview`), and nothing else.
 import { get, post } from "./api.js";
 import { h, clear } from "./dom.js";
 import { number } from "./format.js";
 import { folderTreeTable, openAtFirst, treeRows } from "./folder-tree.js";
 import { field, opt, opts } from "./kit.js";
+import { loadOverview, overviewTotals, pastDraft, pastSummary } from "./past.js";
 import { details, notice, spinner, tag } from "./ui.js";
 
 export const AGENTS = { claude: "Claude Code", codex: "Codex" };
@@ -67,7 +69,8 @@ export function collectDraft(context) {
     userPeer: context?.user?.peerId || "",
     workspace: context?.workspace || "memory",
     agents: configured ? new Set(Object.keys(AGENTS).filter((name) => context.agents?.[name])) : null,
-    chatgpt: null,
+    // 지난 대화: the backup store and ChatGPT files chosen, and how far their reading got (lib/past.js).
+    past: pastDraft(),
     // Folders: those ticked, those not, and whether folders made later are taken.
     take: new Set(collect?.take || []),
     skip: new Set(collect?.skip || []),
@@ -259,11 +262,8 @@ function otherServers(draft, company) {
 
 // ── 에이전트 ─────────────────────────────────────────────
 
-/**
- * The agents found on this computer, ticked to collect; and, at first setup, a
- * ChatGPT export to bring in before the past conversations.
- */
-export function agentsStep(draft, context, { chatgpt = false } = {}) {
+/** The agents found on this computer, ticked to collect. */
+export function agentsStep(draft) {
   const list = h("div", {}, h("div", { class: "opts" }, h("div", { class: "opt" }, spinner(), h("span", { class: "muted" }, "이 컴퓨터의 에이전트를 찾는 중…"))));
   let found = null;
   detectAgents().then((detect) => {
@@ -284,38 +284,11 @@ export function agentsStep(draft, context, { chatgpt = false } = {}) {
       onChange: (on) => { if (on) draft.agents.add(name); else draft.agents.delete(name); },
     }))));
   });
-  const file = h("input", { type: "file", hidden: true, accept: ".zip,.json,application/zip,application/json" });
-  const chatgptRow = () => {
-    const chosen = draft.chatgpt;
-    const row = opt({
-      type: "checkbox",
-      name: "chatgpt",
-      value: "chatgpt",
-      checked: Boolean(chosen),
-      title: "ChatGPT",
-      sub: chosen ? [h("span", { class: "mono" }, chosen.name), ` · ${(chosen.size / 1024 / 1024).toFixed(1)}MB`] : "ChatGPT의 설정 → 데이터 제어 → 데이터 내보내기로 받은 zip 파일",
-      end: h("button", { class: chosen ? "btn quiet small" : "btn small", type: "button", onclick: () => file.click() }, chosen ? "다른 파일" : "파일 고르기"),
-      onChange: (on) => {
-        if (on && !draft.chatgpt) { row.input.checked = false; file.click(); return; }
-        if (!on) { draft.chatgpt = null; redrawChatgpt(); }
-      },
-    });
-    return row;
-  };
-  const chatgptBox = h("div", { class: "opts" });
-  const redrawChatgpt = () => clear(chatgptBox, chatgptRow());
-  file.addEventListener("change", () => {
-    if (file.files?.[0]) draft.chatgpt = file.files[0];
-    file.value = "";
-    redrawChatgpt();
-  });
-  if (chatgpt) redrawChatgpt();
   return {
     body: h("div", {},
       h("h3", {}, "어느 에이전트의 대화를 수집할까요?"),
       h("p", { class: "lead" }, "이 컴퓨터에서 찾은 에이전트입니다."),
-      list,
-      chatgpt ? [h("div", { class: "label" }, "파일로 가져오는 대화"), chatgptBox, file] : null),
+      list),
     check() {
       if (found && !found.length) return "Claude Code나 Codex를 설치한 뒤 다시 여세요.";
       if (!draft.agents?.size) return "대화를 수집할 에이전트를 하나 이상 고르세요.";
@@ -335,20 +308,47 @@ function chosenProjects(projects, agents) {
 }
 
 /**
+ * The folders the chosen places' conversations ran in (`past overview`): those of
+ * this computer, and those only the backup store holds, from other computers.
+ */
+function overviewProjects(projects) {
+  return projects.map((project) => ({
+    path: project.path,
+    name: project.name,
+    count: project.count,
+    display: project.display || shortPath(project.path),
+    temp: Boolean(project.temp),
+    tag: project.storeOnly ? "백업 저장소에만" : null,
+  }));
+}
+
+/**
  * The folders ticked when the projects step opens: what the saved choice takes, a
  * folder it never named going by its rest. A computer that never chose collects
- * every folder, so 수정 shows them all ticked; a first setup ticks none, so no
- * folder's past conversations go in before someone picks the folder.
+ * every folder, at first setup too: the person clears what they leave out.
  */
-export function tickedFolders(projects, saved, { edit = false } = {}) {
+export function tickedFolders(projects, saved) {
   const take = new Set(saved?.take || []);
   const skip = new Set(saved?.skip || []);
   return new Set(projects.filter((project) => {
-    if (!saved) return edit;
+    if (!saved) return true;
     if (skip.has(project.path)) return false;
     if (take.has(project.path)) return true;
     return saved.rest !== "skip";
   }).map((project) => project.path));
+}
+
+/**
+ * The server the projects step counts against: the one being chosen, with what was
+ * typed for it; `newServer` for one this setup makes, which holds nothing yet, and
+ * `url` for one the setup reaches by another address (a team's server).
+ */
+export function draftServer(draft, context, { newServer = false, url = null } = {}) {
+  if (newServer) return { newServer: true };
+  const body = setupBody(draft, context);
+  const server = { honchoUrl: url || body.honchoUrl };
+  for (const key of ["apiToken", "accessClientId", "accessClientSecret", "workspace"]) if (body[key]) server[key] = body[key];
+  return server;
 }
 
 /**
@@ -376,62 +376,70 @@ function foldersAndRest(collect) {
  * Which project folders' conversations to collect. A folder ticked or not is kept
  * as taken or skipped; 새로 생기는 프로젝트 폴더도 수집 is what happens to the rest,
  * and 자동 실행 대화도 수집 whether conversations no person took part in go too.
+ * The folders are those the chosen places' conversations ran in, and under them
+ * what would go into the server (lib/past.js). `server` is the one to count against
+ * (draftServer).
  */
-export function projectsStep(draft, context, { edit = false } = {}) {
+export function projectsStep(draft, context, { edit = false, server = null } = {}) {
   const box = h("div", {}, h("div", { class: "pt" }, h("div", { class: "pr" }, spinner(), h("span", { class: "muted" }, "대화가 있는 폴더를 찾는 중…"))));
-  const past = h("div", { class: "row2 note" });
+  const summary = h("div", {});
   const restBox = h("input", { type: "checkbox", checked: draft.rest === "take" });
-  restBox.addEventListener("change", () => { draft.rest = restBox.checked ? "take" : "skip"; });
   const autoBox = h("input", { type: "checkbox", checked: Boolean(draft.automation) });
   const autoCount = h("span", { class: "muted" });
-  // The chosen agents' conversations no person took part in, from the folder list.
-  let automation = 0;
-  const drawPast = () => {
-    if (!draft.projects) return;
-    const chosen = draft.projects.filter((project) => draft.checked.has(project.path));
-    const count = chosen.reduce((sum, project) => sum + project.count, 0);
-    const programs = draft.automation && automation ? `자동 실행 대화 ${number(automation)}개` : "";
-    past.textContent = !draft.projects.length ? "새로 생기는 대화부터 수집합니다."
-      : !chosen.length ? (edit ? (programs ? `${programs} 중 아직 없는 것을 함께 수집합니다.` : "") : "수집할 폴더를 고르세요.")
-      : edit ? `고른 폴더의 지난 대화 ${number(count)}개${programs ? `와 ${programs}` : ""} 중 아직 없는 것을 함께 수집합니다.`
-        : `고른 폴더의 지난 대화 ${number(count)}개${programs ? `와 ${programs}` : ""}도 함께 수집합니다.`;
+  let overview = null;
+  // The places chosen could not be read: nothing goes on until they are.
+  let unread = null;
+  const drawSummary = () => {
+    if (!overview || !draft.checked) { clear(summary); return; }
+    const totals = overviewTotals(overview, { checked: draft.checked, automation: draft.automation, rest: draft.rest });
+    clear(summary, pastSummary(draft, overview, totals, { edit, here: draft.server === "here" }));
   };
-  autoBox.addEventListener("change", () => {
-    draft.automation = autoBox.checked;
-    drawPast();
-  });
+  restBox.addEventListener("change", () => { draft.rest = restBox.checked ? "take" : "skip"; drawSummary(); });
+  autoBox.addEventListener("change", () => { draft.automation = autoBox.checked; drawSummary(); });
   const servers = activeTargets(draft);
-  projectList().then((result) => {
-    const agents = draft.agents || new Set(Object.keys(AGENTS));
-    draft.projects = chosenProjects(result?.projects || [], agents);
-    automation = [...agents].reduce((sum, name) => sum + Number(result?.automation?.[name] || 0), 0);
+  const agents = draft.agents || new Set(Object.keys(AGENTS));
+  const draw = (projects, automation) => {
+    draft.projects = projects;
     autoCount.textContent = automation ? `${number(automation)}개` : "";
-    if (!draft.checked) draft.checked = tickedFolders(draft.projects, context?.collect || null, { edit });
+    if (!draft.checked) draft.checked = tickedFolders(draft.projects, context?.collect || null);
     if (!draft.open) draft.open = openAtFirst(draft.projects);
     if (!draft.projects.length) {
       draft.rest = "take";
       restBox.checked = true;
       clear(box, h("div", { class: "pt" }, h("div", { class: "list-empty" }, "아직 대화가 있는 폴더가 없습니다. 앞으로 생기는 폴더의 대화를 수집합니다.")));
     } else if (servers.length) {
-      clear(box, matrix(draft, servers, { restBox, autoBox, autoCount }, drawPast));
+      clear(box, matrix(draft, servers, { autoBox, autoCount, restBox }, drawSummary));
     } else {
-      clear(box, folderTreeTable(draft.projects, draft.checked, { open: draft.open, onChange: drawPast }));
+      clear(box, folderTreeTable(draft.projects, draft.checked, { open: draft.open, onChange: drawSummary }));
     }
-    drawPast();
+    drawSummary();
+  };
+  loadOverview(draft, server || draftServer(draft, context)).then(async (result) => {
+    if (result && result.ok !== false) {
+      overview = result;
+      draw(overviewProjects(result.projects || []), Number(result.automation?.count || 0));
+      return;
+    }
+    // The folders this computer holds, without the counts, when the places cannot be read.
+    if (result?.notRead) unread = result.error;
+    const list = await projectList();
+    draw(chosenProjects(list?.projects || [], agents), [...agents].reduce((sum, name) => sum + Number(list?.automation?.[name] || 0), 0));
+    clear(summary, notice("warn", result?.notRead ? `${result.error} 지난 대화 단계에서 확인하세요.` : "쌓을 대화를 세지 못했습니다. 적용하면 고른 폴더의 지난 대화를 시작한 시각순으로 쌓습니다."));
   });
   return {
     body: h("div", {},
       h("h3", {}, "어느 프로젝트 폴더의 대화를 수집할까요?"),
-      h("p", { class: "lead" }, servers.length ? "서버마다 쌓을 폴더를 고르세요. 고른 서버마다 칸이 하나씩 생깁니다." : "고른 에이전트의 대화가 있는 폴더입니다."),
+      h("p", { class: "lead" }, servers.length ? "서버마다 쌓을 폴더를 고르세요. 고른 서버마다 칸이 하나씩 생깁니다." : "고른 곳의 대화가 있는 폴더입니다."),
       box,
       servers.length ? null : h("label", { class: "row2" }, restBox, "새로 생기는 프로젝트 폴더도 수집"),
       servers.length ? null : h("label", { class: "row2" }, autoBox, "자동 실행 대화도 수집", autoCount),
-      past),
+      summary),
     check() {
       if (!draft.projects) return "폴더를 찾는 중입니다. 잠시 뒤 다시 누르세요.";
+      if (unread) return `${unread} 지난 대화 단계에서 확인하세요.`;
       if (!edit && draft.projects.length && !draft.checked.size) return "수집할 폴더를 하나 이상 고르세요.";
       if (draft.rest === "skip" && !draft.checked.size) return "수집할 폴더를 하나 이상 고르거나, 새로 생기는 프로젝트 폴더도 수집을 켜세요.";
-      const empty = servers.find((server) => !server.folders.size);
+      const empty = servers.find((target) => !target.folders.size);
       if (empty) return `${empty.label}에 쌓을 폴더를 하나 이상 고르거나, 서버 단계에서 그 서버를 끄세요.`;
       return null;
     },
@@ -448,7 +456,6 @@ function matrix(draft, servers, { restBox, autoBox, autoCount }, onChange) {
   const columns = [{ label: "내 서버", folders: draft.checked, own: true }, ...servers];
   const template = { gridTemplateColumns: `minmax(0, 1fr) 70px ${columns.map(() => "96px").join(" ")}` };
   const rows = treeRows(draft.projects, columns, { open: draft.open, template, onChange });
-  restBox.addEventListener("change", onChange);
   return h("div", { class: "pt" },
     h("div", { class: "pr m g", style: template }, h("span", {}), h("span", {}), h("span", { class: "gl" }, "쌓을 곳")),
     h("div", { class: "pr m h", style: template }, h("span", {}, "폴더"), h("span", { class: "c" }, "대화"),

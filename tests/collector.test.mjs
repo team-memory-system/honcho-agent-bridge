@@ -344,9 +344,13 @@ test("Claude Agent SDK sessions are left out by default and, with 자동 실행 
     assert.equal(assistant.direct_user, false, name);
     assert.equal(assistant.automation_kind, undefined, name);
     const sessionWrites = api.requests.filter((entry) => entry.url === "/v3/workspaces/memory/sessions");
-    const lastSessionWrite = sessionWrites.at(-1);
-    // The session's peers are written before its messages.
-    assert.ok(api.requests.indexOf(lastSessionWrite) < api.requests.indexOf(messageWrite), name);
+    // The session's peers are written before its messages; once those are in, the
+    // session is written again to say when its last turn was.
+    const before = sessionWrites.filter((entry) => api.requests.indexOf(entry) < api.requests.indexOf(messageWrite));
+    const lastSessionWrite = before.at(-1);
+    assert.equal(sessionWrites.at(-1).body.metadata.last_turn_at, "2026-01-01T00:00:01Z", name);
+    assert.equal(lastSessionWrite.body.metadata.last_turn_at, undefined, name);
+    assert.deepEqual(sessionWrites.at(-1).body.peers, lastSessionWrite.body.peers, name);
     if (userPeer === "automation_claude") {
       assert.equal(user.direct_user, false, name);
       assert.equal(user.memory_origin, "claude_automation", name);
@@ -357,7 +361,7 @@ test("Claude Agent SDK sessions are left out by default and, with 자동 실행 
       assert.equal(user.direct_user, true, name);
       assert.equal(user.memory_origin, "claude_direct_user", name);
       assert.equal(user.automation_kind, undefined, name);
-      assert.equal(sessionWrites.length, 1, name);
+      assert.equal(before.length, 1, name);
       assert.equal(lastSessionWrite.body.peers.automation_claude, undefined, name);
     }
   }

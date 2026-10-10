@@ -55,6 +55,14 @@ export async function loadConfig() {
   return config;
 }
 
+// The file that holds new turns back while past conversations go in (past.mjs, queue.mjs).
+export const HOLD_ENV = "HONCHO_AGENT_HOLD";
+
+/** Where that file is for this install. */
+export function holdPath(config) {
+  return path.join(installPaths(config).dataDir, "spool", "hold.json");
+}
+
 // Where the collector reads which folders this computer's own server takes.
 export const COLLECT_FOLDERS_ENV = "HONCHO_AGENT_COLLECT_FOLDERS";
 // Set to "1" when the own server also takes conversations no person took part in.
@@ -98,6 +106,7 @@ export function configEnvironment(config, provider = "") {
     HONCHO_WORKSPACE_ID: config.honcho?.workspaceId || "memory",
     HONCHO_USER_NAME: config.user?.peerId || "",
     HONCHO_AGENT_GATE_SPOOL: path.join(paths.dataDir, "spool"),
+    [HOLD_ENV]: holdPath(config),
     HONCHO_AGENT_GATE_LOG: path.join(paths.dataDir, "logs", "gate.log"),
     // The team login and device keys a team server takes (team-auth.mjs).
     HONCHO_AGENT_TEAM_AUTH: path.join(paths.dataDir, "state", "team-auth.json"),

@@ -1,6 +1,6 @@
 // The setup UI can install hooks and start services, so the checks that matter are:
 // it only listens to a browser on this machine, it runs the same CLI a terminal
-// would, and an uploaded ChatGPT export actually lands in Honcho.
+// would, and an uploaded ChatGPT export is kept for 지난 대화 and never left behind.
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -9,7 +9,7 @@ import path from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createUiServer, rejectUnsafeRequest, shareEnableInvocation, shareJoinInvocation, teammateInvocation } from "../scripts/ui.mjs";
+import { createUiServer, pastOverviewInvocation, rejectUnsafeRequest, shareEnableInvocation, shareJoinInvocation, teammateInvocation } from "../scripts/ui.mjs";
 import { fixtureZip } from "./chatgpt-fixture.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -72,6 +72,8 @@ before(async () => {
   process.env.HONCHO_USER_NAME = "user_test";
   process.env.HONCHO_AGENT_HOOK_STATE = path.join(workdir, "state.json");
   process.env.HONCHO_AGENT_HOOK_LOG = path.join(workdir, "collector.log");
+  // What the app keeps (an uploaded export, among others) stays in this test's own folder.
+  process.env.HONCHO_AGENT_BRIDGE_HOME = path.join(workdir, "app");
 
   port = await availablePort();
   server = createUiServer();
@@ -109,7 +111,9 @@ test("only a same-origin browser on this machine may drive the UI", async () => 
   // An image on another site sends a GET with no Origin, so nothing that changes
   // this computer may run on one.
   for (const route of ["/api/setup/apply", "/api/setup/plan", "/api/server/prepare", "/api/server/start", "/api/server/stop",
-    "/api/server/verify", "/api/host/start", "/api/gateway/open", "/api/targets/add", "/api/teammates/add"]) {
+    "/api/server/verify", "/api/host/start", "/api/gateway/open", "/api/targets/add", "/api/teammates/add",
+    "/api/past/scan", "/api/past/overview", "/api/past/plan", "/api/past/hold", "/api/past/start", "/api/past/retry", "/api/past/stop",
+    "/api/past/chatgpt/drop"]) {
     assert.equal((await send(route)).status, 405, `${route} must not run on a GET`);
     assert.equal((await send(route, { method: "HEAD" })).status, 405, `${route} must not run on a HEAD`);
   }
@@ -132,64 +136,66 @@ test("status runs the same detect and doctor a terminal would", async () => {
   assert.ok(Array.isArray(response.body.doctor.checks), "doctor reports its checks");
 });
 
-test("an uploaded ChatGPT export reaches Honcho, and re-uploading it adds nothing", async () => {
+test("a ChatGPT export chosen in setup is read and kept until setup puts it in, one file per account", async () => {
   honchoRequests = [];
-  const exported = JSON.stringify([
-    {
-      conversation_id: "conv-ui",
-      title: "업로드 테스트",
-      create_time: 1_700_000_000,
-      current_node: "a1",
-      mapping: {
-        root: { id: "root", parent: null, children: [], message: null },
-        u1: { id: "u1", parent: "root", children: [], message: { id: "u1", author: { role: "user" }, create_time: 1_700_000_000, content: { content_type: "text", parts: ["웹에서 물어본 질문"] } } },
-        a1: { id: "a1", parent: "u1", children: [], message: { id: "a1", author: { role: "assistant" }, create_time: 1_700_000_001, content: { content_type: "text", parts: ["웹에서 받은 답"] } } },
-      },
-    },
-  ]);
-
-  const first = await send("/api/import/chatgpt", { method: "POST", raw: exported });
-  assert.equal(first.status, 200);
-  assert.equal(first.body.ok, true, JSON.stringify(first.body));
-  assert.equal(first.body.conversations, 1);
-  assert.equal(first.body.imported_sessions, 1);
-  assert.equal(first.body.new_messages, 2);
-  assert.equal(first.body.uploaded_bytes, Buffer.byteLength(exported));
-
-  const write = honchoRequests.find((entry) => entry.url?.endsWith("/messages"));
-  assert.deepEqual(write.body.messages.map((message) => message.content), ["웹에서 물어본 질문", "웹에서 받은 답"]);
-
-  const writesBefore = honchoRequests.filter((entry) => entry.url?.endsWith("/messages")).length;
-  const second = await send("/api/import/chatgpt", { method: "POST", raw: exported });
-  assert.equal(second.body.new_messages, 0);
-  assert.equal(honchoRequests.filter((entry) => entry.url?.endsWith("/messages")).length, writesBefore);
-});
-
-test("the export zip itself can be uploaded, numbered shards and all", async () => {
-  honchoRequests = [];
-  const uploaded = await send("/api/import/chatgpt", { method: "POST", raw: fixtureZip() });
+  const zip = fixtureZip();
+  const uploaded = await send("/api/past/chatgpt?name=chatgpt-export.zip", { method: "POST", raw: zip });
   assert.equal(uploaded.status, 200);
   assert.equal(uploaded.body.ok, true, JSON.stringify(uploaded.body));
-  assert.equal(uploaded.body.conversations, 7, "both conversations-00N.json shards are read");
-  assert.equal(uploaded.body.imported_sessions, 5);
-  assert.equal(uploaded.body.new_messages, 16);
-  assert.ok(honchoRequests.some((entry) => entry.url?.endsWith("/messages")));
+  assert.equal(uploaded.body.file.name, "chatgpt-export.zip");
+  assert.equal(uploaded.body.file.account, "someone@example.invalid");
+  assert.equal(uploaded.body.file.conversations, 5, "the empty one is left out, the older copy of one too");
+  assert.equal(uploaded.body.uploaded_bytes, zip.length);
+  assert.equal(honchoRequests.length, 0, "nothing goes to the server before setup applies");
+
+  // A newer export of the same account takes the older one's place.
+  const newer = await send("/api/past/chatgpt?name=newer.zip", { method: "POST", raw: fixtureZip({ continued: true }) });
+  assert.equal(newer.body.file.id, uploaded.body.file.id);
+  const files = (await send("/api/past/scan/status")).body.chatgpt;
+  assert.deepEqual(files.map((file) => [file.name, file.conversations, file.applied]), [["newer.zip", 6, false]]);
+
+  const dropped = await send("/api/past/chatgpt/drop", { method: "POST", body: { id: uploaded.body.file.id } });
+  assert.equal(dropped.body.ok, true, JSON.stringify(dropped.body));
+  assert.deepEqual((await send("/api/past/scan/status")).body.chatgpt, []);
+  assert.equal((await send("/api/past/chatgpt/drop", { method: "POST", body: { id: "--all" } })).body.ok, false);
 });
 
 test("an empty or unreadable upload is reported instead of silently succeeding", async () => {
-  const empty = await send("/api/import/chatgpt", { method: "POST", raw: "", headers: { "content-type": "application/json", "content-length": "0" } });
+  const empty = await send("/api/past/chatgpt", { method: "POST", raw: "", headers: { "content-type": "application/json", "content-length": "0" } });
   assert.equal(empty.body.ok, false);
 
-  const garbage = await send("/api/import/chatgpt", { method: "POST", raw: "{not json" });
+  const garbage = await send("/api/past/chatgpt", { method: "POST", raw: "{not json" });
   assert.equal(garbage.body.ok, false);
   assert.match(String(garbage.body.error), /invalid JSON|not a ChatGPT export/);
+
+  const nothing = await send("/api/past/chatgpt", { method: "POST", raw: JSON.stringify([]) });
+  assert.equal(nothing.body.ok, false);
 });
 
 test("the UI never leaves an uploaded export behind", async () => {
   const before = (await fsp.readdir(os.tmpdir())).filter((name) => name.startsWith("honcho-bridge-upload-"));
-  await send("/api/import/chatgpt", { method: "POST", raw: JSON.stringify([]) });
+  await send("/api/past/chatgpt", { method: "POST", raw: JSON.stringify([]) });
+  await send("/api/past/chatgpt?name=x.zip", { method: "POST", raw: fixtureZip() });
   const after = (await fsp.readdir(os.tmpdir())).filter((name) => name.startsWith("honcho-bridge-upload-"));
   assert.deepEqual(after, before, "the spooled copy of someone's conversations is removed");
+});
+
+test("the projects step asks the server being chosen with its tokens in the environment only", () => {
+  const { args, env } = pastOverviewInvocation({
+    honchoUrl: "https://memory.example",
+    workspace: "memory",
+    agents: ["claude"],
+    store: { kind: "cloud", remote: "gdrive", path: "백업", extra: "--x" },
+    chatgpt: ["a-0123456789ab", "--everything"],
+    newServer: false,
+    apiToken: "secret-token",
+  });
+  assert.deepEqual(args, [
+    "past", "overview", "--honcho-url=https://memory.example", "--workspace=memory", "--agents=claude",
+    '--store={"kind":"cloud","remote":"gdrive","path":"백업"}', "--chatgpt=a-0123456789ab",
+  ]);
+  assert.equal(env.HONCHO_API_TOKEN, "secret-token");
+  assert.ok(!args.join(" ").includes("secret-token"));
 });
 
 test("the UI serves its pages from an installed runtime, where everything is one directory", async (t) => {
@@ -268,14 +274,13 @@ test("every option the setup steps send is one the server accepts", async () => 
   for (const key of secrets) assert.equal(key in local, false, `${key} goes to this computer's server`);
 });
 
-test("a first setup ticks no folder, and 수정 shows what the computer collects now", async () => {
+test("a first setup ticks every folder, and 수정 shows what the computer collects now", async () => {
   const { tickedFolders } = await import("../ui/lib/collect.js");
   const projects = [{ path: "/w/a" }, { path: "/w/b" }, { path: "/w/new" }];
-  const ticked = (saved, options) => [...tickedFolders(projects, saved, options)].sort();
-  assert.deepEqual(ticked(null), [], "a first setup leaves every folder for the person to pick");
-  assert.deepEqual(ticked(null, { edit: true }), ["/w/a", "/w/b", "/w/new"], "a computer that never chose collects every folder");
+  const ticked = (saved) => [...tickedFolders(projects, saved)].sort();
+  assert.deepEqual(ticked(null), ["/w/a", "/w/b", "/w/new"], "no folder is left out until the person clears it");
   assert.deepEqual(ticked({ take: ["/w/a"], skip: ["/w/b"], rest: "take" }), ["/w/a", "/w/new"], "a folder made later goes by the rest");
-  assert.deepEqual(ticked({ take: ["/w/a"], skip: ["/w/b"], rest: "skip" }, { edit: true }), ["/w/a"]);
+  assert.deepEqual(ticked({ take: ["/w/a"], skip: ["/w/b"], rest: "skip" }), ["/w/a"]);
 });
 
 test("the projects step shows the folders as a tree, a folder that only leads to one other joined to it", async () => {
@@ -547,7 +552,7 @@ test("every screen a link opens exists, and so does every window of 기억 설�
   views.push("start");
   const settings = await fsp.readFile(path.join(ROOT, "ui", "views", "settings.js"), "utf8");
   const windows = [...settings.match(/const windows = \{([\s\S]*?)\n    \};/)[1].matchAll(/^\s+([a-z]+): \(\)/gm)].map((match) => match[1]).sort();
-  assert.deepEqual(windows, ["collect", "import", "tools"]);
+  assert.deepEqual(windows, ["collect", "past", "tools"]);
   const tabs = await fsp.readFile(path.join(ROOT, "ui", "lib", "tabs.js"), "utf8");
   const tabbed = [...tabs.match(/const TABS = \{([\s\S]*?)\n\};/)[1].matchAll(/\["([a-z]+)", "/g)].map((match) => match[1]);
   assert.deepEqual(tabbed, ["memory", "ask", "server", "models", "share"]);

@@ -237,25 +237,41 @@ test("the flow route counts what waits to go and what went, for the agents that 
 
   const response = await send("/api/app/flow");
   assert.equal(response.status, 200);
-  assert.deepEqual(response.body, { ok: true, collect: { pending: 2, sessions: 2, lastSentAt: "2026-10-07T01:30:00.000Z" }, targets: [], backfill: null });
+  assert.deepEqual(response.body, { ok: true, collect: { pending: 2, sessions: 2, lastSentAt: "2026-10-07T01:30:00.000Z" }, targets: [], past: null });
 
   // A state caught mid-write counts as nothing sent until it is whole again.
   await write(path.join(dataDir, "state", "claude.json"), "{\"version\":1,\"sess");
   assert.deepEqual((await send("/api/app/flow")).body.collect, { pending: 2, sessions: 0, lastSentAt: null });
 
-  // Past conversations on their way: a run still going says how far it got; a run
-  // whose process is gone counts as not running, and the last finished one stays.
-  await write(path.join(dataDir, "state", "backfill-status.json"), {
+  // 지난 대화 on their way: a run still going says how far it got and the new turns
+  // it holds; a run whose process is gone counts as not running, how the last one
+  // ended stays, and the failures are those the ledger still has.
+  await write(path.join(dataDir, "past", "status.json"), {
     version: 1,
-    running: { pid: process.pid, startedAt: "2026-10-07T02:00:00.000Z", considered: 40, examined: 12, remaining: 28, sent_sessions: 9, failed: 0 },
-    lastRun: { startedAt: "2026-10-06T02:00:00.000Z", finishedAt: "2026-10-06T02:05:00.000Z", considered: 5, examined: 5, remaining: 0, sent_sessions: 5, failed: 0 },
+    running: { pid: process.pid, startedAt: "2026-10-07T02:00:00.000Z", total: 40, done: 12, sent: 11, failed: 1, month: 1704103200000, from: "here", etaSec: 90 },
+    last: null,
   });
-  assert.deepEqual((await send("/api/app/flow")).body.backfill, {
-    running: { considered: 40, examined: 12, remaining: 28, sent: 9, failed: 0, at: "2026-10-07T02:00:00.000Z" },
-    lastRun: { considered: 5, examined: 5, remaining: 0, sent: 5, failed: 0, at: "2026-10-06T02:05:00.000Z" },
+  await write(path.join(dataDir, "spool", "hold.json"), { version: 1, by: "run", pid: process.pid, at: "2026-10-07T02:00:00.000Z" });
+  await write(path.join(dataDir, "past", "ledger.jsonl"), [
+    { k: "claude:a", o: "sent", from: "here", start: 1, last: 1, at: "2026-10-07T02:00:01.000Z" },
+    { k: "claude:b", o: "failed", r: "unreadable", from: "here", start: 2, last: 2, at: "2026-10-07T02:00:02.000Z" },
+  ].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+  const going = (await send("/api/app/flow")).body.past;
+  assert.equal(going.running.done, 12);
+  assert.equal(going.running.total, 40);
+  assert.equal(going.holding, true);
+  assert.deepEqual(going.held, { turns: 3, conversations: 0 }, "every turn waiting is held, whichever agent's");
+  assert.equal(going.failed, 1);
+  await write(path.join(dataDir, "past", "status.json"), {
+    version: 1,
+    running: { pid: 2 ** 22 + 7, startedAt: "2026-10-07T02:00:00.000Z" },
+    last: { finishedAt: "2026-10-06T02:05:00.000Z", total: 5, done: 5, sent: 5, failed: 0 },
   });
-  await write(path.join(dataDir, "state", "backfill-status.json"), { version: 1, running: { pid: 2 ** 22 + 7, considered: 1 }, lastRun: null });
-  assert.deepEqual((await send("/api/app/flow")).body.backfill, { running: null, lastRun: null });
+  await fsp.rm(path.join(dataDir, "spool", "hold.json"));
+  const ended = (await send("/api/app/flow")).body.past;
+  assert.equal(ended.running, null);
+  assert.equal(ended.last.sent, 5);
+  assert.equal(ended.holding, false);
 });
 
 test("the app's read-only routes answer only GET", async () => {

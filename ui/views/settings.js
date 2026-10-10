@@ -1,12 +1,14 @@
 // 기억 설정: what this computer does with its own conversations and agents, as three
-// blocks on one page. Each block's button opens a window: 대화 수집's 수정 is first
-// setup's own steps (lib/collect.js), MCP 도구 and ChatGPT 기록 open their own. An
-// address can name a window to open with the page (computer/collect, computer/tools,
-// computer/import), which is how links and the setup skill open them. Letting the
-// owner's other computers in is 서버 → 공유 (share.js).
+// blocks on one page. 대화 수집's 수정 is first setup's own steps (lib/collect.js,
+// lib/past.js); 지난 대화 shows where the past conversations came from and how far
+// they went in, and its 더 가져오기 opens the same steps at 지난 대화; MCP 도구
+// opens its own window. An address can name a window to open with the page
+// (computer/collect, computer/past, computer/tools), which is how links and the
+// setup skill open them. Letting the owner's other computers in is 서버 → 공유
+// (share.js).
 import { get, post } from "../lib/api.js";
 import { h, clear } from "../lib/dom.js";
-import { ago, number } from "../lib/format.js";
+import { number } from "../lib/format.js";
 import { block, kv, modal, stepper } from "../lib/kit.js";
 import {
   AGENTS,
@@ -15,6 +17,7 @@ import {
   applyTargets,
   collectDraft,
   detectAgents,
+  draftServer,
   folderSummary,
   loadProjects,
   planProblems,
@@ -23,12 +26,14 @@ import {
   serverStep,
   setupBody,
 } from "../lib/collect.js";
+import { backupToStore, monthText, pastStep, periodText, planPast, shortDay, startPast } from "../lib/past.js";
 import { sendRequest, teamDirectory } from "../lib/team.js";
 import { TOOL_GROUPS, TOOL_INFO } from "../lib/tools.js";
-import { app, loadContext, refreshStatus, savePrefs, workspace } from "../lib/state.js";
+import { app, loadContext, refreshStatus } from "../lib/state.js";
 import { button, busy, errorNotice, notice, pageHead, spinner, tag, toast, toggle } from "../lib/ui.js";
 
-const STEPS = ["서버", "에이전트", "프로젝트"];
+const STEPS = ["서버", "에이전트", "지난 대화", "프로젝트"];
+const PAST_STEP = 2;
 
 // ── 대화 수집 ────────────────────────────────────────────
 
@@ -56,31 +61,6 @@ function collectBlock(openCollect) {
       kv("에이전트", "없음"));
   }
   const agents = Object.keys(AGENTS).filter((name) => context.agents?.[name]).map((name) => AGENTS[name]).join(" · ") || "없음";
-  const past = h("span", { class: "muted" }, "확인 중");
-  const refreshPast = () => get("/api/backfill/status").then(showPast).catch(() => clear(past));
-  // 멈추기 asks the run to stop after the conversation it is sending; 이어서 보내기
-  // starts one that skips what is already in.
-  const pastButton = (label, path) => button(label, { kind: "small quiet", onClick: (event) => busy(event.currentTarget, async () => {
-    const result = await post(path, {});
-    if (result?.ok === false) throw new Error(result.error || "하지 못했습니다.");
-    await refreshPast();
-  }) });
-  function showPast(status) {
-    if (status?.running) {
-      const { examined = 0, considered = 0 } = status.running;
-      clear(past, `${status.stopping ? "멈추는 중" : "보내는 중"} · ${number(examined)}/${number(considered)}`,
-        status.stopping ? null : [" ", pastButton("멈추기", "/api/backfill/stop")]);
-      // Asked again while the page still shows this line.
-      setTimeout(() => { if (past.isConnected) refreshPast(); }, 3_000);
-    } else if (status?.lastRun?.cancelled) {
-      clear(past, `${ago(status.lastRun.finishedAt)} 멈춤 · ${number(status.lastRun.remaining || 0)}개 남음 `, pastButton("이어서 보내기", "/api/backfill/start"));
-    } else if (status?.lastRun?.finishedAt) {
-      clear(past, `${ago(status.lastRun.finishedAt)} 다 보냄`, status.lastRun.failed ? [" ", tag(`${number(status.lastRun.failed)}개 실패`, "warn")] : null);
-    } else {
-      clear(past, "새 대화만 수집 중");
-    }
-  }
-  refreshPast();
   return block({ title: "대화 수집", tag: tag("켜짐", "ok"), actions: [button("수정", { onClick: openCollect })] },
     kv("서버", serverLine(context)),
     kv("peer 이름", [h("span", { class: "mono" }, context.user?.peerId || ""),
@@ -88,24 +68,29 @@ function collectBlock(openCollect) {
       context.team?.email ? h("span", { class: "muted" }, ` · ${context.team.email}에서`) : null,
       context.workspace && context.workspace !== "memory" ? h("span", { class: "muted" }, ` · workspace ${context.workspace}`) : null]),
     kv("에이전트", agents),
-    kv("프로젝트 폴더", folderLine(context.collect, context.collectAutomation)),
-    kv("지난 대화", past));
+    kv("프로젝트 폴더", folderLine(context.collect, context.collectAutomation)));
 }
 
-/** 대화 수집 → 수정: first setup's steps for this computer, any step one press away. */
-function openCollectWindow(onApplied) {
+/**
+ * 대화 수집 → 수정: first setup's steps for this computer, any step one press away;
+ * 더 가져오기 opens it at 지난 대화 (`at`).
+ */
+function openCollectWindow(onApplied, { at: startAt = 0 } = {}) {
   const context = app.context || {};
   const draft = collectDraft(context);
-  let at = 0;
+  const edit = Boolean(context.configured);
+  let at = startAt;
   let steps = [];
   let company = null;
   const problem = h("div", {});
   const win = modal({ title: "대화 수집 설정" });
 
+  const newServer = () => draft.server === "here" && !context.localServer;
   const build = () => [
     serverStep(draft, context, { peer: !context.configured || !context.user?.peerId, others: Boolean(context.configured), company }),
-    agentsStep(draft, context),
-    projectsStep(draft, context, { edit: context.configured }),
+    agentsStep(draft),
+    pastStep(draft, context, { edit, newServer: newServer() }),
+    projectsStep(draft, context, { edit, server: draftServer(draft, context, { newServer: newServer() }) }),
   ];
   const goTo = (index) => {
     // Every step's choice lives in the draft, so a step can be left half done.
@@ -124,8 +109,17 @@ function openCollectWindow(onApplied) {
     }
     const outcome = await applySetup(setupBody(draft, context));
     if (!outcome.ok) { clear(problem, planProblems(outcome.result) || notice("bad", "적용하지 못했습니다.")); return; }
-    // What was already there is skipped, so this only sends what the new choice adds.
-    await post("/api/backfill/start", {}).catch(() => {});
+    // The past conversations the new choice adds, in the order they were started:
+    // what the server holds already is left out.
+    try {
+      await backupToStore(draft);
+      const plan = await planPast(draft);
+      if (plan.total) await startPast();
+    } catch (error) {
+      await loadContext();
+      clear(problem, notice("bad", h("b", {}, "대화 수집은 적용했지만 지난 대화는 쌓지 못했습니다."), h("div", {}, error.message)));
+      return;
+    }
     const failed = await applyTargets(draft);
     // The company server: its owner is asked, and it stays off until they approve.
     if (draft.company?.on) {
@@ -154,11 +148,19 @@ function openCollectWindow(onApplied) {
     clear(problem);
     win.steps(stepper(STEPS, at, { onPick: goTo }));
     win.body(steps[at].body, problem);
+    // A step still reading (지난 대화) keeps 다음 until it is done, and says so beside it.
+    const waiting = h("span", { class: "foot-hint" });
+    const primary = at < steps.length - 1
+      ? button("다음", { kind: "primary", onClick: next })
+      : button("적용", { kind: "primary", onClick: (event) => apply(event.currentTarget) });
+    steps[at].watch?.(({ blocked, hint }) => {
+      primary.disabled = blocked;
+      waiting.textContent = hint || "";
+    });
     win.foot(button("취소", { kind: "quiet", onClick: () => win.close() }), [
+      waiting,
       at > 0 ? button("이전", { kind: "quiet", onClick: () => goTo(at - 1) }) : null,
-      at < steps.length - 1
-        ? button("다음", { kind: "primary", onClick: next })
-        : button("적용", { kind: "primary", onClick: (event) => apply(event.currentTarget) }),
+      primary,
     ]);
   }
   detectAgents({ fresh: true });
@@ -253,57 +255,90 @@ async function openToolsWindow(onApplied) {
   ]);
 }
 
-// ── ChatGPT 기록 ─────────────────────────────────────────
+// ── 지난 대화 ────────────────────────────────────────────
 
-function chatgptBlock(openImport) {
-  const held = h("span", { class: "muted" }, "확인 중");
-  get(`/api/app/sessions?${new URLSearchParams({ workspace: workspace(), size: "1", source: "chatgpt" })}`)
-    .then((result) => {
-      const last = app.prefs.chatgptImport?.at;
-      clear(held, result?.total ? `${number(result.total)}개` : "없음", last ? ` · ${ago(last)} 가져옴` : "");
-    })
-    .catch(() => clear(held, "기억 서버에 닿지 않습니다"));
-  return block({ title: "ChatGPT 기록", actions: [button("가져오기", { onClick: openImport })] },
-    kv("기억에 있는 대화", held));
+const FAILURES = [["unreadable", "파일을 읽지 못함"], ["refused", "서버가 거절"], ["unreachable", "서버에 닿지 않음"]];
+const dash = (value) => (value ? number(value) : "–");
+
+/** A place past conversations came from, as the table names it. */
+function sourceName(row) {
+  if (row.kind === "here") return "이 컴퓨터";
+  if (row.kind === "store") return ["백업 저장소 ", h("span", { class: "mono muted" }, row.label || "")];
+  return ["ChatGPT ", h("span", { class: "mono muted" }, row.account || row.name || "")];
 }
 
-/** A ChatGPT export, read and put into this computer's memory server. */
-export function openImportWindow(onApplied) {
-  const win = modal({ title: "ChatGPT 기록 가져오기", big: true, small: true });
-  const file = h("input", { type: "file", hidden: true, accept: ".zip,.json,application/zip,application/json" });
-  const shown = h("span", { class: "muted", style: { fontSize: "12.5px" } }, "고른 파일 없음");
-  const result = h("div", {});
-  const start = button("가져오기", { kind: "primary", disabled: true });
-  file.addEventListener("change", () => {
-    const chosen = file.files?.[0];
-    start.disabled = !chosen;
-    clear(shown, chosen ? [h("span", { class: "mono" }, chosen.name), ` · ${(chosen.size / 1024 / 1024).toFixed(1)}MB`] : "고른 파일 없음");
-    clear(result);
-  });
-  start.addEventListener("click", () => busy(start, async () => {
-    const chosen = file.files?.[0];
-    if (!chosen) return;
-    clear(result, h("div", { class: "waitline" }, spinner(), "올리고 읽는 중입니다. 대화가 많으면 몇 분 걸립니다."));
-    const response = await fetch("/api/import/chatgpt", { method: "POST", headers: { "content-type": "application/json" }, body: chosen });
-    const payload = await response.json().catch(() => ({ ok: false, error: "결과를 읽지 못했습니다." }));
-    if (!payload.ok) {
-      clear(result, notice("bad", h("b", {}, "가져오지 못했습니다."), ` ${payload.error || ""}`));
+function moment(iso) {
+  const date = new Date(iso);
+  return `${shortDay(date.getTime())} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * 지난 대화: each place the past conversations came from, how many went in, how
+ * many were the same as another place's and how many failed; the order they went
+ * in; and while they go, how far and 멈추기. 더 가져오기 opens 수정 at 지난 대화.
+ */
+function pastBlock(openMore) {
+  const head = h("span", {});
+  const rows = h("div", {}, kv("가져온 곳", spinner()));
+  const section = block({ title: "지난 대화", tag: head, actions: [button("더 가져오기", { onClick: openMore })] }, rows);
+  const act = (label, path, { kind = "small" } = {}) => button(label, { kind, onClick: (event) => busy(event.currentTarget, async () => {
+    const result = await post(path, {});
+    if (result?.ok === false) throw new Error(result.error || "하지 못했습니다.");
+    await refresh();
+  }) });
+  async function refresh() {
+    let status;
+    try {
+      status = await get("/api/past/status");
+    } catch (error) {
+      clear(rows, errorNotice(error));
       return;
     }
-    savePrefs({ chatgptImport: { at: new Date().toISOString(), conversations: payload.conversations ?? 0, newMessages: payload.new_messages ?? 0 } });
-    win.close("ok");
-    onApplied?.();
-    toast(payload.new_messages
-      ? `대화 ${number(payload.imported_sessions ?? 0)}개를 가져왔습니다.`
-      : "이미 들어 있는 기록이었습니다.", "ok");
-  }));
-  win.body(
-    h("p", { class: "lead", style: { marginTop: "4px" } }, "ChatGPT의 설정 → 데이터 제어 → 데이터 내보내기로 받은 zip 파일을 고르세요."),
-    h("div", { class: "file" }, button("파일 고르기", { kind: "small", onClick: () => file.click() }), shown, file),
-    h("p", { class: "hint" }, "zip을 풀지 말고 그대로 고릅니다. 같은 파일을 다시 가져와도 겹쳐 쌓이지 않습니다."),
-    result);
-  win.foot(null, [button("취소", { kind: "quiet", onClick: () => win.close() }), start]);
-  win.open();
+    if (!section.isConnected && section.dataset.shown) return;
+    section.dataset.shown = "1";
+    draw(status);
+    if (status?.running) setTimeout(() => { if (section.isConnected) refresh(); }, 3000);
+  }
+  function draw(status) {
+    const { running, last, failures = {}, order = {}, held = {} } = status || {};
+    const sources = (status?.sources || []).filter((row) => row.conversations);
+    clear(head, running ? tag(status.stopping ? "멈추는 중" : "쌓는 중", "warn")
+      : last?.stopped === "unreachable" ? tag("서버 기다리는 중", "warn")
+        : last?.cancelled ? tag("멈춤")
+          : last?.finishedAt ? tag("다 쌓음", "ok") : null);
+    if (!sources.length && !running) {
+      clear(rows, kv("가져온 곳", "아직 없음"));
+      return;
+    }
+    const table = h("table", { class: "mt" },
+      h("thead", {}, h("tr", {}, h("th", {}, "가져온 곳"), ["대화", "쌓음", "겹쳐서 뺌", "실패"].map((label) => h("th", { class: "num" }, label)))),
+      h("tbody", {}, sources.map((row) => h("tr", {},
+        h("td", {}, sourceName(row)),
+        h("td", { class: "num" }, number(row.conversations)),
+        h("td", { class: "num" }, number(row.stacked)),
+        h("td", { class: "num" }, dash(row.dupes)),
+        h("td", { class: "num" }, dash(row.failed))))));
+    const from = running ? sources.find((row) => row.id === running.from) : null;
+    clear(rows,
+      h("div", { class: "mt-wrap" }, table),
+      running ? kv("쌓는 중", [
+        `${number(running.done || 0)} / ${number(running.total ?? 0)}`,
+        from ? [" · ", sourceName(from)] : "",
+        running.month ? ` · ${monthText(running.month)} 대화까지` : "",
+        held.conversations ? h("div", { class: "s" }, `새 대화 ${number(held.conversations)}개는 ${from?.kind === "chatgpt" ? "이 파일" : "지난 대화"} 다음에 쌓입니다.`) : null,
+      ], status.stopping ? null : act("멈추기", "/api/past/stop", { kind: "small quiet" })) : null,
+      !running && last?.cancelled ? kv("멈춤", [`${moment(last.finishedAt)}에 멈춤 · ${number(last.done || 0)} / ${number(last.total || 0)}`,
+        h("div", { class: "s" }, "이어서 쌓으면 멈춘 곳부터 시간순으로 쌓습니다.")], act("이어서 쌓기", "/api/past/start")) : null,
+      !running && last?.stopped === "unreachable" ? kv("멈춤", ["서버에 닿지 않아 멈췄습니다.",
+        h("div", { class: "s" }, "새 대화는 기다리게 해 두었습니다. 서버가 다시 답하면 저절로 이어서 쌓습니다.")]) : null,
+      order.first ? kv("쌓은 순서", [`시작한 시각순 · ${periodText(order.first, order.last)}`,
+        !running && last?.finishedAt && !last.cancelled && !last.stopped ? h("div", { class: "s" }, `${moment(last.finishedAt)}에 다 쌓음`) : null]) : null,
+      failures.total ? kv("실패", [`${number(failures.total)}개 `,
+        h("span", { class: "muted" }, FAILURES.filter(([key]) => failures[key]).map(([key, label]) => `· ${label} ${number(failures[key])}`).join(" "))],
+      running ? null : act("다시 시도", "/api/past/retry")) : null);
+  }
+  refresh();
+  return section;
 }
 
 // ── The page ─────────────────────────────────────────────
@@ -317,15 +352,15 @@ export default {
       h("div", { class: "page-body" }, body));
     const windows = {
       collect: () => openCollectWindow(draw),
+      past: () => openCollectWindow(draw, { at: PAST_STEP }),
       tools: () => openToolsWindow(draw),
-      import: () => openImportWindow(draw),
     };
     async function draw() {
       const configured = Boolean(app.context?.configured);
       clear(body,
         collectBlock(windows.collect),
-        configured ? await toolsBlock(windows.tools) : null,
-        configured ? chatgptBlock(windows.import) : null);
+        configured ? pastBlock(windows.past) : null,
+        configured ? await toolsBlock(windows.tools) : null);
     }
     await draw();
     const open = windows[params[0]];

@@ -376,6 +376,31 @@ async function startsWithZipSignature(filePath) {
   }
 }
 
+/**
+ * The account an export belongs to: the email in its user.json, or null. A bare
+ * conversations.json, or a folder, says nothing about whose it is.
+ */
+export async function readExportAccount(inputPath) {
+  let archive = null;
+  try {
+    if (!(await startsWithZipSignature(inputPath))) return null;
+    archive = await ZipArchive.open(inputPath);
+    const entry = (await archive.entries())
+      .filter((item) => baseName(item.name).toLowerCase() === "user.json" && !isMacCopy(item.name))
+      .sort((a, b) => a.name.split("/").length - b.name.split("/").length)[0];
+    if (!entry || entry.size > 1024 * 1024) return null;
+    const chunks = [];
+    for await (const chunk of await archive.open(entry)) chunks.push(chunk);
+    const user = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const email = typeof user?.email === "string" ? user.email.trim() : "";
+    return /^[^@\s]+@[^@\s]+$/.test(email) ? email : null;
+  } catch {
+    return null;
+  } finally {
+    await archive?.close().catch(() => {});
+  }
+}
+
 async function walkFolder(root) {
   const json = [];
   const zips = [];

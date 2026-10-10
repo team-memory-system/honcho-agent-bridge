@@ -2,11 +2,11 @@
 // subscription gateway. `cli.mjs ui open` starts it.
 //
 // Setting things up - install the hooks, bring up Honcho and its host services,
-// share the server, connect a teammate's memory to Claude Code and Codex, drop in a
-// ChatGPT export - already exists as `cli.mjs` subcommands, and runs the CLI as a
+// share the server, connect a teammate's memory to Claude Code and Codex, put past
+// conversations in - already exists as `cli.mjs` subcommands, and runs the CLI as a
 // subprocess rather than importing it, so the app and a terminal take exactly the
-// same path and there is one implementation of each step. The two exceptions are
-// marked where they are. Reading memories, the gateway's accounts and the server's
+// same path and there is one implementation of each step. The two exceptions (a
+// teammate's invite and a ChatGPT export's upload) are marked where they are. Reading memories, the gateway's accounts and the server's
 // tool switches are relayed to those programs' own APIs (app-api.mjs).
 import { execFile } from "node:child_process";
 import { createReadStream, promises as fs, realpathSync } from "node:fs";
@@ -17,11 +17,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { appContext, appFlow, localTools, relayDashboard, relayGateway, relayHoncho, sessionsPage, setLocalTool } from "./app-api.mjs";
-import { configEnvironment, loadConfig, userHome } from "./config.mjs";
+import { loadConfig, userHome } from "./config.mjs";
 import { listFolders } from "./folders.mjs";
 import { ACCESS_ENV } from "./honcho-access.mjs";
 import { FEATURES, parseFeatures } from "./prereqs.mjs";
 import { securePrivateFile } from "./private-file-permissions.mjs";
+import { addChatGpt } from "./past.mjs";
 import { conversationProjects } from "./projects.mjs";
 import { redactSecrets } from "./redact.mjs";
 import { TARGET_ID, TARGET_SECRET_ENV } from "./targets.mjs";
@@ -35,14 +36,14 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // runtime everything has been flattened into one directory, with ui/ inside it.
 const INSTALLED = path.basename(HERE) !== "scripts";
 const CLI = path.join(HERE, "cli.mjs");
-const COLLECTOR = path.join(HERE, "collector.mjs");
 const PUBLIC = INSTALLED ? path.join(HERE, "ui") : path.resolve(HERE, "..", "ui");
 
 const host = process.env.HONCHO_AGENT_BRIDGE_UI_HOST || "127.0.0.1";
 const port = Number(process.env.HONCHO_AGENT_BRIDGE_UI_PORT || 4180);
 
-// A ChatGPT export of a few years of conversations runs to tens of megabytes.
-const MAX_UPLOAD_BYTES = Number(process.env.HONCHO_AGENT_BRIDGE_UI_MAX_UPLOAD_BYTES || 256 * 1024 * 1024);
+// A ChatGPT export of a few years of conversations runs to tens of megabytes, and to
+// gigabytes with the images in it; it goes to disk as it arrives and is read from there.
+const MAX_UPLOAD_BYTES = Number(process.env.HONCHO_AGENT_BRIDGE_UI_MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024);
 
 const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -452,13 +453,72 @@ const BACKUP_ROUTES = {
 };
 
 /**
+ * 지난 대화 (past.mjs): the places setup reads, the numbers its projects step shows,
+ * and the run that puts the conversations in. The backup store and the ChatGPT
+ * files chosen go as one `--name=value` each, the store as JSON; the server being
+ * chosen is reached with the tokens the setup form holds, in the environment only.
+ */
+const PAST_FILE_ID = /^[af]-[0-9a-f]{12}$/;
+
+function pastStoreOption(body) {
+  const store = body?.store;
+  if (!store || typeof store !== "object" || Array.isArray(store)) return [];
+  const spec = store.kind === "cloud"
+    ? { kind: "cloud", remote: String(store.remote ?? ""), path: String(store.path ?? "") }
+    : { kind: "folder", path: String(store.path ?? "") };
+  return [`--store=${JSON.stringify(spec)}`];
+}
+
+function pastChatGptOption(body) {
+  const ids = Array.isArray(body?.chatgpt) ? body.chatgpt.filter((id) => typeof id === "string" && PAST_FILE_ID.test(id)) : [];
+  return ids.length ? [`--chatgpt=${ids.join(",")}`] : [];
+}
+
+export function pastOverviewInvocation(body = {}) {
+  return {
+    args: [
+      "past", "overview",
+      ...inlineOption("honcho-url", body.honchoUrl),
+      ...inlineOption("workspace", body.workspace),
+      ...inlineOption("agents", agentsValue(body.agents)),
+      ...pastStoreOption(body),
+      ...pastChatGptOption(body),
+      ...(body.newServer === true ? ["--new-server"] : []),
+      ...(body.fresh === true ? ["--fresh"] : []),
+    ],
+    env: setupEnvironment(body),
+  };
+}
+
+const PAST_ROUTES = {
+  "/api/past/scan": async (body) => runCli(["past", "scan", ...pastStoreOption(body)], { timeout: 60_000 }),
+  "/api/past/scan/status": async () => runCli(["past", "scan-status"], { timeout: 60_000 }),
+  "/api/past/chatgpt/drop": async (body) => {
+    const id = typeof body?.id === "string" && PAST_FILE_ID.test(body.id) ? body.id : null;
+    if (!id) return { ok: false, error: "Name the ChatGPT file." };
+    return runCli(["past", "chatgpt-drop", `--id=${id}`], { timeout: 60_000 });
+  },
+  "/api/past/overview": async (body) => {
+    const { args, env } = pastOverviewInvocation(body);
+    return runCli(args, { timeout: 600_000, env });
+  },
+  "/api/past/plan": async (body) => runCli(["past", "plan", ...pastStoreOption(body), ...pastChatGptOption(body), ...(body?.late === "skip" ? ["--late=skip"] : [])], { timeout: 600_000 }),
+  "/api/past/hold": async () => runCli(["past", "hold"], { timeout: 30_000 }),
+  "/api/past/start": async () => runCli(["past", "start"], { timeout: 60_000 }),
+  "/api/past/retry": async () => runCli(["past", "retry"], { timeout: 60_000 }),
+  // With no run going, a stop lets the held turns go, which can take a while.
+  "/api/past/stop": async () => runCli(["past", "stop"], { timeout: 3_600_000 }),
+  "/api/past/status": async () => runCli(["past", "status"], { timeout: 60_000 }),
+};
+
+/**
  * The CLI routes that only read. Every other one changes this computer, so it answers
  * a JSON POST only: a page on another site can make a browser send a GET here (an
  * image sends no Origin), but it cannot send a JSON POST without being refused.
  */
 const READ_ROUTES = new Set([
   "/api/targets", "/api/status", "/api/server/status", "/api/backup/status", "/api/backup/remotes", "/api/host/status",
-  "/api/backfill/status",
+  "/api/past/scan/status", "/api/past/status",
 ]);
 
 const ROUTES = {
@@ -471,10 +531,6 @@ const ROUTES = {
   }),
   "/api/setup/plan": async (body) => runCli(["setup", "plan", ...cliOptions(body)], { env: setupEnvironment(body) }),
   "/api/setup/apply": async (body) => runCli(["setup", "apply", ...cliOptions(body)], { env: setupEnvironment(body) }),
-  // Past conversations of the collected folders, sent in the background.
-  "/api/backfill/start": async () => runCli(["backfill", "start"], { timeout: 60_000 }),
-  "/api/backfill/status": async () => runCli(["backfill", "status"], { timeout: 60_000 }),
-  "/api/backfill/stop": async () => runCli(["backfill", "stop"], { timeout: 60_000 }),
   "/api/server/plan": async (body) => runCli(["server", "plan", ...profileOption(body)]),
   "/api/server/prepare": async (body) => runCli(["server", "prepare", ...profileOption(body), ...modelOption(body)]),
   "/api/server/start": async (body) => runCli(["server", "start", ...profileOption(body), ...modelOption(body)]),
@@ -485,6 +541,7 @@ const ROUTES = {
   "/api/backup/status": async (body) => runCli(["backup", "status", ...(body?.check === true ? ["--check"] : [])], { timeout: 120_000 }),
   "/api/backup/remotes": async () => runCli(["backup", "remotes"], { timeout: 60_000 }),
   ...BACKUP_ROUTES,
+  ...PAST_ROUTES,
 };
 
 /**
@@ -553,27 +610,14 @@ function cliOptions(body) {
   return args;
 }
 
-function sameOrigin(left, right) {
-  try {
-    return new URL(left).origin === new URL(right).origin;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * The collector reads where to send and with what credentials from its
- * environment, as it does under a hook. An environment that names another server
- * (HONCHO_BASE_URL) is used as it is: the saved tokens stay with their own server.
+ * A ChatGPT export chosen in setup's 지난 대화 step: read in this process and kept
+ * one conversation per file in the data folder (past.mjs) until setup puts it in,
+ * since the CLI cannot take an upload. `?name=` is the file's name as the person
+ * chose it, for the screen to show.
  */
-async function importEnvironment(env = process.env) {
-  const configured = configEnvironment(await loadConfig().catch(() => null), "chatgpt");
-  if (!configured.HONCHO_BASE_URL) return env;
-  if (env.HONCHO_BASE_URL && !sameOrigin(env.HONCHO_BASE_URL, configured.HONCHO_BASE_URL)) return env;
-  return { ...env, ...configured };
-}
-
-async function importChatGpt(req, res) {
+async function addChatGptUpload(req, res, url) {
+  const name = path.basename(String(url.searchParams.get("name") || "")).replace(/[\u0000-\u001f]/g, "").slice(0, 200) || "conversations.zip";
   let upload;
   try {
     upload = await spoolUpload(req);
@@ -582,18 +626,11 @@ async function importChatGpt(req, res) {
   }
   let payload;
   try {
-    const { stdout } = await execFileAsync(
-      process.execPath,
-      [COLLECTOR, "--provider", "chatgpt", "--export", upload.target],
-      { timeout: 3_600_000, maxBuffer: 64 * 1024 * 1024, env: await importEnvironment() },
-    );
-    payload = parseCliOutput(stdout) || { ok: false, error: "The importer returned no result." };
+    payload = await addChatGpt(await loadConfig().catch(() => null), upload.target, name);
   } catch (error) {
-    payload = (error?.stdout ? parseCliOutput(error.stdout) : null)
-      || { ok: false, error: String(error?.message || error) };
+    payload = { ok: false, error: String(error?.message || error) };
   }
-  // The spooled copy of someone's conversations goes before the answer does, so a
-  // caller that sees a result knows nothing was left on disk.
+  // The spooled copy goes before the answer does; what is kept is the one past.mjs wrote.
   await fs.rm(upload.directory, { recursive: true, force: true }).catch(() => {});
   return json(res, 200, { ...payload, uploaded_bytes: upload.size });
 }
@@ -645,8 +682,8 @@ export function createUiServer() {
     const rejection = rejectUnsafeRequest(req);
     if (rejection) return json(res, rejection.status, { error: rejection.error });
 
-    if (url.pathname === "/api/import/chatgpt" && req.method === "POST") {
-      return importChatGpt(req, res);
+    if (url.pathname === "/api/past/chatgpt" && req.method === "POST") {
+      return addChatGptUpload(req, res, url);
     }
     if (url.pathname.startsWith("/api/honcho/")) return relayHoncho(req, res, url);
     if (url.pathname.startsWith("/api/dashboard/")) return relayDashboard(req, res, url);

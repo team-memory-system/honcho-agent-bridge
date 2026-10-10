@@ -45,14 +45,16 @@ const APART = new Set(["admin"]);
 const NAV_WORDS = { audit: "로그 누가 내 기억에 물었나" };
 
 // Where an address from before the menus were regrouped (0.4.5), a page that moved
-// to another menu since (0.4.7, 0.4.8), or a page that became a window on its menu's
-// one page (0.5) goes now. `computer/collect`, `/tools` and `/import` stay: they open
-// 기억 설정 with that window open.
+// to another menu since (0.4.7, 0.4.8), a page that became a window on its menu's
+// one page (0.5), or the ChatGPT 기록 window that became 지난 대화 goes now.
+// `computer/collect`, `/past` and `/tools` stay: they open 기억 설정 with that
+// window open.
 const MOVED = {
   "computer/share": "share",
+  "computer/import": "computer/past",
   connect: "computer",
   "connect/collect": "computer/collect",
-  "connect/import": "computer/import",
+  "connect/import": "computer/past",
   "connect/share": "team",
   "connect/targets": "computer/collect",
   "computer/targets": "computer/collect",
@@ -355,7 +357,7 @@ function palette() {
     { label: "내 기억에 묻기", hint: "기억", screen: "ask", run: () => go("ask") },
     { label: "대화 수집 수정", hint: "기억 설정", words: "서버 에이전트 프로젝트 폴더 회사 서버", screen: "computer", run: () => go("computer/collect") },
     { label: "MCP 도구", hint: "기억 설정", screen: "computer", run: () => go("computer/tools") },
-    { label: "ChatGPT 기록 가져오기", hint: "기억 설정", screen: "computer", run: () => go("computer/import") },
+    { label: "지난 대화 더 가져오기", hint: "기억 설정", words: "ChatGPT 백업 저장소 내보내기 파일", screen: "computer", run: () => go("computer/past") },
     { label: "구독 계정 더하기", hint: "서버", screen: "models", run: () => go("models") },
     { label: "공유", hint: "서버", words: "다른 컴퓨터 붙이기 서버 token 팀 만들기 초대 코드", screen: "share", run: () => go("share") },
     { label: "대화 원본 백업", hint: "백업", screen: "backup", run: () => go("backup") },

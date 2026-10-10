@@ -1,9 +1,9 @@
 // Setup can choose which folders' conversations this computer's own server takes:
 // only some folders, or every folder but some, so folders made later are taken
 // too. What matters: a session outside the choice never reaches the own server, a
-// ChatGPT import is never held back by it, a target keeps its own folders, and
-// `backfill` sends the past sessions of the chosen folders once and only once. A
-// conversation no person took part in goes by 자동 실행 대화도 수집 alone.
+// ChatGPT import is never held back by it, and a target keeps its own folders. A
+// conversation no person took part in goes by 자동 실행 대화도 수집 alone. The past
+// conversations of the chosen folders go in through 지난 대화 (past.test.mjs).
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -198,6 +198,12 @@ test("the folder choice is read from config, travels in the environment, and nev
   assert.equal(outsideCollectFolders("/srv/x", nested, posix), false, "outside every named folder the rest decides");
   assert.equal(outsideCollectFolders("/w/a", { take: ["/w/a"], skip: ["/w/a"], rest: "take" }, posix), true, "a folder both taken and skipped is skipped");
   assert.equal(outsideCollectFolders("/anything", null, posix), false);
+  // A Windows folder, from a backup a Windows PC made, is a folder on any computer.
+  const windows = { take: [], skip: ["C:\\Users\\me\\old"], rest: "take" };
+  assert.equal(outsideCollectFolders("C:\\Users\\me\\old\\blog", windows, posix), true);
+  assert.equal(outsideCollectFolders("c:/users/ME/old", windows, posix), true, "spelled either way, in either case");
+  assert.equal(outsideCollectFolders("C:\\Users\\me\\older", windows, posix), false);
+  assert.equal(outsideCollectFolders("/w/b", windows, posix), false);
 
   assert.equal(collectAutomation(config), false, "자동 실행 대화도 수집 is off unless config says so");
   assert.equal(COLLECT_AUTOMATION_ENV in env, false);
@@ -234,6 +240,11 @@ test("setup takes some folders, skips some, says what the rest does, or takes ev
   assert.equal(wrong.body.ok, false);
   const mixed = await cli(["setup", "plan", "--all-folders", "--skip-folders", install.side], install.env);
   assert.equal(mixed.body.ok, false, "every folder and some skipped cannot both be meant");
+
+  // A Windows folder the backup store brought in is one to name here too; it is never this computer's to look for.
+  const foreign = await cli(["setup", "plan", "--skip-folders", "C:\\Users\\me\\old"], install.env);
+  assert.deepEqual(foreign.body.config.collect, { take: [], skip: ["C:\\Users\\me\\old"], rest: "take" }, foreign.text);
+  assert.equal(foreign.body.warnings.some((warning) => warning.includes("C:\\")), false);
 
   const relative = await cli(["setup", "plan", "--take-folders", "work/team", "--rest-folders", "skip"], install.env);
   assert.equal(relative.body.ok, false);
@@ -356,103 +367,4 @@ test("a session with nothing said in it makes no conversation, and its folder st
   }
   const made = primary.requests.filter((entry) => entry.method === "POST" && /\/sessions$/.test(entry.path)).map((entry) => entry.body.id);
   assert.deepEqual([...new Set(made)], ["claude-inside"], "only the session with a conversation was made on the server");
-});
-
-test("backfill sends the past sessions of the chosen folders to the own server, once", async (t) => {
-  const primary = await fakeHoncho();
-  t.after(() => primary.server.close());
-  const install = await makeInstall(t, primary, { collect: ({ team }) => ({ take: [team], rest: "skip" }) });
-  await writeSessions(install);
-  // A program's conversation in the chosen folder waits for 자동 실행 대화도 수집.
-  const cron = path.join(install.home, ".codex", "sessions", "2026", "09", "19", "rollout-cron.jsonl");
-  await writeCodex(cron, { sessionId: "cron", cwd: install.team, turns: [["user", "Automation: check the build"], ["assistant", "build is green"]] });
-
-  const before = await cli(["backfill", "status"], install.env);
-  assert.equal(before.body.ok, true);
-  assert.equal(before.body.lastRun, null);
-
-  const run = await cli(["backfill", "run"], install.env);
-  assert.equal(run.body.ok, true, run.text);
-  assert.equal(run.body.sent_sessions, 2);
-  assert.equal(run.body.outside_folders, 2);
-  assert.deepEqual(primary.sessionIds(), ["claude-inside", "codex-codex-inside"]);
-
-  const writes = primary.writes();
-  const again = await cli(["backfill", "run"], install.env);
-  assert.equal(again.body.considered, 0, "nothing new to look at");
-  assert.equal(primary.writes(), writes, "nothing sent twice");
-
-  const after = await cli(["backfill", "status"], install.env);
-  assert.equal(after.body.running, null);
-  assert.ok(after.body.lastRun.finishedAt);
-  assert.equal(after.body.lastRun.considered, 0);
-
-  // A session added later goes in a run started in the background.
-  const late = path.join(install.home, ".claude", "projects", "team", "late.jsonl");
-  await writeClaude(late, { sessionId: "late", cwd: install.team, turns: [["user", "late question"], ["assistant", "late answer"]] });
-  const started = await cli(["backfill", "start"], install.env);
-  assert.equal(started.body.ok, true, started.text);
-  assert.equal(started.body.started, true);
-  const deadline = Date.now() + 20_000;
-  while (!primary.sessionIds().includes("claude-late") && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  assert.ok(primary.sessionIds().includes("claude-late"), "the background run sent the new session");
-  while ((await cli(["backfill", "status"], install.env)).body.running && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-
-  // Turning 자동 실행 대화도 수집 on looks again at what was left out, as the app does after 적용.
-  const on = await cli(["setup", "apply", "--automation", "take"], install.env);
-  assert.equal(on.body.ok, true, on.text);
-  const automated = await cli(["backfill", "run"], install.env);
-  assert.equal(automated.body.considered, 2, "the two left out, and only those");
-  assert.equal(automated.body.sent_sessions, 1);
-  assert.equal(automated.body.outside_folders, 1, "the person's session outside the chosen folder stays out");
-  assert.ok(primary.sessionIds().includes("codex-cron"));
-});
-
-test("a backfill asked to stop ends after the session it is sending, and the next run carries on", async (t) => {
-  const primary = await fakeHoncho();
-  t.after(() => primary.server.close());
-  const install = await makeInstall(t, primary, { collect: ({ team }) => ({ take: [team], rest: "skip" }) });
-  await writeSessions(install);
-  const stopFile = path.join(install.dataDir, "state", "backfill.stop");
-  const statusFile = path.join(install.dataDir, "state", "backfill-status.json");
-
-  const idle = await cli(["backfill", "stop"], install.env);
-  assert.deepEqual(idle.body, { ok: true, stopping: false }, "nothing runs, so nothing is asked");
-
-  // `backfill stop` leaves the file while a run goes; here the first session's
-  // messages leave it, so the run is caught between two sessions.
-  await fsp.mkdir(path.dirname(stopFile), { recursive: true });
-  await fsp.writeFile(stopFile, "{}");
-  primary.onWrite = () => fsp.writeFile(stopFile, "{}");
-  const stopped = await cli(["backfill", "run"], install.env);
-  assert.equal(stopped.body.ok, true, stopped.text);
-  assert.equal(stopped.body.cancelled, true);
-  assert.equal(stopped.body.sent_sessions, 1, "a stop left before the run began did not end it");
-  assert.equal(stopped.body.remaining, 2);
-  const status = await cli(["backfill", "status"], install.env);
-  assert.equal(status.body.running, null);
-  assert.equal(status.body.stopping, false);
-  assert.equal(status.body.lastRun.cancelled, true);
-  await assert.rejects(fsp.access(stopFile), "the run takes its stop away when it ends");
-
-  primary.onWrite = null;
-  const writes = primary.writes();
-  const rest = await cli(["backfill", "run"], install.env);
-  assert.equal(rest.body.cancelled, undefined);
-  assert.equal(rest.body.considered, 2, "the next run looks only at what the stopped one left");
-  assert.deepEqual(primary.sessionIds(), ["claude-inside", "codex-codex-inside"]);
-  assert.ok(primary.writes() > writes);
-
-  // While a run goes, stop leaves the file and status says it is stopping.
-  await fsp.writeFile(statusFile, JSON.stringify({ version: 1, running: { pid: process.pid, considered: 3, examined: 1 }, lastRun: null }));
-  const asked = await cli(["backfill", "stop"], install.env);
-  assert.equal(asked.body.stopping, true, asked.text);
-  await fsp.access(stopFile);
-  const going = await cli(["backfill", "status"], install.env);
-  assert.equal(going.body.running.pid, process.pid);
-  assert.equal(going.body.stopping, true);
 });

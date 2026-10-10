@@ -7,9 +7,11 @@
 // have a server, the company server they may also collect into, and the teammates
 // whose memory they may ask. Every way ends with 적용; the window then shows each
 // thing it does (적용 중) and what is left to do (할 일). Where the conversations go,
-// from which agents and which folders, are lib/collect.js's steps, the same ones
-// 기억 설정 → 대화 수집 → 수정 opens.
-import { cli, gateway, post } from "../lib/api.js";
+// from which agents, from where the past ones come and which folders, are
+// lib/collect.js's and lib/past.js's steps, the same ones 기억 설정 → 대화 수집 →
+// 수정 opens. The past conversations go in before any new one, in the order they
+// were started, and keep going in after the window closes.
+import { gateway, get, post } from "../lib/api.js";
 import { backendAccounts } from "../lib/accounts.js";
 import { h, clear, copyText } from "../lib/dom.js";
 import { number } from "../lib/format.js";
@@ -21,6 +23,7 @@ import {
   applySetup,
   collectDraft,
   detectAgents,
+  draftServer,
   explainWarning,
   loadProjects,
   NEW_SERVER_SUB,
@@ -28,6 +31,7 @@ import {
   serverStep,
   setupBody,
 } from "../lib/collect.js";
+import { backupToStore, dayText, HELD, holdNewTurns, pastStep, pastToPut, periodText, planPast, releaseNewTurns, runLine, startPast, storeOf } from "../lib/past.js";
 import { gatewayLogin } from "../lib/login.js";
 import { GOOGLE_ADD_ACCOUNT, loginTab, registerWith, sameAccountAgain, sendRequest, switchAccount, teamDirectory, teamHostOf, teamLogin, teamMe } from "../lib/team.js";
 import { app, loadContext, refreshStatus, savePrefs } from "../lib/state.js";
@@ -39,7 +43,7 @@ const STARTS = [
   ["make", "새 팀 만들기", "팀 관리자가 처음 한 번 합니다.", "만들기"],
   ["solo", "혼자 쓰기", "로그인과 팀 없이 내 컴퓨터에서만 씁니다.", "시작"],
 ];
-const LABELS = { team: "팀 주소", make: "팀 만들기", login: "로그인", server: "서버", model: "모델", agents: "에이전트", projects: "프로젝트", mates: "팀원" };
+const LABELS = { team: "팀 주소", make: "팀 만들기", login: "로그인", server: "서버", model: "모델", agents: "에이전트", past: "지난 대화", projects: "프로젝트", mates: "팀원" };
 const BACKENDS = [["codex", "ChatGPT"], ["claude", "Claude"]];
 const TODO_BELL = { title: "알림", text: "팀원이 승인하면 오른쪽 위 종에 알림이 뜹니다. 그 알림에서 연결을 누르세요." };
 // The Cloudflare API token 새 팀 만들기 needs, in the words of Cloudflare's token screen.
@@ -121,7 +125,7 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
     ...(inTeam() ? ["login"] : []),
     "server",
     ...(needsModel() ? ["model"] : []),
-    ...(state.draft.server === "none" ? [] : ["agents", "projects"]),
+    ...(state.draft.server === "none" ? [] : ["agents", "past", "projects"]),
     ...(inTeam() && state.path !== "make" ? ["mates"] : []),
   ];
 
@@ -438,6 +442,12 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
     };
   }
 
+  /** The server the projects step counts against: none yet for one this setup makes, a team's by its address. */
+  const overviewServer = () => draftServer(state.draft, app.context, {
+    newServer: needsModel(),
+    url: state.draft.server === "found" ? `https://${myServer().host}` : null,
+  });
+
   function buildStep(key) {
     const context = app.context;
     if (key === "team") return teamStep();
@@ -445,8 +455,9 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
     if (key === "login") return loginStep();
     if (key === "model") return modelStep();
     if (key === "mates") return matesStep();
-    if (key === "agents") return agentsStep(state.draft, context, { chatgpt: true });
-    if (key === "projects") return projectsStep(state.draft, context);
+    if (key === "agents") return agentsStep(state.draft);
+    if (key === "past") return pastStep(state.draft, context, { newServer: needsModel() });
+    if (key === "projects") return projectsStep(state.draft, context, { server: overviewServer() });
     if (inTeam()) return teamServerStep();
     return serverStep(state.draft, context, { choices: ["here", "remote"], onPick: () => frame?.() });
   }
@@ -498,6 +509,8 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
     }
     const last = () => at === stepKeys().length - 1;
     const label = () => step.next || (last() ? "적용" : "다음");
+    // A step still reading (지난 대화) keeps 다음 until it is done, and says so beside it.
+    const waiting = h("span", { class: "foot-hint" });
     const primary = button(label(), { kind: "primary", onClick: async (event) => {
       const problemText = step.check();
       if (problemText) { say(notice("warn", problemText)); return; }
@@ -530,7 +543,11 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
       win.steps(stepper(keys.map((key) => LABELS[key]), at));
       primary.querySelector("span").textContent = label();
     };
-    win.foot(back, primary);
+    step.watch?.(({ blocked, hint }) => {
+      primary.disabled = blocked;
+      waiting.textContent = hint || "";
+    });
+    win.foot(back, [waiting, primary]);
   }
 
   // ── 적용 중: each thing the setup does, one row each ──
@@ -562,9 +579,14 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
     if (draft.server !== "none") {
       tasks.push({ label: "에이전트" });
       const agents = Object.keys(AGENTS).filter((name) => draft.agents?.has(name));
-      agents.forEach((name, index) => tasks.push({ title: `${AGENTS[name]}에 플러그인 설치`, run: index ? afterApply : applyNow }));
-      if (draft.chatgpt) tasks.push({ title: "ChatGPT 기록 가져오기", sub: `${draft.chatgpt.name} · ${(draft.chatgpt.size / 1024 / 1024).toFixed(1)}MB`, run: importChatgpt });
-      tasks.push({ title: "지난 대화 수집 시작", run: backfill });
+      const held = pastToPut(draft) ? HELD : null;
+      agents.forEach((name, index) => tasks.push({ title: `${AGENTS[name]}에 플러그인 설치`, sub: held, run: index ? afterApply : applyNow }));
+      tasks.push({ label: "지난 대화" });
+      if (storeOf(draft.past) && draft.past.backup) tasks.push({ title: "백업 켜기", run: backupOn });
+      tasks.push({ title: "시작한 시각순으로 줄 세우기", run: linePast });
+      if (draft.past.totals?.dupes) tasks.push({ title: "겹치는 대화 빼기", run: dupesOut });
+      if (!install) tasks.push({ title: "서버에 있는 대화 빼기", run: serverOut });
+      tasks.push({ title: "시간순으로 쌓기 시작", run: startFill });
     }
     const mates = matesChosen();
     if (mates.length) {
@@ -658,6 +680,8 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
   }
 
   async function applyNow() {
+    // From here new turns wait, so none goes in before the past ones (lib/past.js).
+    if (pastToPut(state.draft)) await holdNewTurns();
     const body = setupBody(state.draft, app.context);
     if (state.draft.server === "found") body.honchoUrl = `https://${myServer().host}`;
     const outcome = await applySetup(body);
@@ -679,17 +703,41 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
     if (!state.applied) throw new Error("앞 단계를 먼저 마쳐야 합니다.");
   }
 
-  async function importChatgpt(task) {
-    const response = await fetch("/api/import/chatgpt", { method: "POST", headers: { "content-type": "application/json" }, body: state.draft.chatgpt });
-    const payload = await response.json().catch(() => ({ ok: false, error: "결과를 읽지 못했습니다." }));
-    if (!payload.ok) throw new Error(payload.error || "가져오지 못했습니다.");
-    savePrefs({ chatgptImport: { at: new Date().toISOString(), conversations: payload.conversations ?? 0, newMessages: payload.new_messages ?? 0 } });
-    task.sub = `대화 ${number(payload.imported_sessions ?? 0)}개를 넣었습니다.`;
+  // ── 지난 대화: the backup, the order, what is left out, and the start ──
+
+  async function backupOn(task) {
+    task.sub = await backupToStore(state.draft);
   }
 
-  async function backfill(task) {
-    await cli("/api/backfill/start", {});
-    task.sub = "뒤에서 오래된 대화부터 보냅니다. 대시보드에서 남은 수를 봅니다.";
+  async function linePast(task) {
+    state.plan = await planPast(state.draft);
+    const { considered = 0, total = 0, first, last } = state.plan;
+    task.sub = `${number(considered)}개${total ? ` · ${periodText(first, last)}` : ""}`;
+  }
+
+  async function dupesOut(task) {
+    task.sub = `두 곳에 있는 같은 대화 ${number(state.plan?.dupes || 0)}개는 한 번만 넣습니다.`;
+  }
+
+  async function serverOut(task) {
+    const there = Number(state.plan?.onServer || 0) + Number(state.plan?.already || 0);
+    task.sub = there ? `${number(there)}개는 내 서버에 이미 있습니다.` : "내 서버에 이미 있는 대화가 없습니다.";
+  }
+
+  async function startFill(task) {
+    const plan = state.plan;
+    if (!plan?.total) {
+      // Nothing to put in: the new turns held for them go now.
+      await releaseNewTurns();
+      task.sub = "새로 넣을 대화가 없습니다.";
+      return;
+    }
+    await startPast();
+    state.filling = true;
+    // An empty server takes them all from the oldest; one with conversations, what it lacks.
+    task.sub = !(Number(plan.onServer || 0) + Number(plan.already || 0))
+      ? `${dayText(plan.first)} 대화부터`
+      : `${number(plan.total)}개${plan.late && !plan.skippedLate ? ` · 오래된 ${number(plan.late)}개 포함` : ""}`;
   }
 
   async function requestMates(task) {
@@ -767,8 +815,39 @@ export function openSetup({ firstRun, onDone, onCancel, team = "" }) {
     win.body(
       h("h3", {}, waiting ? "승인 기다리는 중" : items.length ? `${agentsOnly ? "에이전트에서 할 일" : "할 일"} ${items.length}개` : "다 됐습니다"),
       chatOnly && names.length ? h("p", { class: "lead" }, `${joined(names)}에게 chat 요청을 보냈습니다.`) : null,
-      items.length ? todoList(items) : h("p", { class: "lead" }, "이제 대화가 끝날 때마다 기억 서버에 쌓입니다."));
+      items.length ? todoList(items) : h("p", { class: "lead" }, "이제 대화가 끝날 때마다 기억 서버에 쌓입니다."),
+      state.filling ? fillJob() : null);
     win.foot(null, button(next[0], { kind: "primary", onClick: () => { win.close("done"); onDone?.(next[1]); } }));
+  }
+
+  /** 지난 대화 쌓는 중: how far the run got, asked again while the window shows it. */
+  function fillJob() {
+    const count = h("span", { class: "muted" });
+    const bar = h("span", { style: { width: "0%" } });
+    const line = h("div", { class: "s" }, "창을 닫아도 계속 쌓습니다.");
+    const head = h("div", { class: "job-h" }, spinner(), h("b", {}, "지난 대화 쌓는 중"), h("span", { class: "sp" }), count);
+    const box = h("div", { class: "job" }, head, h("div", { class: "bar run" }, bar), line);
+    const look = async () => {
+      if (!box.isConnected && box.dataset.shown) return;
+      box.dataset.shown = "1";
+      const past = (await get("/api/app/flow").catch(() => null))?.past || null;
+      const running = past?.running;
+      if (running) {
+        const percent = running.total ? Math.max(1, Math.floor((running.done / running.total) * 100)) : 0;
+        count.textContent = running.total !== null && running.total !== undefined ? `${number(running.done || 0)} / ${number(running.total)}` : "";
+        bar.style.width = `${percent}%`;
+        line.textContent = `${running.month ? `${runLine({ month: running.month })} 쌓음 · ` : ""}창을 닫아도 계속 쌓습니다.`;
+      } else if (past?.last?.finishedAt) {
+        clear(head, h("span", { class: "ic ok" }, "✓"), h("b", {}, "지난 대화를 다 쌓았습니다"), h("span", { class: "sp" }), h("span", { class: "muted" }, `${number(past.last.sent || 0)} / ${number(past.last.total || 0)}`));
+        bar.style.width = "100%";
+        bar.parentElement.classList.remove("run");
+        line.textContent = past.last.held?.conversations ? `그동안 생긴 새 대화 ${number(past.last.held.conversations)}개도 쌓았습니다.` : "";
+        return;
+      }
+      setTimeout(look, 2000);
+    };
+    setTimeout(look, 300);
+    return box;
   }
 
   /**

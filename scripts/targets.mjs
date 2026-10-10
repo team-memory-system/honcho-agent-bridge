@@ -58,22 +58,32 @@ function caseInsensitive(platform) {
   return platform === "win32" || platform === "darwin";
 }
 
+/** A Windows folder (C:\…), which a backup made on a Windows PC brings to any computer. */
+const DRIVE_FOLDER = /^[A-Za-z]:[\\/]/;
+
+/** Whether a folder is spelled the Windows way: always on Windows, a drive folder elsewhere. */
+function windowsFolder(value, platform) {
+  return platform === "win32" || DRIVE_FOLDER.test(value);
+}
+
 /**
  * One spelling per folder: `~` expanded, `.`/`..` and repeated separators
  * resolved, no trailing separator (except for a root), and lower case where the
  * file system ignores case. Relative paths are not folders a session can be in.
+ * A Windows folder read on another system keeps Windows' rules.
  */
 export function normalizeFolder(value, { platform = process.platform, home = os.homedir() } = {}) {
-  const pathApi = platform === "win32" ? path.win32 : path.posix;
   let text = String(value || "").trim();
   if (!text) return "";
   text = expandHome(text, home);
-  if (platform === "win32") text = text.replace(/\//g, "\\");
+  const windows = windowsFolder(text, platform);
+  const pathApi = windows ? path.win32 : path.posix;
+  if (windows) text = text.replace(/\//g, "\\");
   if (!pathApi.isAbsolute(text)) return "";
   let normalized = pathApi.resolve(text);
   const root = pathApi.parse(normalized).root;
   while (normalized.length > root.length && /[\\/]$/.test(normalized)) normalized = normalized.slice(0, -1);
-  return caseInsensitive(platform) ? normalized.toLowerCase() : normalized;
+  return caseInsensitive(platform) || windows ? normalized.toLowerCase() : normalized;
 }
 
 /** Whether `inner` is `outer` or inside it, both normalized: /a/b/c is inside /a/b, /a/bc is not. */
@@ -100,7 +110,6 @@ function realpathOrNull(value) {
  */
 export function folderMatches(cwd, folders, { platform = process.platform, home = os.homedir(), resolveLinks = true } = {}) {
   if (typeof cwd !== "string" || !cwd.trim() || !Array.isArray(folders) || folders.length === 0) return false;
-  const sep = platform === "win32" ? "\\" : "/";
   const options = { platform, home };
   const spellings = (value) => {
     const values = new Set([normalizeFolder(value, options)]);
@@ -114,7 +123,7 @@ export function folderMatches(cwd, folders, { platform = process.platform, home 
   const cwdSpellings = spellings(cwd);
   return folders.some((folder) => {
     const folderSpellings = spellings(folder);
-    return cwdSpellings.some((inner) => folderSpellings.some((outer) => within(inner, outer, sep)));
+    return cwdSpellings.some((inner) => folderSpellings.some((outer) => within(inner, outer, windowsFolder(outer, platform) ? "\\" : "/")));
   });
 }
 

@@ -1231,6 +1231,7 @@ button.tw:hover { background: var(--sunk); color: var(--ink); }
 .pr .tl b { font-weight: 600; }
 .pr .tl .th { margin-left: 8px; color: var(--ink-3); font-size: 12.5px; }
 .pr .tl .own { color: var(--ink-2); }
+.pr .tl .tag { margin-left: 8px; }
 .row2 { display: flex; align-items: center; gap: 12px; margin-top: 12px; font-size: 13.5px; }
 .row2 input[type="checkbox"] { margin: 0; }
 .row2.note { color: var(--ink-2); }
@@ -1281,6 +1282,44 @@ button.tw:hover { background: var(--sunk); color: var(--ink); }
 .swrow .s { margin-top: 2px; color: var(--ink-3); font-size: 12.5px; }
 .file { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 12px 14px; border: 1px dashed var(--line-2); border-radius: 10px; }
 .file input[type="file"] { display: none; }
+
+/* 지난 대화 (lib/past.js): where the past conversations come from, how far the
+   reading got, the files chosen, and what would go in. */
+.opt.locked input[type="checkbox"]:disabled:checked { border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2)); background: color-mix(in srgb, var(--accent) 45%, var(--sunk)); }
+.store-where { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.store-where .input { flex: 1 1 180px; min-width: 0; height: 32px; font-size: 13px; }
+.store-where .select { flex: 0 1 150px; width: auto; height: 32px; font-size: 13px; background-position: calc(100% - 14px) 13px, calc(100% - 10px) 13px; }
+.store-where .segmented button { height: 26px; }
+.readline { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; color: var(--ink-2); font-size: 13px; }
+.readline .notice { flex: 1 1 100%; }
+.minibar { flex: 1 1 80px; height: 5px; min-width: 60px; overflow: hidden; border-radius: 3px; background: var(--sunk); }
+.minibar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.4s ease; }
+.files { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.fileline { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--raised); font-size: 13px; }
+.fileline .mono { min-width: 0; overflow-wrap: anywhere; }
+.fileline .muted { font-size: 12.5px; }
+.files-more { margin-top: 8px; }
+.files + .notice { margin-top: 8px; }
+.sum { margin-top: 14px; padding: 11px 14px; border-radius: 10px; background: var(--sunk-soft); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.sum b { font-weight: 600; }
+.sum .r { margin-top: 3px; color: var(--ink-2); font-size: 13px; }
+.sum + .notice { margin-top: 10px; }
+.notice .choice { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 9px; font-weight: 500; }
+.notice .choice label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.notice .choice input[type="radio"] { appearance: none; position: relative; width: 16px; height: 16px; margin: 0; flex: none; border: 1.5px solid var(--line-2); border-radius: 50%; background: var(--raised); cursor: pointer; }
+.notice .choice input[type="radio"]:checked { border: 5px solid var(--accent); }
+.notice .hint { margin-top: 9px; font-size: 12.5px; }
+.foot-hint { color: var(--ink-3); font-size: 12.5px; }
+.job { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.job-h { display: flex; align-items: center; gap: 10px; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.job .s { margin-top: 6px; color: var(--ink-3); font-size: 12.5px; }
+.bar.run span { background: var(--accent); }
+.qnote { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--ink-2); font-size: 13px; }
+.mt-wrap { overflow-x: auto; }
+table.mt { width: 100%; margin: 6px 0 4px; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+table.mt th { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); color: var(--ink-3); font-size: 12.5px; font-weight: 500; text-align: left; white-space: nowrap; }
+table.mt td { padding: 9px 10px 9px 0; border-bottom: 1px solid var(--line-soft); }
+table.mt .num { padding-right: 0; padding-left: 10px; text-align: right; }
 
 /* 대시보드: servers in a table, Honcho's progress, then three tiles. */
 h2.sec { margin: 0 0 10px; color: var(--ink-2); font-size: 13px; font-weight: 600; }

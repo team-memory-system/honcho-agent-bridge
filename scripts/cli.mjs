@@ -75,18 +75,17 @@ import {
   TARGET_SECRET_ENV,
   configuredTargets,
   folderMatches,
-  outsideCollectFolders,
   targetAccess,
   targetAgents,
   targetEnvironment,
   targetPaths,
   targetSummary,
   targetWorkspace,
-  withoutTargetFilter,
 } from "./targets.mjs";
 import { dockerPathEnvironment, resolveDockerCli } from "./runtime-installer.mjs";
 import { checkPrereqs, FEATURES, parseFeatures } from "./prereqs.mjs";
 import { backupCommand } from "./backup.mjs";
+import { pastCommand } from "./past.mjs";
 import { transcriptFiles } from "./projects.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -1141,7 +1140,11 @@ function targetUrlIssues(value) {
   return serverUrlIssues(value);
 }
 
-/** `--folders a,b`: absolute folders (or `~/...`), resolved, one spelling each. */
+/**
+ * `--folders a,b`: absolute folders (or `~/...`), resolved, one spelling each. A
+ * Windows folder (C:\...) is taken on any system: past conversations from a backup
+ * a Windows PC made ran there.
+ */
 function parseFolders(value, flag = "--folders") {
   const issues = [];
   const warnings = [];
@@ -1151,16 +1154,17 @@ function parseFolders(value, flag = "--folders") {
     let expanded = raw;
     if (raw === "~") expanded = userHome();
     else if (raw.startsWith("~/") || raw.startsWith("~\\")) expanded = path.join(userHome(), raw.slice(2));
-    if (!path.isAbsolute(expanded)) {
+    const pathApi = /^[A-Za-z]:[\\/]/.test(raw) ? path.win32 : path;
+    if (!pathApi.isAbsolute(expanded)) {
       issues.push(`${raw} is not an absolute folder; give the whole path, or start it with ~/`);
       continue;
     }
-    let folder = path.resolve(expanded);
-    const root = path.parse(folder).root;
+    let folder = pathApi.resolve(expanded);
+    const root = pathApi.parse(folder).root;
     while (folder.length > root.length && /[\\/]$/.test(folder)) folder = folder.slice(0, -1);
     if (folders.some((existing) => folderMatches(folder, [existing], { resolveLinks: false }) && folderMatches(existing, [folder], { resolveLinks: false }))) continue;
     folders.push(folder);
-    if (!fs.existsSync(folder)) warnings.push(`${folder} does not exist on this computer; conversations there are sent once it does`);
+    if (pathApi === path && !fs.existsSync(folder)) warnings.push(`${folder} does not exist on this computer; conversations there are sent once it does`);
   }
   if (!folders.length && !issues.length) issues.push(`${flag} needs at least one folder`);
   return { folders, issues, warnings };
@@ -1472,10 +1476,9 @@ function runCollector(provider, transcript, env) {
  * `accepts(parsed)` and sent with `envFor(provider)`. What became of each transcript
  * is kept in `progressPath` with its size and time, so a run carries on where the
  * last one stopped; `filterKey` names the folders it was decided for, and a session
- * left out is looked at again once they change. `onProgress` hears each step, and
- * `shouldStop()` is asked before each session: true ends the run there.
+ * left out is looked at again once they change.
  */
-async function backfillSessions({ config, agents, sinceMs, limit, accepts, envFor, progressPath, filterKey, onProgress, shouldStop }) {
+async function backfillSessions({ config, agents, sinceMs, limit, accepts, envFor, progressPath, filterKey }) {
   const progress = await readJson(progressPath, null);
   const done = progress && typeof progress.done === "object" && progress.done ? progress.done : {};
   if (progress?.folders !== filterKey) {
@@ -1502,15 +1505,7 @@ async function backfillSessions({ config, agents, sinceMs, limit, accepts, envFo
   let examined = 0;
   let consecutiveFailures = 0;
   let stoppedEarly = false;
-  let cancelled = false;
-  const tell = () => onProgress?.({ considered: candidates.length, examined, remaining: candidates.length - examined, ...summary });
-  await tell();
   for (const candidate of candidates.slice(0, limit)) {
-    // Asked to stop: the session sent last is in, and the rest wait for the next run.
-    if (await shouldStop?.()) {
-      cancelled = true;
-      break;
-    }
     examined += 1;
     let parsed;
     try {
@@ -1535,7 +1530,6 @@ async function backfillSessions({ config, agents, sinceMs, limit, accepts, envFo
       summary.new_messages += Number(result.new_messages || 0);
       done[candidate.key] = { mtimeMs: candidate.mtimeMs, size: candidate.size, outcome: result.skipped ? "outside" : "sent", at: new Date().toISOString() };
       await saveProgress();
-      await tell();
     } else {
       summary.failed += 1;
       consecutiveFailures += 1;
@@ -1554,7 +1548,6 @@ async function backfillSessions({ config, agents, sinceMs, limit, accepts, envFo
     remaining: candidates.length - examined,
     ...summary,
     ...(stoppedEarly ? { stopped: `stopped after ${BACKFILL_MAX_CONSECUTIVE_FAILURES} failures in a row; run it again once the server answers` } : {}),
-    ...(cancelled ? { cancelled: true } : {}),
     ...(failures.length ? { failures: failures.slice(0, 20) } : {}),
   };
 }
@@ -1592,138 +1585,6 @@ async function targetBackfill(id, options = {}) {
     filterKey: foldersKey(target.folders),
   });
   return { ok: result.failed === 0, id, url: publicUrl(target.honcho.baseUrl), since: options.since || null, limit, ...result };
-}
-
-// ── Past conversations to this computer's own server ─────
-//
-// The hook sends a session whole on its next turn, so a session never opened again
-// never reaches the server by itself. `backfill` sends them: every past Claude Code
-// and Codex session in the folders setup chose (config.json `collect`), oldest first,
-// deduped against what the collector already sent. `backfill start` runs it in the
-// background, which is what first setup does once it has applied.
-
-function ownBackfillPaths(config) {
-  const { dataDir } = installPaths(config);
-  return {
-    progress: path.join(dataDir, "state", "backfill.json"),
-    status: path.join(dataDir, "state", "backfill-status.json"),
-    lock: path.join(dataDir, "state", "backfill.lock"),
-    // Left by `backfill stop`; the run looks for it before each session.
-    stop: path.join(dataDir, "state", "backfill.stop"),
-  };
-}
-
-function fileThere(filePath) {
-  return fsp.access(filePath).then(() => true, () => false);
-}
-
-function processAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
-}
-
-async function ownBackfillRun(options = {}) {
-  const issues = [];
-  const since = parseSince(options.since);
-  issues.push(...since.issues);
-  // Unlike a target's, this one runs in the background and goes through them all.
-  const limit = backfillLimit(options.limit, Number.POSITIVE_INFINITY);
-  if (limit === null) issues.push(`--limit takes a whole number from 1 to ${BACKFILL_MAX_LIMIT}`);
-  const base = await collectingConfiguration();
-  if (base.error) issues.push(base.error);
-  if (issues.length) return { ok: false, issues };
-
-  const { config } = base;
-  const paths = ownBackfillPaths(config);
-  const lock = await acquireFileLock(paths.lock, { staleMs: 24 * 3_600_000, reclaimDeadImmediately: true });
-  if (!lock) return { ok: false, busy: true, error: "another backfill is still running" };
-  // A stop asked of an earlier run does not end this one.
-  await fsp.rm(paths.stop, { force: true });
-  const startedAt = new Date().toISOString();
-  const writeStatus = (fields) => writeJsonAtomic(paths.status, { version: 1, ...fields });
-  try {
-    const filter = collectFolders(config);
-    const automation = collectAutomation(config);
-    let lastWrite = 0;
-    const result = await backfillSessions({
-      config,
-      agents: config.agents || {},
-      sinceMs: since.sinceMs,
-      limit,
-      // A conversation no person took part in goes by 자동 실행 대화도 수집 alone, as in the collector.
-      accepts: (parsed) => (automationOnly(parsed.provider, parsed) ? automation : !outsideCollectFolders(parsed.metadata?.cwd, filter)),
-      envFor: (provider) => withoutTargetFilter({
-        ...process.env,
-        ...configEnvironment(config, provider),
-        HONCHO_AGENT_PROVIDER: provider,
-        HONCHO_AGENT_IMPORT_TRIGGER: "backfill",
-      }),
-      progressPath: paths.progress,
-      // Turning 자동 실행 대화도 수집 on looks again at what it left out.
-      filterKey: JSON.stringify(automation ? { ...(filter || {}), automation } : filter || {}),
-      shouldStop: () => fileThere(paths.stop),
-      // The screen reads how far it got; a write every few seconds is enough.
-      onProgress: async (progress) => {
-        if (Date.now() - lastWrite < 2_000) return;
-        lastWrite = Date.now();
-        await writeStatus({ running: { pid: process.pid, startedAt, ...progress } });
-      },
-    });
-    const finished = { ok: result.failed === 0, url: publicUrl(config.honcho.baseUrl), since: options.since || null, limit, ...result };
-    await writeStatus({ running: null, lastRun: { startedAt, finishedAt: new Date().toISOString(), ...finished } });
-    return finished;
-  } finally {
-    await fsp.rm(paths.stop, { force: true }).catch(() => {});
-    await releaseFileLock(lock);
-  }
-}
-
-/** Starts a backfill in the background and returns at once. */
-async function ownBackfillStart(options = {}) {
-  const base = await collectingConfiguration();
-  if (base.error) return { ok: false, error: base.error };
-  const since = parseSince(options.since);
-  if (since.issues.length) return { ok: false, issues: since.issues };
-  const status = await readJson(ownBackfillPaths(base.config).status, {});
-  if (status?.running && processAlive(status.running.pid)) return { ok: true, started: false, running: status.running };
-  const child = spawn(process.execPath, [path.join(SCRIPT_DIR, "cli.mjs"), "backfill", "run", ...(options.since ? ["--since", options.since] : [])], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-    env: process.env,
-  });
-  child.on("error", () => {});
-  child.unref();
-  return { ok: true, started: true, pid: child.pid };
-}
-
-/** Where the last backfill got: `running` while one goes, `lastRun` once it has finished. */
-async function ownBackfillStatus() {
-  const base = await collectingConfiguration();
-  if (base.error) return { ok: false, error: base.error };
-  const paths = ownBackfillPaths(base.config);
-  const status = await readJson(paths.status, {});
-  const running = status?.running && processAlive(status.running.pid) ? status.running : null;
-  return { ok: true, running, stopping: Boolean(running) && await fileThere(paths.stop), lastRun: status?.lastRun || null };
-}
-
-/**
- * Asks the running backfill to stop once the session it is sending is in. It ends
- * with `cancelled` in lastRun, and the next run carries on from there.
- */
-async function ownBackfillStop() {
-  const base = await collectingConfiguration();
-  if (base.error) return { ok: false, error: base.error };
-  const paths = ownBackfillPaths(base.config);
-  const status = await readJson(paths.status, {});
-  if (!(status?.running && processAlive(status.running.pid))) return { ok: true, stopping: false };
-  await writeJsonAtomic(paths.stop, { version: 1, askedAt: new Date().toISOString() });
-  return { ok: true, stopping: true, running: status.running };
 }
 
 async function targetCommand(args) {
@@ -1870,7 +1731,7 @@ function usage() {
       "host stop [--profile personal]",
       "gateway open",
       "setup plan|apply [--agents codex,claude] [--user-peer <id>] [--workspace <id>] [--honcho-url <url>] [--take-folders <dir,dir>] [--skip-folders <dir,dir>] [--rest-folders take|skip] [--all-folders] [--automation take|skip] [--data-dir <dir>] [--codex-root <dir>] (a server's API token in HONCHO_API_TOKEN; its Cloudflare Access service token in HONCHO_CF_ACCESS_CLIENT_ID, HONCHO_CF_ACCESS_CLIENT_SECRET)",
-      "backfill run|start|status|stop [--since YYYY-MM-DD] (past conversations of the collected folders to this computer's own server; start runs it in the background, stop ends it after the session it is sending)",
+      "past scan [--store <json>] | scan-status | overview [--honcho-url <url>] [--agents claude,codex] [--store <json>] [--chatgpt <id,id>] [--new-server] | plan [--store <json>] [--chatgpt <id,id>] [--late include|skip] | hold | start | retry | status | stop | chatgpt-add --file <export> | chatgpt-drop --id <id> (past conversations from this computer, the backup store and ChatGPT exports, into the own server in the order they started; new turns wait until they are in)",
       "bridge disconnect (removes the shared-bridge settings 0.3.28 and before saved)",
       "target list",
       "target add <id> --url <https://host> --folders <dir,dir> [--label <text>] [--workspace <id>] [--user-peer <id>] [--agents claude,codex] (its API token in HONCHO_TARGET_API_TOKEN; its Cloudflare Access service token in HONCHO_TARGET_CF_ACCESS_CLIENT_ID, HONCHO_TARGET_CF_ACCESS_CLIENT_SECRET)",
@@ -2129,13 +1990,9 @@ async function main() {
     return { ok: false, error: "The shared-bridge relay was removed: connect a teammate's memory with teammates connect <name> <host>; bridge disconnect removes the old settings" };
   }
   if (command === "target") return targetCommand(args);
-  if (command === "backfill") {
-    const subcommand = args.shift() || "status";
-    const options = parseOptions(args);
-    if (subcommand === "run") return ownBackfillRun(options);
-    if (subcommand === "start") return ownBackfillStart(options);
-    if (subcommand === "status") return ownBackfillStatus();
-    if (subcommand === "stop") return ownBackfillStop();
+  if (command === "past") {
+    const action = args.shift() || "status";
+    return pastCommand(action, parseOptions(args));
   }
   if (command === "teammates") return teammatesCommand(args);
   if (command === "team") return teamCommand(args);
